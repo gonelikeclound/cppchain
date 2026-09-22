@@ -1,0 +1,28 @@
+# 构建产物
+build/
+cmake-build-*/
+
+# 编译中间物
+*.o
+*.a
+*.so
+*.so.*
+*.lo
+*.lib
+*.obj
+*.exe
+*.dll
+
+# CMake
+CMakeUserPresets.json
+compile_commands.json
+
+# 编辑器/系统
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# 本地工具链缓存(若克隆到别的环境)
+/opt_cache/
