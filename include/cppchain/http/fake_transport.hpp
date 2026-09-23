@@ -20,6 +20,7 @@ class FakeTransport final : public Transport {
     long status = 200;
     std::vector<std::string> chunks;  // 依次投递的响应字节
     std::string error;                // 非空 → 走 on_error
+    bool timeout = false;             // error 是否应归类为超时
     int delay_ms = 0;                 // >0 → 后台线程分片延迟投递（用于测试取消/异步）
   };
 
@@ -49,7 +50,7 @@ class FakeTransport final : public Transport {
     pause();
     if (!alive()) return;
     if (!s.error.empty()) {
-      if (cbs.on_error) cbs.on_error(s.error);
+      if (cbs.on_error) cbs.on_error(HttpError{s.error, s.timeout});
       return;
     }
     if (cbs.on_status) cbs.on_status(s.status);

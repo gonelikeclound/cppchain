@@ -13,7 +13,7 @@
         "CMAKE_CXX_FLAGS": "-std=c++26 -Wall -Wextra -Wpedantic",
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CPPCHAIN_BUILD_HTTP": "OFF",
+        "CPPCHAIN_BUILD_HTTP": "ON",
         "CPPCHAIN_BUILD_TESTS": "ON"
       }
     }

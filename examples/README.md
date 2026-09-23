@@ -11,12 +11,14 @@
 | `messages_stream_chunk` | 流式帧按序 `operator+` 合并；args 分片累积；`finalize_chunk` 收敛 | `AIMessageChunk.__add__` / `_merge_tool_call_chunks` |
 | `chat_invoke` | M2：同步 `invoke` / 协程 `co_await invoke_async` / 错误是常态（expected）/ 实际请求形状 | `model.invoke` / `await model.ainvoke` |
 | `chat_stream` | M2：同步流式迭代、回调式 `stream_async`（delta/tool args 分片）、**中途取消后不再回调** | `model.stream` / 回调式流 + 取消 |
+| `chat_live` | **真机联调**（DeepSeek）：流式首字延迟、tools wire 通道、`deepseek-reasoner` 推理内容映射 | 真实 provider 端到端 |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
 >
-> M2 的 `chat_*` demo 默认用 **FakeTransport**（脚本化 SSE 帧）离线运行，不需要网络与 API key；
-> 接真实端点（DeepSeek）的 `chat_live` 随 curl_multi 传输一起加入。
+> `chat_invoke` / `chat_stream` 用 **FakeTransport**（脚本化 SSE 帧）离线运行，不需要网络与 key。
+> `chat_live` 走真实端点，配置来自 `.env`（模板见 `.env.example`）；企业代理环境需 CA bundle
+> （本机存在 `~/.geo/corp-ca.pem` 时会自动启用，也可用 `LLM_CA_BUNDLE` 指定）。
 
 ## 与后续层的衔接
 

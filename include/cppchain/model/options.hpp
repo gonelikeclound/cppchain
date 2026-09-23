@@ -26,6 +26,8 @@ struct ModelConfig {
   std::string model;                       // 如 "deepseek-chat" / "gpt-4o-mini"
   long timeout_ms = 60000;
   std::vector<std::string> extra_headers;  // 形如 "X-Foo: bar"
+  // 企业代理/自签证书环境的 CA bundle 路径（留空则用系统默认 CA）
+  std::string ca_info;
 };
 
 }  // namespace cppchain::model

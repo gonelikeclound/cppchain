@@ -63,6 +63,7 @@ http::HttpRequest OpenAIChatModel::build_http_request(std::span<Message const> m
   req.url = join_url(cfg_.base_url, "/chat/completions");
   req.body = openai::build_request(msgs, opts, cfg_, stream).dump();
   req.timeout_ms = cfg_.timeout_ms;
+  req.ca_info = cfg_.ca_info;
   req.headers.reserve(cfg_.extra_headers.size() + 2);
   req.headers.push_back("Content-Type: application/json");
   req.headers.push_back("Authorization: Bearer " + cfg_.api_key);
@@ -111,11 +112,11 @@ core::CancelToken OpenAIChatModel::stream_async(std::span<Message const> msgs,
     }
   };
 
-  cbs.on_error = [st, h, token](std::string message) {
+  cbs.on_error = [st, h, token](http::HttpError err) {
     if (token.cancelled()) return;
     nlohmann::json raw = nlohmann::json{{"body", st->raw_body}};
-    finish_with_error(*st, *h,
-                      ModelError{ModelError::Kind::Network, 0, std::move(message), std::move(raw)});
+    auto kind = err.timeout ? ModelError::Kind::Timeout : ModelError::Kind::Network;
+    finish_with_error(*st, *h, ModelError{kind, 0, std::move(err.message), std::move(raw)});
   };
 
   cbs.on_complete = [st, h, token]() {

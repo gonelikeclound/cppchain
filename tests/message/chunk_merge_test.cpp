@@ -41,6 +41,32 @@ TEST(ChunkMerge, different_blocks_appended) {
   EXPECT_EQ(std::get<ReasoningBlock>(c.content[1]).reasoning, "r1");
 }
 
+TEST(ChunkMerge, adjacent_reasoning_blocks_merge) {
+  // 回归：推理内容逐帧流式下发时，必须相邻合并（真机联调发现的碎块问题）
+  MessageChunk acc;
+  acc.type = Role::Ai;
+  for (auto const& piece : {"我们", "需要", "小心"}) {
+    MessageChunk f;
+    f.type = Role::Ai;
+    f.content = {ReasoningBlock{piece}};
+    acc = acc + f;
+  }
+  ASSERT_EQ(acc.content.size(), 1u);
+  EXPECT_EQ(std::get<ReasoningBlock>(acc.content[0]).reasoning, "我们需要小心");
+
+  // 推理块与文本块混合：各自相邻合并，不互相吞并
+  MessageChunk mixed;
+  mixed.type = Role::Ai;
+  mixed.content = {ReasoningBlock{"think "}, TextBlock{"ans"}};
+  MessageChunk more;
+  more.type = Role::Ai;
+  more.content = {TextBlock{"wer"}};
+  auto merged = mixed + more;
+  ASSERT_EQ(merged.content.size(), 2u);
+  EXPECT_EQ(std::get<ReasoningBlock>(merged.content[0]).reasoning, "think ");
+  EXPECT_EQ(std::get<TextBlock>(merged.content[1]).text, "answer");
+}
+
 TEST(ChunkMerge, tool_chunk_accumulates_then_finalizes) {
   auto a = ai_chunk();
   {

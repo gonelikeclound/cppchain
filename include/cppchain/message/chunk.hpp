@@ -40,15 +40,23 @@ struct MessageChunk {
 
 // ---- 合并（a 在前，b 在后，保持时间顺序）----
 
-// 相邻同类型块合并：text+text 拼接；其余追加。
+// 相邻同类型块合并：text+text、reasoning+reasoning 拼接；其余追加。
+// （真机联调发现：推理内容同样逐帧流式下发，必须与 text 一起做相邻合并，
+//   否则会被拆成上百个碎块 —— 见 03-detail-design/02。）
 inline std::vector<ContentBlock> merge_content(std::vector<ContentBlock> a,
                                                std::vector<ContentBlock> const& b) {
   for (auto const& blk : b) {
-    if (auto const* bt = std::get_if<TextBlock>(&blk);
-        bt && !a.empty()) {
-      if (auto* at = std::get_if<TextBlock>(&a.back())) {
-        at->text += bt->text;
-        continue;
+    if (!a.empty()) {
+      if (auto const* bt = std::get_if<TextBlock>(&blk)) {
+        if (auto* at = std::get_if<TextBlock>(&a.back())) {
+          at->text += bt->text;
+          continue;
+        }
+      } else if (auto const* rb = std::get_if<ReasoningBlock>(&blk)) {
+        if (auto* ar = std::get_if<ReasoningBlock>(&a.back())) {
+          ar->reasoning += rb->reasoning;
+          continue;
+        }
       }
     }
     a.push_back(blk);

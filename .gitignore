@@ -5,6 +5,12 @@ cmake-build-*/
 # demo 运行产物（examples/ 落盘演示写到此处）
 demo-out/
 
+# 密钥与本地环境配置 —— 绝不入库
+.env
+.env.*
+!.env.example
+*.local
+
 # 编译中间物
 *.o
 *.a

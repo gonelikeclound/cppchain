@@ -35,6 +35,22 @@ target_link_libraries(cppchain_model PUBLIC
 
 target_compile_options(cppchain_model PRIVATE -Wall -Wextra -Wpedantic)
 
+# ---- M2: cppchain_http_curl（真实传输，libcurl multi）----
+# 仅在 CPPCHAIN_BUILD_HTTP=ON 时构建；模型层不依赖它（传输是可注入的）。
+if(CPPCHAIN_BUILD_HTTP)
+  add_library(cppchain_http_curl STATIC
+    http/curl_multi_transport.cpp)
+
+  target_include_directories(cppchain_http_curl PUBLIC
+    ${PROJECT_SOURCE_DIR}/include)
+
+  target_link_libraries(cppchain_http_curl PUBLIC
+    cppchain_model
+    CURL::libcurl)
+
+  target_compile_options(cppchain_http_curl PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # ---- 工具链冒烟（随首模块落地后会替换/保留） ----
 add_executable(smoke smoke/main.cpp)
 target_link_libraries(smoke PRIVATE cppchain_message)

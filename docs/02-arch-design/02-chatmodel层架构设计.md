@@ -110,6 +110,11 @@ class Transport { public: virtual CancelToken send(HttpRequest, HttpCallbacks) =
 }
 ```
 
+> **注**：§5 的接口为设计草案；实现期有三处演进（最终签名见 `03-detail-design/02`）：
+> ① `Transport::send` 增加 `CancelToken` 入参（由调用方持有、可取消）；
+> ② `on_error` 改收 `HttpError{message, timeout}`（区分超时，供错误映射）；
+> ③ `HttpRequest`/`ModelConfig` 增加 `ca_info`（企业代理/自签环境的 CA bundle）。
+
 ## 6. 契约
 
 1. **请求**：M1 `Message` → OpenAI `messages`（`role`/`content`/`tool_calls`/`tool_call_id`）；
@@ -141,14 +146,14 @@ CMake：`cppchain_model` 依赖 `cppchain_message`；`CPPCHAIN_BUILD_HTTP=ON` �
 流式长输出是"超长工具返回"问题域的第一现场。M2 先做**观察**：`examples/chat_stream` 记录
 长输出的到达节奏与内存占用，为 `04-problems/` 首篇攒素材（是否边流边截断/暂存/落盘，留到专题时定）。
 
-## 9. DoD
+## 9. DoD（已全部达成 ✅）
 
-- [ ] `ChatModel` 抽象 + OpenAI 兼容适配 + 传输抽象（含 FakeTransport）
-- [ ] libcurl multi 传输（IO 线程事件循环、取消、超时）
-- [ ] 离线测试全绿：请求构造 / 响应解析 / SSE 分片（含跨包截断）/ chunk 累积 / 取消 / 错误映射
-- [ ] 协程糖 `task<T>` + `invoke_async` 可用（含一个 await 示例）
-- [ ] demo：`chat_invoke`、`chat_stream`
-- [ ] 对 **DeepSeek** 联调一次（含 `deepseek-reasoner` 的 `reasoning_content` → `ReasoningBlock` 映射验证）
+- [x] `ChatModel` 抽象 + OpenAI 兼容适配 + 传输抽象（含 FakeTransport）
+- [x] libcurl multi 传输（IO 线程事件循环、取消、超时）
+- [x] 离线测试全绿：请求构造 / 响应解析 / SSE 分片（含跨包截断）/ chunk 累积 / 取消 / 错误映射
+- [x] 协程糖 `task<T>` + `invoke_async` 可用（含一个 await 示例）
+- [x] demo：`chat_invoke`、`chat_stream`、`chat_live`（真机）
+- [x] 对 **DeepSeek** 联调通过（含 `deepseek-reasoner` 的 `reasoning_content` → `ReasoningBlock` 映射验证；并发现/修复企业代理 CA 问题）
 
 ## 10. 开放点（进 detail-design 时定）
 

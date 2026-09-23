@@ -22,12 +22,18 @@ struct HttpRequest {
   std::string body;                     // 已序列化的请求体（JSON）
   std::vector<std::string> headers;     // 形如 "Content-Type: application/json"
   long timeout_ms = 60000;
+  std::string ca_info;                  // 自定义 CA bundle 路径（企业代理/自签环境用）
+};
+
+struct HttpError {
+  std::string message;
+  bool timeout = false;  // 供上层映射为 ModelError::Kind::Timeout
 };
 
 struct HttpCallbacks {
   std::function<void(long status)> on_status;              // 收到响应头（HTTP 状态码）
   std::function<void(std::string_view)> on_body_chunk;     // 增量响应字节
-  std::function<void(std::string)> on_error;               // 传输层错误（网络/超时/取消）
+  std::function<void(HttpError)> on_error;                 // 传输层错误（网络/超时）
   std::function<void()> on_complete;                       // 响应结束（含非 2xx）
 };
 
