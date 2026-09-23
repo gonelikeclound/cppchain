@@ -16,3 +16,15 @@ target_link_libraries(message_tests PRIVATE
 
 target_compile_options(message_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(message_tests)
+
+# ---- M2: 模型层测试（SSE / wire / ChatModel 行为）----
+add_executable(model_tests
+  model/openai_wire_test.cpp
+  model/openai_model_test.cpp)
+
+target_link_libraries(model_tests PRIVATE
+  cppchain_model
+  GTest::gtest_main)
+
+target_compile_options(model_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(model_tests)

@@ -6,10 +6,20 @@ set(EXAMPLE_TARGETS
   messages_serialize      # JSON round-trip + 落盘/回读
   messages_tool_flow      # 工具调用消息协议闭环 + 不变式
   messages_stream_chunk   # 流式 chunk 合并 → 收敛
+  chat_invoke             # M2: ChatModel 同步/协程调用（离线仿真）
+  chat_stream             # M2: 流式增量 + 回调 + 取消（离线仿真）
 )
+
+# 需要模型库的 demo
+set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream)
+
 foreach(t IN LISTS EXAMPLE_TARGETS)
   add_executable(${t} ${t}/main.cpp)
-  target_link_libraries(${t} PRIVATE cppchain_message)
   target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic)
+  if(t IN_LIST MODEL_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_model)
+  else()
+    target_link_libraries(${t} PRIVATE cppchain_message)
+  endif()
 endforeach()

@@ -9,9 +9,14 @@
 | `messages_serialize` | 规范 JSON round-trip；整条会话落盘/读回；单条 `model_dump()` | `messages_to_dict` / `messages_from_dict`、「state 必须可 JSON 序列化」契约 |
 | `messages_tool_flow` | 工具调用消息协议闭环：tool_calls → 执行 → `ToolMessage` 回填 → `validate_sequence` 强制不变式 | [Function calling]：`bind_tools` → `ToolNode` → `ToolMessage(tool_call_id=…)` |
 | `messages_stream_chunk` | 流式帧按序 `operator+` 合并；args 分片累积；`finalize_chunk` 收敛 | `AIMessageChunk.__add__` / `_merge_tool_call_chunks` |
+| `chat_invoke` | M2：同步 `invoke` / 协程 `co_await invoke_async` / 错误是常态（expected）/ 实际请求形状 | `model.invoke` / `await model.ainvoke` |
+| `chat_stream` | M2：同步流式迭代、回调式 `stream_async`（delta/tool args 分片）、**中途取消后不再回调** | `model.stream` / 回调式流 + 取消 |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
+>
+> M2 的 `chat_*` demo 默认用 **FakeTransport**（脚本化 SSE 帧）离线运行，不需要网络与 API key；
+> 接真实端点（DeepSeek）的 `chat_live` 随 curl_multi 传输一起加入。
 
 ## 与后续层的衔接
 
