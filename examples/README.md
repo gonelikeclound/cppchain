@@ -12,6 +12,8 @@
 | `chat_invoke` | M2：同步 `invoke` / 协程 `co_await invoke_async` / 错误是常态（expected）/ 实际请求形状 | `model.invoke` / `await model.ainvoke` |
 | `chat_stream` | M2：同步流式迭代、回调式 `stream_async`（delta/tool args 分片）、**中途取消后不再回调** | `model.stream` / 回调式流 + 取消 |
 | `chat_live` | **真机联调**（DeepSeek）：流式首字延迟、tools wire 通道、`deepseek-reasoner` 推理内容映射 | 真实 provider 端到端 |
+| `tools_basic` | M3：工具定义 → 绑定 → 模型发起 → ToolNode 执行 → ToolMessage 回填 → 最终答复；含**错误回喂** | `@tool` / `bind_tools` / `ToolNode` |
+| `tools_retrieval` | M3：**大批量工具查找**量化——体积压缩比 + precision/recall（含 IDF 前后对比） | 工具检索（langchain 生态的应用层职责） |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。

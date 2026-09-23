@@ -10,3 +10,4 @@
 |------|------|------|------|
 | 01 | [01-message层架构设计.md](01-message层架构设计.md) | M1 Message 层：类型族/ContentBlock/序列化契约 | ✅ 已定稿 |
 | 02 | [02-chatmodel层架构设计.md](02-chatmodel层架构设计.md) | M2 ChatModel：OpenAI 兼容适配 + 异步回调内核 + 协程糖 | ✅ 已实现 |
+| 03 | [03-tool层架构设计.md](03-tool层架构设计.md) | M3 Tool：显式 schema + 可插拔检索 + ToolNode 并行 | ✅ 已实现 |

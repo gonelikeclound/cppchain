@@ -14,6 +14,10 @@ set(EXAMPLE_TARGETS
 set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream)
 # 需要真实 HTTP 传输的 demo（CPPCHAIN_BUILD_HTTP=ON 时才存在）
 set(HTTP_EXAMPLE_TARGETS chat_live)
+# 需要工具库的 demo
+set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval)
+
+list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval)
 
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS chat_live)
@@ -23,7 +27,9 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   add_executable(${t} ${t}/main.cpp)
   target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic)
-  if(t IN_LIST HTTP_EXAMPLE_TARGETS)
+  if(t IN_LIST TOOL_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_tool)
+  elseif(t IN_LIST HTTP_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_http_curl)
   elseif(t IN_LIST MODEL_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_model)

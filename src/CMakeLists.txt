@@ -35,6 +35,23 @@ target_link_libraries(cppchain_model PUBLIC
 
 target_compile_options(cppchain_model PRIVATE -Wall -Wextra -Wpedantic)
 
+# ---- M3: cppchain_tool（工具规格 / 注册表 / 检索 / ToolNode）----
+add_library(cppchain_tool STATIC
+  tool/tool.cpp
+  tool/tool_node.cpp)
+
+target_include_directories(cppchain_tool PUBLIC
+  ${PROJECT_SOURCE_DIR}/include)
+
+target_include_directories(cppchain_tool SYSTEM BEFORE PUBLIC
+  ${nlohmann_json_SOURCE_DIR}/include)
+
+target_link_libraries(cppchain_tool PUBLIC
+  cppchain_model
+  nlohmann_json::nlohmann_json)
+
+target_compile_options(cppchain_tool PRIVATE -Wall -Wextra -Wpedantic)
+
 # ---- M2: cppchain_http_curl（真实传输，libcurl multi）----
 # 仅在 CPPCHAIN_BUILD_HTTP=ON 时构建；模型层不依赖它（传输是可注入的）。
 if(CPPCHAIN_BUILD_HTTP)

@@ -28,3 +28,19 @@ target_link_libraries(model_tests PRIVATE
 
 target_compile_options(model_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(model_tests)
+
+# ---- M3: 工具层测试（规格 / 检索 / ToolNode）----
+find_package(Threads REQUIRED)
+
+add_executable(tool_tests
+  tool/tool_spec_test.cpp
+  tool/selector_test.cpp
+  tool/tool_node_test.cpp)
+
+target_link_libraries(tool_tests PRIVATE
+  cppchain_tool
+  GTest::gtest_main
+  Threads::Threads)
+
+target_compile_options(tool_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(tool_tests)
