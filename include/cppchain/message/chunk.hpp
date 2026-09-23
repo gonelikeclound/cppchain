@@ -76,6 +76,8 @@ inline std::vector<ToolCallChunk> merge_tool_call_chunks(
 }
 
 inline MessageChunk operator+(MessageChunk a, MessageChunk const& b) {
+  // type：左为默认(Human)时取右；流式同角色合并时二者本就一致。
+  if (a.type == Role::Human) a.type = b.type;
   a.content = merge_content(std::move(a.content), b.content);
   a.tool_call_chunks = merge_tool_call_chunks(std::move(a.tool_call_chunks), b.tool_call_chunks);
   if (!a.id) a.id = b.id;

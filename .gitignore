@@ -2,6 +2,9 @@
 build/
 cmake-build-*/
 
+# demo 运行产物（examples/ 落盘演示写到此处）
+demo-out/
+
 # 编译中间物
 *.o
 *.a

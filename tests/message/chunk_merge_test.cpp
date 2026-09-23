@@ -126,3 +126,13 @@ TEST(ChunkMerge, metadata_first_nonempty_wins) {
   auto f = d + e;
   EXPECT_EQ(f.id, "first-id");
 }
+
+TEST(ChunkMerge, type_propagates_from_frames) {
+  // 默认(acc=Role::Human)合并 Ai 帧后，type 必须传播为 Ai（回归：曾丢失）
+  MessageChunk acc;  // type == Role::Human（默认）
+  auto frame = ai_chunk();
+  frame.content = {TextBlock{"hi"}};
+  auto merged = acc + frame;
+  EXPECT_EQ(merged.type, Role::Ai);
+  EXPECT_EQ(finalize_chunk(merged).type, Role::Ai);
+}

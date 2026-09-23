@@ -138,12 +138,12 @@ chunk 是否进 AnyMessage 的变体：**v1 不进**，`Message`/`MessageChunk` 
 | M5 State/Checkpointer | 消息可整体 JSON 序列化，供快照与 add_messages 缩减 |
 | M7 上下文压缩 | Message 层预留 `filter/merge/trim` 扩展点，本层只定 Message 遍历/改写接口 |
 
-## 8. DoD（完成定义）
+## 8. DoD（完成定义）—— 已全部达成 ✅
 
-- [ ] 四类块 + Message/Role/ToolCall/USage + MessageChunk(合并) 类型落地，`-std=c++26` 编译零警告
-- [ ] round-trip + 判别 + 合并 rule 测试全绿（tests/message/）
-- [ ] `examples/message_pipeline`：构造 → JSON → 恢复 → 校验不变式 的 demo
-- [ ] `src/CMakeLists` 增加 `cppchain_message` 静态库目标；smoke 保留
+- [x] 四类块 + Message/Role/ToolCall/USage + MessageChunk(合并) 类型落地，`-std=c++26` 编译零警告
+- [x] round-trip + 判别 + 合并 rule 测试全绿（`tests/message/`，15 项）
+- [x] `examples/` 四个聚焦 demo：`messages_basic`（类型族）/ `messages_serialize`（序列化+落盘）/ `messages_tool_flow`（工具协议+不变式）/ `messages_stream_chunk`（流式合并）
+- [x] `src/CMakeLists` 增加 `cppchain_message` 静态库目标；smoke 保留
 
 ## 9. 开放点（进 03-detail-design 时定）
 

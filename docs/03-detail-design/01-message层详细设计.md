@@ -1,7 +1,7 @@
 # 01 · Message 层详细设计（M1 实现）
 
 > 承接 `02-arch-design/01-message层架构设计.md`。本文记录**已定案**的类型设计、序列化契约实现、
-> chunk 合并算法与实现踩坑。示例见 `examples/message_pipeline`，测试见 `tests/message/`。
+> chunk 合并算法与实现踩坑。示例见 `examples/messages_*` 四个聚焦 demo，测试见 `tests/message/`。
 
 ## 1. 最终类型清单（`cppchain::message`）
 
@@ -47,8 +47,12 @@ text 块相邻拼接；不同块追加。tool_call_chunks 按 `index` 累积：n
 
 ## 6. 验证结论
 
-- `ctest`：**14/14 通过**（round-trip、判别、合并、不变式）。
-- `examples/message_pipeline`：构造→序列化→恢复→校验 的整链输出正确；流式片段收敛出合法的 `get_weather`.
+- `ctest`：**15/15 通过**（round-trip、判别、合并、不变式、type 传播回归）。
+- `examples/` 四个聚焦 demo 全绿（exit 0）：`messages_basic` / `messages_serialize` /
+  `messages_tool_flow` / `messages_stream_chunk`。
+- 流式片段收敛出合法的 `get_weather(city=SF)`；协议反例（缺 ToolMessage）被 `validate_sequence` 拦截。
+- **demo 反哺修复**：`messages_stream_chunk` 暴露出 `MessageChunk::operator+` 不传播 `type`
+  （acc 默认 Human 导致合并后角色丢失），已修复并补回归测试。
 
 ## 7. 后续（接入 M2 时再评估）
 
