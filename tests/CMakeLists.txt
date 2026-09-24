@@ -20,7 +20,8 @@ gtest_discover_tests(message_tests)
 # ---- M2: 模型层测试（SSE / wire / ChatModel 行为）----
 add_executable(model_tests
   model/openai_wire_test.cpp
-  model/openai_model_test.cpp)
+  model/openai_model_test.cpp
+  model/dashscope_embeddings_test.cpp)
 
 target_link_libraries(model_tests PRIVATE
   cppchain_model
@@ -35,7 +36,8 @@ find_package(Threads REQUIRED)
 add_executable(tool_tests
   tool/tool_spec_test.cpp
   tool/selector_test.cpp
-  tool/tool_node_test.cpp)
+  tool/tool_node_test.cpp
+  tool/embedding_selector_test.cpp)
 
 target_link_libraries(tool_tests PRIVATE
   cppchain_tool

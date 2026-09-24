@@ -34,6 +34,7 @@ KNOWN_DEMOS=(
   "chat_live:M2 真机联调（需 .env）"
   "tools_basic:M3 工具调用闭环与错误回喂"
   "tools_retrieval:M3 大批量工具检索量化"
+  "tools_retrieval_vector:关键词 vs 向量检索对照（需向量端点）"
 )
 
 describe() {

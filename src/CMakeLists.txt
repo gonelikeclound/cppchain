@@ -21,7 +21,8 @@ target_compile_options(cppchain_message PRIVATE -Wall -Wextra -Wpedantic)
 # ---- M2: cppchain_model（ChatModel 抽象 + OpenAI 兼容适配）----
 # 不链接 libcurl：传输通过 http::Transport 注入，保持分层干净。
 add_library(cppchain_model STATIC
-  model/openai_chat_model.cpp)
+  model/openai_chat_model.cpp
+  model/dashscope_embeddings.cpp)
 
 target_include_directories(cppchain_model PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
@@ -38,7 +39,8 @@ target_compile_options(cppchain_model PRIVATE -Wall -Wextra -Wpedantic)
 # ---- M3: cppchain_tool（工具规格 / 注册表 / 检索 / ToolNode）----
 add_library(cppchain_tool STATIC
   tool/tool.cpp
-  tool/tool_node.cpp)
+  tool/tool_node.cpp
+  tool/embedding_selector.cpp)
 
 target_include_directories(cppchain_tool PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
