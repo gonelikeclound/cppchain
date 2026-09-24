@@ -40,10 +40,11 @@ std::string MemoryCheckpointer::key_of(std::string const& thread_id, std::string
 
 std::string MemoryCheckpointer::put(std::string const& thread_id, std::string const& checkpoint_ns,
                                     std::optional<std::string> parent_checkpoint_id, Json values,
-                                    Json metadata) {
+                                    std::vector<std::string> next, Json metadata) {
   std::string const id = "ckpt-" + std::to_string(++counter_);
   StateSnapshot snap;
   snap.values = std::move(values);
+  snap.next = std::move(next);
   snap.metadata = std::move(metadata);
   snap.parent_checkpoint_id = std::move(parent_checkpoint_id);
   snap.config = Json{{"thread_id", thread_id},

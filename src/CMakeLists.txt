@@ -92,3 +92,18 @@ endif()
 add_executable(smoke smoke/main.cpp)
 target_link_libraries(smoke PRIVATE cppchain_message)
 target_compile_options(smoke PRIVATE -Wall -Wextra -Wpedantic)
+# ---- M6: cppchain_graph（极简 Graph 引擎）----
+add_library(cppchain_graph STATIC
+  graph/graph.cpp)
+
+target_include_directories(cppchain_graph PUBLIC
+  ${PROJECT_SOURCE_DIR}/include)
+
+target_include_directories(cppchain_graph SYSTEM BEFORE PUBLIC
+  ${nlohmann_json_SOURCE_DIR}/include)
+
+target_link_libraries(cppchain_graph PUBLIC
+  cppchain_state
+  nlohmann_json::nlohmann_json)
+
+target_compile_options(cppchain_graph PRIVATE -Wall -Wextra -Wpedantic)

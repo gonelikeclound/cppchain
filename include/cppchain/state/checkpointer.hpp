@@ -34,10 +34,11 @@ class Checkpointer {
  public:
   virtual ~Checkpointer() = default;
 
-  // 写入一个快照，返回新 checkpoint_id（并记录 parent 形成链）
+  // 写入一个快照，返回新 checkpoint_id（并记录 parent 形成链）。
+  // next = 该步之后待执行的节点（恢复语义："回到该步边界继续"）
   virtual std::string put(std::string const& thread_id, std::string const& checkpoint_ns,
                           std::optional<std::string> parent_checkpoint_id, Json values,
-                          Json metadata) = 0;
+                          std::vector<std::string> next, Json metadata) = 0;
 
   virtual void put_writes(std::string const& thread_id, std::string const& checkpoint_ns,
                           std::string const& checkpoint_id, std::vector<WriteRecord> writes) = 0;
@@ -62,7 +63,7 @@ class MemoryCheckpointer final : public Checkpointer {
  public:
   std::string put(std::string const& thread_id, std::string const& checkpoint_ns,
                   std::optional<std::string> parent_checkpoint_id, Json values,
-                  Json metadata) override;
+                  std::vector<std::string> next, Json metadata) override;
 
   void put_writes(std::string const& thread_id, std::string const& checkpoint_ns,
                   std::string const& checkpoint_id, std::vector<WriteRecord> writes) override;

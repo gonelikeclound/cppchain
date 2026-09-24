@@ -8,8 +8,8 @@ using namespace cppchain::state;
 
 TEST(Checkpointer, put_returns_id_and_records_parent_chain) {
   MemoryCheckpointer cp;
-  auto const id1 = cp.put("t1", "", std::nullopt, Json{{"step", 1}}, Json{{"source", "input"}});
-  auto const id2 = cp.put("t1", "", id1, Json{{"step", 2}}, Json{{"source", "loop"}});
+  auto const id1 = cp.put("t1", "", std::nullopt, Json{{"step", 1}}, {}, Json{{"source", "input"}});
+  auto const id2 = cp.put("t1", "", id1, Json{{"step", 2}}, {}, Json{{"source", "loop"}});
 
   EXPECT_NE(id1, id2);
 
@@ -23,8 +23,8 @@ TEST(Checkpointer, put_returns_id_and_records_parent_chain) {
 
 TEST(Checkpointer, get_tuple_by_id_and_unknown_id) {
   MemoryCheckpointer cp;
-  auto const id1 = cp.put("t1", "", std::nullopt, Json{{"step", 1}}, Json::object());
-  (void)cp.put("t1", "", id1, Json{{"step", 2}}, Json::object());
+  auto const id1 = cp.put("t1", "", std::nullopt, Json{{"step", 1}}, {}, Json::object());
+  (void)cp.put("t1", "", id1, Json{{"step", 2}}, {}, Json::object());
 
   auto const first = cp.get_tuple("t1", "", id1);
   ASSERT_TRUE(first.has_value());
@@ -37,7 +37,7 @@ TEST(Checkpointer, get_tuple_by_id_and_unknown_id) {
 TEST(Checkpointer, list_is_newest_first_with_limit) {
   MemoryCheckpointer cp;
   for (int i = 1; i <= 3; ++i)
-    cp.put("t1", "", std::nullopt, Json{{"step", i}}, Json::object());
+    cp.put("t1", "", std::nullopt, Json{{"step", i}}, {}, Json::object());
 
   auto const all = cp.list("t1", "", 0);
   ASSERT_EQ(all.size(), 3u);
@@ -51,9 +51,9 @@ TEST(Checkpointer, list_is_newest_first_with_limit) {
 
 TEST(Checkpointer, threads_and_namespaces_are_isolated) {
   MemoryCheckpointer cp;
-  cp.put("t1", "", std::nullopt, Json{{"who", "t1-root"}}, Json::object());
-  cp.put("t2", "", std::nullopt, Json{{"who", "t2-root"}}, Json::object());
-  cp.put("t1", "sub:node-1", std::nullopt, Json{{"who", "t1-sub"}}, Json::object());
+  cp.put("t1", "", std::nullopt, Json{{"who", "t1-root"}}, {}, Json::object());
+  cp.put("t2", "", std::nullopt, Json{{"who", "t2-root"}}, {}, Json::object());
+  cp.put("t1", "sub:node-1", std::nullopt, Json{{"who", "t1-sub"}}, {}, Json::object());
 
   EXPECT_EQ(cp.get_tuple("t1", "", std::nullopt)->values.at("who").get<std::string>(), "t1-root");
   EXPECT_EQ(cp.get_tuple("t2", "", std::nullopt)->values.at("who").get<std::string>(), "t2-root");
@@ -64,9 +64,9 @@ TEST(Checkpointer, threads_and_namespaces_are_isolated) {
 
 TEST(Checkpointer, delete_thread_removes_all_namespaces_of_that_thread_only) {
   MemoryCheckpointer cp;
-  cp.put("t1", "", std::nullopt, Json{{"v", 1}}, Json::object());
-  cp.put("t1", "sub", std::nullopt, Json{{"v", 2}}, Json::object());
-  cp.put("t2", "", std::nullopt, Json{{"v", 3}}, Json::object());
+  cp.put("t1", "", std::nullopt, Json{{"v", 1}}, {}, Json::object());
+  cp.put("t1", "sub", std::nullopt, Json{{"v", 2}}, {}, Json::object());
+  cp.put("t2", "", std::nullopt, Json{{"v", 3}}, {}, Json::object());
 
   cp.delete_thread("t1");
   EXPECT_FALSE(cp.get_tuple("t1", "", std::nullopt).has_value());
@@ -76,7 +76,7 @@ TEST(Checkpointer, delete_thread_removes_all_namespaces_of_that_thread_only) {
 
 TEST(Checkpointer, writes_are_stored_per_checkpoint) {
   MemoryCheckpointer cp;
-  auto const id = cp.put("t1", "", std::nullopt, Json::object(), Json::object());
+  auto const id = cp.put("t1", "", std::nullopt, Json::object(), {}, Json::object());
 
   cp.put_writes("t1", "", id,
                 {WriteRecord{"task-1", "messages", Json::array({Json("m1")})},

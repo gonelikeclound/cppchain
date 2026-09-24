@@ -61,8 +61,10 @@ int main() {
     state = schema.apply(state,
         Json{{"messages", Json::array({msg("t" + std::to_string(turn), "第 " + std::to_string(turn) + " 轮")})},
               {"step", turn}});
-    parent = cp.put("thread-A", "", ids.empty() ? std::nullopt : std::optional(ids.back()),
-                    state, Json{{"source", "loop"}, {"turn", turn}});
+    // next 传 {"checkpoint-node"}：表示"该步跑完后待执行的节点"（这里仅作演示）
+    parent = cp.put("thread-A", "", ids.empty() ? std::nullopt : std::optional(ids.back()), state,
+                    std::vector<std::string>{"checkpoint-node"},
+                    Json{{"source", "loop"}, {"turn", turn}});
     ids.push_back(parent);
     std::println("  快照 {} ← parent={}", parent, ids.size() > 1 ? ids[ids.size() - 2] : "(根)");
   }

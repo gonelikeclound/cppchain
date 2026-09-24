@@ -60,3 +60,14 @@ target_link_libraries(state_tests PRIVATE
 
 target_compile_options(state_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(state_tests)
+
+# ---- M6: Graph 引擎测试 ----
+add_executable(graph_tests
+  graph/graph_test.cpp)
+
+target_link_libraries(graph_tests PRIVATE
+  cppchain_graph
+  GTest::gtest_main)
+
+target_compile_options(graph_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(graph_tests)
