@@ -18,6 +18,7 @@
 #include <unordered_map>
 
 #include "cppchain/agent/agent.hpp"
+#include "cppchain/agent/freshness.hpp"
 
 namespace cppchain::agent {
 
@@ -41,10 +42,10 @@ class StaleStateGuard final : public Middleware {
 
   [[nodiscard]] std::size_t invalidations() const { return invalidations_; }
 
-  // additional_kwargs 里用的键（供测试与外部检查）
-  static constexpr char kObservedAt[] = "observed_at";    // epoch 秒
-  static constexpr char kTtlSeconds[] = "ttl_seconds";    // 工具声明的 TTL
-  static constexpr char kStale[] = "stale";               // 已被标记过期
+  // 键名别名（契约定义在 agent/freshness.hpp，供跨中间件复用）
+  static constexpr char const* kObservedAt = freshness::kObservedAt;
+  static constexpr char const* kTtlSeconds = freshness::kTtlSeconds;
+  static constexpr char const* kStale = freshness::kStale;
 
  private:
   Clock clock_;

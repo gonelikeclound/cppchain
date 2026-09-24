@@ -33,8 +33,8 @@ void StaleStateGuard::after_tool(Message& tool_message) {
   auto const it = pending_ttl_.find(*tool_message.tool_call_id);
   if (it == pending_ttl_.end()) return;
 
-  tool_message.additional_kwargs[kObservedAt] = epoch_seconds(clock_());
-  tool_message.additional_kwargs[kTtlSeconds] = it->second;
+  tool_message.additional_kwargs[freshness::kObservedAt] = epoch_seconds(clock_());
+  tool_message.additional_kwargs[freshness::kTtlSeconds] = it->second;
   pending_ttl_.erase(it);
 }
 
@@ -43,13 +43,11 @@ void StaleStateGuard::before_model(std::vector<Message>& msgs) {
 
   for (auto& m : msgs) {
     if (m.type != Role::Tool) continue;
-    if (!m.additional_kwargs.is_object()) continue;
-    if (!m.additional_kwargs.contains(kObservedAt) || !m.additional_kwargs.contains(kTtlSeconds))
-      continue;
-    if (m.additional_kwargs.value(kStale, false)) continue;  // 已标记过，不重复改写
+    if (!freshness::has_metadata(m)) continue;
+    if (m.additional_kwargs.value(freshness::kStale, false)) continue;  // 已标记过，不重复改写
 
-    auto const observed = m.additional_kwargs[kObservedAt].get<std::int64_t>();
-    auto const ttl = m.additional_kwargs[kTtlSeconds].get<std::int64_t>();
+    auto const observed = m.additional_kwargs[freshness::kObservedAt].get<std::int64_t>();
+    auto const ttl = m.additional_kwargs[freshness::kTtlSeconds].get<std::int64_t>();
     std::int64_t const age = now - observed;
     if (age <= ttl) continue;  // 仍新鲜
 
@@ -61,7 +59,7 @@ void StaleStateGuard::before_model(std::vector<Message>& msgs) {
             (original.size() > 120 ? original.substr(0, 120) + "…" : original) +
             "\"。若要基于该状态回答或决策，请重新调用工具获取最新值。）",
         std::nullopt});
-    m.additional_kwargs[kStale] = true;
+    m.additional_kwargs[freshness::kStale] = true;
     ++invalidations_;
   }
 }

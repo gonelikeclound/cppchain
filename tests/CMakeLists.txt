@@ -77,7 +77,8 @@ add_executable(agent_tests
   agent/agent_test.cpp
   agent/journal_test.cpp
   agent/journal_persistence_test.cpp
-  agent/stale_test.cpp)
+  agent/stale_test.cpp
+  agent/compression_freshness_test.cpp)
 
 target_link_libraries(agent_tests PRIVATE
   cppchain_agent

@@ -64,23 +64,49 @@ class TruncateToolResults final : public Middleware {
 // 上下文压缩：消息数超过 max_messages 时折叠早期历史。
 //   summarizer 为空 → 丢弃旧消息 + 一条占位说明；
 //   summarizer 非空 → 用它把旧消息压成摘要（真实压缩，需多一次模型调用）
+//
+// 两个关键保障（见 04-problems/04 与 06 的"压缩 × 时效"交叉）：
+//   ① **边界安全**：折叠边界不得切断工具调用组（AI(tool_calls) 必须与它的 ToolMessage 同去同留），
+//      否则会留下孤儿 ToolMessage → 真实端点直接 400。
+//   ② **时效策略**：带时效元数据的易变结果（见 agent/freshness.hpp）单独处置：
+//        Fold     —— 与普通消息一起折叠（默认；**时效信息会丢失**，失效变得不可见）
+//        Preserve —— 整组保留原文 → StaleStateGuard 仍能识别过期并提示重取
+//        Drop     —— 整组替换为占位说明 → 迫使模型重新获取
 class TrimHistory final : public Middleware {
  public:
   using Summarizer =
       std::function<std::expected<std::string, model::ModelError>(std::vector<Message> const&)>;
 
-  explicit TrimHistory(std::size_t max_messages = 20) : max_messages_(max_messages) {}
-  TrimHistory(std::size_t max_messages, Summarizer summarizer)
-      : max_messages_(max_messages), summarizer_(std::move(summarizer)) {}
+  enum class VolatilePolicy { Fold, Preserve, Drop };
+
+  struct Options {
+    std::size_t max_messages = 20;
+    Summarizer summarizer;
+    VolatilePolicy volatile_policy = VolatilePolicy::Fold;
+  };
+
+  explicit TrimHistory(Options opts) : opts_(std::move(opts)) {}
+  explicit TrimHistory(std::size_t max_messages) { opts_.max_messages = max_messages; }
+  TrimHistory(std::size_t max_messages, Summarizer summarizer) {
+    opts_.max_messages = max_messages;
+    opts_.summarizer = std::move(summarizer);
+  }
 
   void before_model(std::vector<Message>& msgs) override;
 
   [[nodiscard]] std::size_t compressions() const { return compressions_; }
+  [[nodiscard]] std::size_t preserved_groups() const { return preserved_groups_; }
+  [[nodiscard]] std::size_t dropped_groups() const { return dropped_groups_; }
+
+  // 折叠边界的安全校正（public static：便于单测直接验证）
+  [[nodiscard]] static std::size_t safe_boundary(std::vector<Message> const& msgs,
+                                                 std::size_t keep_from, std::size_t desired);
 
  private:
-  std::size_t max_messages_;
-  Summarizer summarizer_;
+  Options opts_;
   std::size_t compressions_ = 0;
+  std::size_t preserved_groups_ = 0;
+  std::size_t dropped_groups_ = 0;
 };
 
 // 工具副作用：按名单拒绝（可扩展为回调/白名单）
