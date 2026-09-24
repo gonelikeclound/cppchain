@@ -20,11 +20,14 @@ set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector)
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics)
-set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output)  # 需要真网络（embedding 端点）
+# 需要 agent 库（真机）的 demo
+set(AGENT_EXAMPLE_TARGETS agent_loop)
+set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop)  # 需要真网络（embedding 端点）
 
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
+  list(APPEND EXAMPLE_TARGETS agent_loop)
 endif()
 
 if(CPPCHAIN_BUILD_HTTP)
@@ -36,7 +39,9 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   add_executable(${t} ${t}/main.cpp)
   target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic)
-  if(t IN_LIST HTTP_NEEDED_EXAMPLES)
+  if(t IN_LIST AGENT_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_agent cppchain_http_curl)
+  elseif(t IN_LIST HTTP_NEEDED_EXAMPLES)
     target_link_libraries(${t} PRIVATE cppchain_tool cppchain_http_curl)
   elseif(t IN_LIST TOOL_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_tool)

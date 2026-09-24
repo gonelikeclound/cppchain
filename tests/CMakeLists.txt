@@ -71,3 +71,14 @@ target_link_libraries(graph_tests PRIVATE
 
 target_compile_options(graph_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(graph_tests)
+
+# ---- M7: Agent 循环与中间件测试 ----
+add_executable(agent_tests
+  agent/agent_test.cpp)
+
+target_link_libraries(agent_tests PRIVATE
+  cppchain_agent
+  GTest::gtest_main)
+
+target_compile_options(agent_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(agent_tests)

@@ -107,3 +107,21 @@ target_link_libraries(cppchain_graph PUBLIC
   nlohmann_json::nlohmann_json)
 
 target_compile_options(cppchain_graph PRIVATE -Wall -Wextra -Wpedantic)
+
+# ---- M7: cppchain_agent（Agent 循环 + middleware）----
+add_library(cppchain_agent STATIC
+  agent/agent.cpp)
+
+target_include_directories(cppchain_agent PUBLIC
+  ${PROJECT_SOURCE_DIR}/include)
+
+target_include_directories(cppchain_agent SYSTEM BEFORE PUBLIC
+  ${nlohmann_json_SOURCE_DIR}/include)
+
+target_link_libraries(cppchain_agent PUBLIC
+  cppchain_model
+  cppchain_tool
+  cppchain_state
+  nlohmann_json::nlohmann_json)
+
+target_compile_options(cppchain_agent PRIVATE -Wall -Wextra -Wpedantic)
