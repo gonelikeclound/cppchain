@@ -22,7 +22,8 @@ target_compile_options(cppchain_message PRIVATE -Wall -Wextra -Wpedantic)
 # 不链接 libcurl：传输通过 http::Transport 注入，保持分层干净。
 add_library(cppchain_model STATIC
   model/openai_chat_model.cpp
-  model/dashscope_embeddings.cpp)
+  model/dashscope_embeddings.cpp
+  model/structured.cpp)
 
 target_include_directories(cppchain_model PUBLIC
   ${PROJECT_SOURCE_DIR}/include)

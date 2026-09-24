@@ -21,7 +21,8 @@ gtest_discover_tests(message_tests)
 add_executable(model_tests
   model/openai_wire_test.cpp
   model/openai_model_test.cpp
-  model/dashscope_embeddings_test.cpp)
+  model/dashscope_embeddings_test.cpp
+  model/structured_test.cpp)
 
 target_link_libraries(model_tests PRIVATE
   cppchain_model

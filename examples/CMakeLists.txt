@@ -11,12 +11,12 @@ set(EXAMPLE_TARGETS
 )
 
 # 需要模型库的 demo
-set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream)
+set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream structured_output)
 # 需要真实 HTTP 传输的 demo（CPPCHAIN_BUILD_HTTP=ON 时才存在）
 set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo
 set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector)
-set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector)  # 需要真网络（embedding 端点）
+set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output)  # 需要真网络（embedding 端点）
 
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval)
 if(CPPCHAIN_BUILD_HTTP)
@@ -25,6 +25,7 @@ endif()
 
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS chat_live)
+  list(APPEND EXAMPLE_TARGETS structured_output)
 endif()
 
 foreach(t IN LISTS EXAMPLE_TARGETS)

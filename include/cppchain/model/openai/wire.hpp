@@ -73,7 +73,8 @@ inline nlohmann::json build_request(std::span<Message const> msgs, CallOptions c
   if (opts.max_tokens) body["max_tokens"] = *opts.max_tokens;
   if (!opts.stop.empty()) body["stop"] = opts.stop;
   if (!opts.tools.empty()) body["tools"] = opts.tools;
-  if (opts.tool_choice) body["tool_choice"] = *opts.tool_choice;
+  if (!opts.tool_choice.is_null()) body["tool_choice"] = opts.tool_choice;
+  if (!opts.response_format.is_null()) body["response_format"] = opts.response_format;
 
   for (auto it = opts.extra.begin(); it != opts.extra.end(); ++it) body[it.key()] = it.value();
   return body;

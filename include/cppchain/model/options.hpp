@@ -15,7 +15,10 @@ struct CallOptions {
   std::optional<double> temperature;
   std::optional<int> max_tokens;
   std::vector<std::string> stop;
-  std::optional<std::string> tool_choice;  // "auto" / "none" / "required" / 具体工具名
+  // "auto"/"none"/"required"（字符串），或强制某函数：{"type":"function","function":{"name":…}}
+  nlohmann::json tool_choice = nullptr;
+  // 结构化输出用（如 {"type":"json_object"}）；非 null 时并入请求体
+  nlohmann::json response_format = nullptr;
   nlohmann::json tools = nlohmann::json::array();  // M2 仅 wire 通道（M3 引入 Tool 抽象）
   nlohmann::json extra = nlohmann::json::object(); // 原样并入请求体（厂商私有参数）
 };
