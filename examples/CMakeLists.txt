@@ -21,13 +21,14 @@ set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics)
 # 需要 agent 库（真机）的 demo
-set(AGENT_EXAMPLE_TARGETS agent_loop)
-set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop)  # 需要真网络（embedding 端点）
+set(AGENT_EXAMPLE_TARGETS agent_loop context_budget)
+set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop context_budget)  # 需要真网络（embedding 端点）
 
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)
+  list(APPEND EXAMPLE_TARGETS context_budget)
 endif()
 
 if(CPPCHAIN_BUILD_HTTP)

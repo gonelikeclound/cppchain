@@ -103,6 +103,8 @@ struct AgentOptions {
 
 class Agent {
  public:
+  // 生命周期：model 与 tools 都必须**比 Agent 活得久**（内部只存指针）。
+  // 切勿传临时对象，例如 Agent(model, tool::ToolRegistry{}, opts) —— 会立即悬垂。
   Agent(model::ChatModel& model, tool::ToolRegistry const& tools, AgentOptions opts = {});
 
   void add_middleware(std::shared_ptr<Middleware> mw) { middlewares_.push_back(std::move(mw)); }
