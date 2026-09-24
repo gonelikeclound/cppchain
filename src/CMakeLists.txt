@@ -111,7 +111,8 @@ target_compile_options(cppchain_graph PRIVATE -Wall -Wextra -Wpedantic)
 # ---- M7: cppchain_agent（Agent 循环 + middleware）----
 add_library(cppchain_agent STATIC
   agent/agent.cpp
-  agent/journal.cpp)
+  agent/journal.cpp
+  agent/stale.cpp)
 
 target_include_directories(cppchain_agent PUBLIC
   ${PROJECT_SOURCE_DIR}/include)

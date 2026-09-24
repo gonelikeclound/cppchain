@@ -21,16 +21,17 @@ set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics)
 # 需要 agent 库（真机）的 demo
-set(AGENT_EXAMPLE_TARGETS agent_loop context_budget)
+set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state)
 # 离线（用 FakeTransport）但需要 agent 库的 demo
 set(OFFLINE_AGENT_EXAMPLES side_effect_guard)
-set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop context_budget)  # 需要真网络（embedding 端点）
+set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop context_budget stale_state)  # 需要真网络（embedding 端点）
 
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)
   list(APPEND EXAMPLE_TARGETS context_budget)
+  list(APPEND EXAMPLE_TARGETS stale_state)
 endif()
 
 if(CPPCHAIN_BUILD_HTTP)

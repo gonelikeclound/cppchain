@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <expected>
 #include <functional>
 #include <stdexcept>
@@ -39,6 +40,10 @@ struct ToolSpec {
   nlohmann::json parameters = nlohmann::json::object();  // JSON Schema
   Handler handler;
   bool read_only = true;  // 副作用标记（M7 审批中间件用）
+
+  // 结果时效性：超过该时长即视为"可能已过期"（余额/库存/价格/文件内容这类易变状态）。
+  // 留空 = 不过期（静态知识类工具）。由 agent::StaleStateGuard 消费，见 04-problems/06。
+  std::optional<std::chrono::seconds> ttl;
 
   // → {"type":"function","function":{name,description,parameters}}，直接填入 CallOptions::tools
   [[nodiscard]] nlohmann::json to_openai() const;

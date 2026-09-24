@@ -35,6 +35,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `agent_loop` | M7（真机）：多步工具调用、**超长返回截断**、**副作用审批拒绝**、**LLM 摘要压缩** | `create_agent(model, tools, middleware)` |
 | `context_budget` | M7（真机）：用真实 usage 量化「工具输出 token 成本」与「压缩前后历史增长」 | — |
 | `side_effect_guard` | M7 收口（离线）：**副作用防重放**——重启后不重复扣款、结果未知拒跑 | 幂等键 + 执行日志 |
+| `stale_state` | **状态时效性**（真机 A/B）：无守卫用旧值作答 vs 守卫促使重新取数 | 观测时间戳 + TTL 失效标注 |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
