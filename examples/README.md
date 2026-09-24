@@ -1,7 +1,21 @@
 # examples/ —— 用法 demo 索引
 
-面向 **M1 Message 层** 的练习场。每个 demo 转译自 langchain 的对应概念/示例，专注一件事。
-构建：`cmake --build --preset dev`；运行：`./build/dev/examples/<名字>`。
+面向各层的练习场。每个 demo 转译自 langchain 的对应概念/示例，专注一件事。
+
+## 运行方式
+
+```bash
+./run-demo.sh                  # 编译并跑全部 demo
+./run-demo.sh tools_retrieval  # 只跑指定的（可多个）
+./run-demo.sh --list           # 列出可用 demo
+./run-demo.sh -n chat_invoke   # -n/--no-build：跳过编译
+```
+
+脚本会自动 source `~/opt/gcc16/env.sh`（编译与运行都需要：部分 demo 依赖 GCC 16
+libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**仓库根目录**下运行各 demo
+——`chat_live` 靠这里找 `.env`，`messages_serialize` 的产物落在 `demo-out/`（已 gitignore）。
+
+等价的手动方式：`source ~/opt/gcc16/env.sh && cmake --build --preset dev && ./build/dev/examples/<名字>`
 
 | demo | 演示什么 | langchain 参照 |
 |---|---|---|
