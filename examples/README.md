@@ -37,6 +37,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `side_effect_guard` | M7 收口（离线）：**副作用防重放**——重启后不重复扣款、结果未知拒跑 | 幂等键 + 执行日志 |
 | `stale_state` | **状态时效性**（真机 A/B）：无守卫用旧值作答 vs 守卫促使重新取数 | 观测时间戳 + TTL 失效标注 |
 | `live_tools` | **真网络工具**（真机）：`get_weather`（Open-Meteo，实时天气+预报）与 `web_search`（火山方舟 Responses · 豆包搜索）；LLM 密钥缺失时退化为工具直连自检 | 真实 provider 工具端到端 |
+| `history_agent` | **会话历史**（真机）：同一 thread 多轮续跑历史累积 / 不带 checkpointer 的无状态对照 / 不同 thread 的隔离；探针中间件打印"发往模型的 messages 条数"作机械证明 | `thread_id` + Checkpointer 续跑 |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
