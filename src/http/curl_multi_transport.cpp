@@ -123,8 +123,13 @@ struct CurlMultiTransport::Impl {
     for (auto const& h : spec.headers) req->headers = curl_slist_append(req->headers, h.c_str());
 
     curl_easy_setopt(req->easy, CURLOPT_URL, req->url.c_str());
-    curl_easy_setopt(req->easy, CURLOPT_POST, 1L);
-    curl_easy_setopt(req->easy, CURLOPT_COPYPOSTFIELDS, req->body.c_str());
+    // 方法：默认 POST（模型/embedding 用）；GET 用于读类接口（如 Open-Meteo 查询）
+    if (spec.method == "GET") {
+      curl_easy_setopt(req->easy, CURLOPT_HTTPGET, 1L);
+    } else {
+      curl_easy_setopt(req->easy, CURLOPT_POST, 1L);
+      curl_easy_setopt(req->easy, CURLOPT_COPYPOSTFIELDS, req->body.c_str());
+    }
     curl_easy_setopt(req->easy, CURLOPT_HTTPHEADER, req->headers);
     curl_easy_setopt(req->easy, CURLOPT_WRITEFUNCTION, &write_cb);
     curl_easy_setopt(req->easy, CURLOPT_WRITEDATA, req.get());

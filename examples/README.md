@@ -36,13 +36,17 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `context_budget` | M7（真机）：用真实 usage 量化「工具输出 token 成本」与「压缩前后历史增长」 | — |
 | `side_effect_guard` | M7 收口（离线）：**副作用防重放**——重启后不重复扣款、结果未知拒跑 | 幂等键 + 执行日志 |
 | `stale_state` | **状态时效性**（真机 A/B）：无守卫用旧值作答 vs 守卫促使重新取数 | 观测时间戳 + TTL 失效标注 |
+| `live_tools` | **真网络工具**（真机）：`get_weather`（Open-Meteo，实时天气+预报）与 `web_search`（火山方舟 Responses · 豆包搜索）；LLM 密钥缺失时退化为工具直连自检 | 真实 provider 工具端到端 |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
 >
 > `chat_invoke` / `chat_stream` 用 **FakeTransport**（脚本化 SSE 帧）离线运行，不需要网络与 key。
-> `chat_live` 走真实端点，配置来自 `.env`（模板见 `.env.example`）；企业代理环境需 CA bundle
+> `chat_live` / `live_tools` 走真实端点，配置来自 `.env`（模板见 `.env.example`）；企业代理环境需 CA bundle
 > （本机存在 `~/.geo/corp-ca.pem` 时会自动启用，也可用 `LLM_CA_BUNDLE` 指定）。
+>
+> 实测结论：库传输层 `HttpRequest` 默认 POST；Open-Meteo 这类只收 GET 的查询接口要在工具里设
+> `req.method = "GET"`（见 `live_tools`）。
 
 ## 与后续层的衔接
 

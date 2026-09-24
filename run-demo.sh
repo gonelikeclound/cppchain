@@ -39,6 +39,7 @@ KNOWN_DEMOS=(
   "state_basics:M5 状态归约/快照回放/跨线程 Store"
   "graph_basics:M6 线性 workflow/条件路由/中途恢复"
   "agent_loop:M7 Agent 循环与三中间件（需 LLM 端点）"
+  "live_tools:M3 真网络工具 get_weather/web_search（需 .env：LLM + 搜索端点）"
   "context_budget:M7 token 成本量化（需 LLM 端点）"
   "side_effect_guard:M7 副作用防重放（离线）"
   "stale_state:状态时效性 A/B 对照（需 LLM 端点）"

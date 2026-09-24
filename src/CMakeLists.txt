@@ -37,11 +37,14 @@ target_link_libraries(cppchain_model PUBLIC
 
 target_compile_options(cppchain_model PRIVATE -Wall -Wextra -Wpedantic)
 
-# ---- M3: cppchain_tool（工具规格 / 注册表 / 检索 / ToolNode）----
+# ---- M3: cppchain_tool（工具规格 / 注册表 / 检索 / ToolNode / 真网络工具）----
 add_library(cppchain_tool STATIC
   tool/tool.cpp
   tool/tool_node.cpp
-  tool/embedding_selector.cpp)
+  tool/embedding_selector.cpp
+  tool/http_json.cpp
+  tool/weather.cpp
+  tool/web_search.cpp)
 
 target_include_directories(cppchain_tool PUBLIC
   ${PROJECT_SOURCE_DIR}/include)

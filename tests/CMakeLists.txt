@@ -38,7 +38,9 @@ add_executable(tool_tests
   tool/tool_spec_test.cpp
   tool/selector_test.cpp
   tool/tool_node_test.cpp
-  tool/embedding_selector_test.cpp)
+  tool/embedding_selector_test.cpp
+  tool/weather_test.cpp
+  tool/web_search_test.cpp)
 
 target_link_libraries(tool_tests PRIVATE
   cppchain_tool

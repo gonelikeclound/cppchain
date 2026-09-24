@@ -19,7 +19,8 @@ namespace cppchain::http {
 
 struct HttpRequest {
   std::string url;
-  std::string body;                     // 已序列化的请求体（JSON）
+  std::string method = "POST";          // "GET" / "POST"（默认 POST 保持 chat/embedding 行为）
+  std::string body;                     // 已序列化的请求体（JSON；GET 时可为空）
   std::vector<std::string> headers;     // 形如 "Content-Type: application/json"
   long timeout_ms = 60000;
   std::string ca_info;                  // 自定义 CA bundle 路径（企业代理/自签环境用）
