@@ -36,6 +36,15 @@ class Middleware {
     return true;
   }
 
+  // 工具执行**前**：返回有值则用它替代真实执行（副作用去重/重放）；
+  // spec 为工具规格（可能为 null，表示未知工具），可用于跳过只读工具
+  virtual std::optional<Message> lookup_tool_result(ToolCall const& call,
+                                                    tool::ToolSpec const* spec) {
+    (void)call;
+    (void)spec;
+    return std::nullopt;
+  }
+
   // 工具执行后：可改写 ToolMessage（超长截断在这里发生）
   virtual void after_tool(Message& tool_message) { (void)tool_message; }
 };

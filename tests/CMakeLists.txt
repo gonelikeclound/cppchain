@@ -74,7 +74,8 @@ gtest_discover_tests(graph_tests)
 
 # ---- M7: Agent 循环与中间件测试 ----
 add_executable(agent_tests
-  agent/agent_test.cpp)
+  agent/agent_test.cpp
+  agent/journal_test.cpp)
 
 target_link_libraries(agent_tests PRIVATE
   cppchain_agent

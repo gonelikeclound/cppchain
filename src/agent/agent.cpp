@@ -163,9 +163,21 @@ std::expected<Message, model::ModelError> Agent::invoke(std::vector<Message> inp
       if (!approved) {
         result = message::tool_message("rejected: " + why, call.id, "error");
       } else {
-        auto executed = node_.run(std::vector<ToolCall>{call});
-        result = executed.empty() ? message::tool_message("no result", call.id, "error")
-                                  : std::move(executed.front());
+        // 执行前：中间件可返回缓存结果（副作用去重/重放），命中则不执行
+        std::optional<Message> cached;
+        for (auto const& mw : middlewares_) {
+          if (auto r = mw->lookup_tool_result(call, tools_->find(call.name))) {
+            cached = std::move(r);
+            break;
+          }
+        }
+        if (cached) {
+          result = std::move(*cached);
+        } else {
+          auto executed = node_.run(std::vector<ToolCall>{call});
+          result = executed.empty() ? message::tool_message("no result", call.id, "error")
+                                    : std::move(executed.front());
+        }
       }
       for (auto const& mw : middlewares_) mw->after_tool(result);
       msgs_.push_back(result);

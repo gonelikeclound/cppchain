@@ -22,9 +22,11 @@ set(STATE_EXAMPLE_TARGETS state_basics)
 set(GRAPH_EXAMPLE_TARGETS graph_basics)
 # 需要 agent 库（真机）的 demo
 set(AGENT_EXAMPLE_TARGETS agent_loop context_budget)
+# 离线（用 FakeTransport）但需要 agent 库的 demo
+set(OFFLINE_AGENT_EXAMPLES side_effect_guard)
 set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop context_budget)  # 需要真网络（embedding 端点）
 
-list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics)
+list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)
@@ -42,6 +44,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic)
   if(t IN_LIST AGENT_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_agent cppchain_http_curl)
+  elseif(t IN_LIST OFFLINE_AGENT_EXAMPLES)
+    target_link_libraries(${t} PRIVATE cppchain_agent)
   elseif(t IN_LIST HTTP_NEEDED_EXAMPLES)
     target_link_libraries(${t} PRIVATE cppchain_tool cppchain_http_curl)
   elseif(t IN_LIST TOOL_EXAMPLE_TARGETS)

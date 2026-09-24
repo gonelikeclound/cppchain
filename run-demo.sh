@@ -35,6 +35,12 @@ KNOWN_DEMOS=(
   "tools_basic:M3 工具调用闭环与错误回喂"
   "tools_retrieval:M3 大批量工具检索量化"
   "tools_retrieval_vector:关键词 vs 向量检索对照（需向量端点）"
+  "structured_output:M4 结构化抽取/分类/两策略对照（需 LLM 端点）"
+  "state_basics:M5 状态归约/快照回放/跨线程 Store"
+  "graph_basics:M6 线性 workflow/条件路由/中途恢复"
+  "agent_loop:M7 Agent 循环与三中间件（需 LLM 端点）"
+  "context_budget:M7 token 成本量化（需 LLM 端点）"
+  "side_effect_guard:M7 副作用防重放（离线）"
 )
 
 describe() {
