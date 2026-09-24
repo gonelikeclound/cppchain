@@ -16,9 +16,11 @@ set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream structured_output)
 set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo
 set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector)
+# 需要状态库的 demo
+set(STATE_EXAMPLE_TARGETS state_basics)
 set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output)  # 需要真网络（embedding 端点）
 
-list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval)
+list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
 endif()
@@ -36,6 +38,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_tool cppchain_http_curl)
   elseif(t IN_LIST TOOL_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_tool)
+  elseif(t IN_LIST STATE_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_state)
   elseif(t IN_LIST HTTP_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_http_curl)
   elseif(t IN_LIST MODEL_EXAMPLE_TARGETS)

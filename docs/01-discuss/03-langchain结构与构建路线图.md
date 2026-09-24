@@ -71,8 +71,8 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 | **M1** ✅ | 基础抽象：**Message + ContentBlock + JSON 序列化契约** | nlohmann | Message 类型族 + 内容块 + tool_calls/tool_call_id；JSON round-trip 测试（16 项） | 契约底层（一切层共用） |
 | **M2** ✅ | **ChatModel 抽象 + OpenAI 兼容 Provider** + **流式**（std::generator） | M1+libcurl | `invoke/stream/bind_tools/with_structured_output` 接口 + 真实/仿真 LLM 跑通 | 超长工具返回（流式长输出预研） |
 | **M3** ✅ | **Tool 层**：ToolSchema + bind_tools + ToolMessage 闭环 + ToolNode 等价物 | M1 M2 | 工具调用闭环 demo（tool_calls→ToolMessage 协议正确） | **大批量工具查找**（工具检索组件：关键词起步→embed 预留） |
-| **M4** | **Structured Output / OutputParser** | M2 | schema 驱动输出；可作 route/judge | — |
-| **M5** | **State/Reducer + 内存 Checkpointer + Store 接口** | M1 | `MessagesState`/`add_messages`；thread 快照五方法+内存实现 | 上下文压缩（消息历史状态垫底） |
+| **M4** ✅ | **Structured Output / OutputParser** | M2 | schema 驱动输出；可作 route/judge | — |
+| **M5** ✅ | **State/Reducer + 内存 Checkpointer + Store 接口** | M1 | `MessagesState`/`add_messages`；thread 快照五方法+内存实现 | 上下文压缩（消息历史状态垫底） |
 | **M6** | **Graph 引擎（极简）**：StateGraph、Node/Edge/ConditionalEdge、顺序 super-step、Command 简版、checkpoint 挂接 | M5 | 确定性 workflow + conditional 路由 demo | — |
 | **M7** | **Agent 循环**：create_agent 等价物（middleware 简版 + 工具路由） | M2 M3 M6 | ReAct 风格可用 agent | **上下文压缩**（hot-path 压缩中间件）；**超长工具返回**（截断/摘要）；副作用可控执行 |
 | **M8** | **Subagent/多智能体**：subgraph-as-tool、orchestrator-worker（串行版）、handoff 简化 | M6 M7 | ask_expert / supervisor demo | **副作用与子代理**（主上下文干净验证 + fork 语义对照） |
@@ -100,4 +100,6 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 - [x] **M1 完成**：Message + ContentBlock + JSON 序列化契约（14/14 测试绿，demo 验证）
 - [x] **M2 完成**：ChatModel + OpenAI 兼容 + curl_multi 传输 + 协程糖；DeepSeek 真机联调通过（45 测试 / 7 demo）
 - [x] **M3 完成**：工具层 + 可插拔检索（关键词+CJK 2-gram+IDF）；26 测试 / 9 demo
-- [ ] **开始 M4**：Structured Output / OutputParser（或按需跳到 M5）
+- [x] **M4 完成**：结构化输出（两策略 + 校验 + 回喂重试；含受控对照实验）
+- [x] **M5 完成**：状态归约 + 内存 Checkpointer/Store（116 测试）
+- [ ] **开始 M6**：Graph 引擎（极简）—— StateGraph/Node/Edge/ConditionalEdge + super-step

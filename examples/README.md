@@ -30,6 +30,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `tools_retrieval` | M3：**大批量工具查找**量化——体积压缩比 + precision/recall（含 IDF 前后对比） | 工具检索（langchain 生态的应用层职责） |
 | `tools_retrieval_vector` | **关键词 vs 向量对照实验**（需向量端点）：跨语言/同义改写下 2/8 → 8/8 | embedding 检索（语义召回） |
 | `structured_output` | M4：结构化抽取、classify 路由/评判、**两策略遵循度对照**（需 LLM 端点） | `with_structured_output` |
+| `state_basics` | M5：状态归约（含**同 id 覆盖=压缩改写**）、快照链与回放、跨线程 Store | State/Reducer、Checkpointer、Store |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。

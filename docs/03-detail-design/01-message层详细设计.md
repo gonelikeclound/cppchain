@@ -43,7 +43,10 @@ text 块相邻拼接；不同块追加。tool_call_chunks 按 `index` 累积：n
 3. **`-Wmissing-field-initializers`**（`-Wextra` 下）→ 给 `id` 加默认成员初始化器（NSDMI）消除；设计符缩略写法尽量避免。
 4. **nlohmann 在 C++26 下自身告警**（`std::is_trivial` deprecated）→ 第三方头标 `SYSTEM BEFORE PUBLIC` include 压制，保住"零告警"目标。
 5. **`gtest_discover_tests` 报错** → 需先 `include(GoogleTest)`（CMake 模块）。
-6. **`Message` 不能默认化 `operator<=>`**（成员含 nlohmann::json，无间距比较）→ 默认化 `operator==` 即可（json 有 `==`）。
+6. **规范 JSON 的可选字段会显式写 `null`**（如 `"id": null`）——nlohmann 的 `value(key, default)`
+   只在**键缺失**时用默认值，值为 null 时会返回 null 并在转 string 时抛 `type_error`。
+   → 提供公共助手 **`message::opt_string(j, key)`**；凡读可选字段一律用它（本项目 demo 曾两次踩此坑）。
+7. **`Message` 不能默认化 `operator<=>`**（成员含 nlohmann::json，无间距比较）→ 默认化 `operator==` 即可（json 有 `==`）。
 
 ## 6. 验证结论
 

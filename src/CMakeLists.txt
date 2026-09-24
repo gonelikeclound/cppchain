@@ -55,6 +55,23 @@ target_link_libraries(cppchain_tool PUBLIC
 
 target_compile_options(cppchain_tool PRIVATE -Wall -Wextra -Wpedantic)
 
+# ---- M5: cppchain_state（状态 schema/reducer + Checkpointer + Store）----
+add_library(cppchain_state STATIC
+  state/state.cpp
+  state/memory_backends.cpp)
+
+target_include_directories(cppchain_state PUBLIC
+  ${PROJECT_SOURCE_DIR}/include)
+
+target_include_directories(cppchain_state SYSTEM BEFORE PUBLIC
+  ${nlohmann_json_SOURCE_DIR}/include)
+
+target_link_libraries(cppchain_state PUBLIC
+  cppchain_message
+  nlohmann_json::nlohmann_json)
+
+target_compile_options(cppchain_state PRIVATE -Wall -Wextra -Wpedantic)
+
 # ---- M2: cppchain_http_curl（真实传输，libcurl multi）----
 # 仅在 CPPCHAIN_BUILD_HTTP=ON 时构建；模型层不依赖它（传输是可注入的）。
 if(CPPCHAIN_BUILD_HTTP)

@@ -47,3 +47,16 @@ target_link_libraries(tool_tests PRIVATE
 
 target_compile_options(tool_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(tool_tests)
+# ---- M5: 状态层测试（state/reducer + checkpointer + store）----
+add_executable(state_tests
+  state/state_test.cpp
+  state/checkpointer_test.cpp
+  state/store_test.cpp)
+
+target_link_libraries(state_tests PRIVATE
+  cppchain_state
+  GTest::gtest_main
+  Threads::Threads)
+
+target_compile_options(state_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(state_tests)

@@ -40,6 +40,16 @@ inline void put_opt(nlohmann::json& j, char const* key, std::optional<std::strin
 }
 }  // namespace detail
 
+// 公共助手：读可选字符串字段。
+// 为什么需要它：规范 JSON 对可选字段**显式写 null**（如 "id": null），
+// 而 nlohmann 的 `value(key, default)` 只在**键缺失**时用默认值 —— 值为 null 时会返回 null
+// 并可能在转 string 时抛 type_error。凡读可选字段，请用本函数。
+inline std::optional<std::string> opt_string(nlohmann::json const& j, std::string_view key) {
+  auto const it = j.find(std::string(key));
+  if (it == j.end() || it->is_null()) return std::nullopt;
+  return it->get<std::string>();
+}
+
 // ---- UsageMetadata ----
 inline void to_json(nlohmann::json& j, UsageMetadata const& u) {
   j = {{"input_tokens", u.input_tokens},

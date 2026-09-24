@@ -13,3 +13,4 @@
 | 03 | [03-tool层架构设计.md](03-tool层架构设计.md) | M3 Tool：显式 schema + 可插拔检索 + ToolNode 并行 | ✅ 已实现 |
 | 04 | [04-embeddings层架构设计.md](04-embeddings层架构设计.md) | 向量能力：DashScope 适配 + EmbeddingSelector（卡位问题的解法②） | ✅ 已实现 |
 | 05 | [05-structured-output架构设计.md](05-structured-output架构设计.md) | M4 结构化输出：两策略 + 最小校验 + 回喂重试 | ✅ 已实现 |
+| 06 | [06-state层架构设计.md](06-state层架构设计.md) | M5 状态层：reducer/add_messages + Checkpointer + Store | ✅ 已实现 |
