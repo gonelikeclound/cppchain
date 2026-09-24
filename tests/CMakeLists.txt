@@ -76,6 +76,7 @@ gtest_discover_tests(graph_tests)
 add_executable(agent_tests
   agent/agent_test.cpp
   agent/journal_test.cpp
+  agent/journal_persistence_test.cpp
   agent/stale_test.cpp)
 
 target_link_libraries(agent_tests PRIVATE

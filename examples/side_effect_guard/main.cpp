@@ -1,9 +1,9 @@
-// demo: side_effect_guard —— 副作用防重放（M7 收口补隐患，纯离线确定性）
+// demo: side_effect_guard —— 副作用防重放 + 日志持久化后端（纯离线确定性）
 //
 // 风险：M6 的恢复语义是"重跑该步"，M7 的循环与任何重试都可能让副作用执行两次。
 // 演示四件事：
 //   ① 首次执行真的发生
-//   ② 崩溃重启（日志落盘 → 新进程恢复）后同一调用被**重放**，不重复扣款
+//   ② 崩溃重启（FileJournal 原子落盘 → 新实例自动载入）后同一调用被**重放**，不重复扣款
 //   ③ "只有意图没有结果" → 拒绝重跑（结果未知，交人工确认）
 //   ④ 两种幂等键的取舍（tool_call_id vs name+args）
 #include <cppchain/agent/journal.hpp>
@@ -100,25 +100,27 @@ int main() {
   std::filesystem::create_directories("demo-out");
   std::string const path = "demo-out/journal.json";
 
-  // ---- ① 首次执行 ----
+  // demo 必须从干净状态开始：上一次运行留下的日志会让第一次调用就被"重放"
+  // （那恰好证明持久化生效，但会让本 demo 的 ①/② 对照失真）
+  std::error_code ec;
+  bool const had_old = std::filesystem::exists(path);
+  std::filesystem::remove(path, ec);
+  if (had_old) std::println("（已清理上次运行遗留的日志：{}）\n", path);
+
+  // ---- ① 首次执行（FileJournal 每次变更自动原子落盘）----
   std::println("=== ① 首次扣款 ===");
   {
-    MemoryJournal journal;
+    FileJournal journal(path);  // 无需手工 dump/load
     std::string const out = run_once(*transport, model, tools, journal, charge_count, "call_1");
     std::println("  {} | 真实扣款次数 = {}", out, charge_count);
-    std::ofstream(path) << journal.dump().dump(2);
-    std::println("  执行日志已落盘: {}", path);
+    std::println("  执行日志已自动落盘 {} 次 → {}", journal.saves(), path);
   }
 
-  // ---- ② 崩溃重启后重放（读回日志）----
+  // ---- ② 崩溃重启后重放（新实例自动从磁盘恢复）----
   std::println("\n=== ② 崩溃重启后同一请求 ===");
   {
-    MemoryJournal journal;
-    std::ifstream in(path);
-    nlohmann::json persisted;
-    in >> persisted;
-    journal.load(persisted);
-    std::println("  从磁盘恢复 {} 条日志", journal.size());
+    FileJournal journal(path);  // 构造即自动载入（损坏会 fail-closed 抛错）
+    std::println("  启动时自动恢复 {} 条日志", journal.size());
 
     std::string const out = run_once(*transport, model, tools, journal, charge_count, "call_1");
     std::println("  {} | 真实扣款次数 = {}  ← 没有重复扣款", out, charge_count);

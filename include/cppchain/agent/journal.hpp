@@ -64,6 +64,36 @@ class MemoryJournal final : public ToolExecutionJournal {
   std::unordered_map<std::string, JournalEntry> entries_;
 };
 
+// 文件后端：每次变更**原子落盘**（写临时文件 → rename），构造时自动载入。
+// 为什么需要它：MemoryJournal 一重启就没了，防重放能力随之失效。
+//
+// 安全默认 **fail-closed**：文件存在但损坏时**抛异常**，而不是"静默从空开始"——
+// 后者等于悄悄丢掉防重放能力（安全机制不能优雅降级为不安全）。
+class FileJournal final : public ToolExecutionJournal {
+ public:
+  enum class OnCorrupt { Throw, StartEmpty };
+
+  explicit FileJournal(std::string path, OnCorrupt on_corrupt = OnCorrupt::Throw);
+
+  [[nodiscard]] std::optional<JournalEntry> find(std::string const& key) const override;
+  void record_intent(JournalEntry entry) override;
+  void record_result(std::string const& key, std::string content, std::string status) override;
+
+  [[nodiscard]] nlohmann::json dump() const override;
+  void load(nlohmann::json const& j) override;
+
+  [[nodiscard]] std::size_t size() const { return inner_.size(); }
+  [[nodiscard]] std::string const& path() const { return path_; }
+  [[nodiscard]] std::size_t saves() const { return saves_; }  // 落盘次数（便于观察）
+
+ private:
+  void persist();  // 原子写盘
+
+  std::string path_;
+  MemoryJournal inner_;
+  std::size_t saves_ = 0;
+};
+
 // 幂等键的取法
 enum class JournalKeyMode {
   ToolCallId,       // 默认：同一次调用（模型生成的 id 稳定）——语义最明确
@@ -77,6 +107,8 @@ class SideEffectGuard final : public Middleware {
   struct Options {
     JournalKeyMode key_mode = JournalKeyMode::ToolCallId;
     bool retry_on_failure = false;  // 失败记录是否允许重跑（默认不允许：副作用可能已部分生效）
+    // 键前缀：多租户/多会话共用一个日志文件时用它隔离（如 "thread-42:"）
+    std::string key_prefix;
   };
 
   explicit SideEffectGuard(ToolExecutionJournal& journal) : journal_(&journal) {}
@@ -95,6 +127,7 @@ class SideEffectGuard final : public Middleware {
   [[nodiscard]] std::size_t executions() const { return executions_; }
 
   [[nodiscard]] static std::string key_for(message::ToolCall const& call, JournalKeyMode mode);
+  [[nodiscard]] std::string prefixed_key(message::ToolCall const& call) const;
 
  private:
   ToolExecutionJournal* journal_;

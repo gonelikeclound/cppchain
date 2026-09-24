@@ -1,6 +1,9 @@
 // cppchain —— src/agent/journal.cpp
 #include "cppchain/agent/journal.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -80,6 +83,59 @@ void MemoryJournal::load(nlohmann::json const& j) {
   for (auto const& raw : j["entries"]) entries_[raw.value("key", "")] = entry_from_json(raw);
 }
 
+// ---------------- FileJournal ----------------
+
+FileJournal::FileJournal(std::string path, OnCorrupt on_corrupt) : path_(std::move(path)) {
+  std::ifstream in(path_);
+  if (!in) return;  // 首次使用：文件不存在是正常的
+
+  nlohmann::json j;
+  try {
+    in >> j;
+  } catch (std::exception const& e) {
+    if (on_corrupt == OnCorrupt::StartEmpty) return;
+    throw std::runtime_error("FileJournal: 日志文件损坏，拒绝以空日志启动（fail-closed）：" +
+                             path_ + " —— " + e.what());
+  }
+  inner_.load(j);
+}
+
+void FileJournal::persist() {
+  // 原子写：先写临时文件，再 rename（同目录 rename 在 POSIX 上是原子的）
+  std::string const tmp = path_ + ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::trunc);
+    if (!out) throw std::runtime_error("FileJournal: 无法写入 " + tmp);
+    out << inner_.dump().dump(2);
+    out.flush();
+    if (!out) throw std::runtime_error("FileJournal: 写入失败 " + tmp);
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, path_, ec);
+  if (ec) throw std::runtime_error("FileJournal: rename 失败 " + tmp + " → " + path_ + ": " + ec.message());
+  ++saves_;
+}
+
+std::optional<JournalEntry> FileJournal::find(std::string const& key) const {
+  return inner_.find(key);
+}
+
+void FileJournal::record_intent(JournalEntry entry) {
+  inner_.record_intent(std::move(entry));
+  persist();  // 意图先落盘：崩溃后才知道"可能执行过"
+}
+
+void FileJournal::record_result(std::string const& key, std::string content, std::string status) {
+  inner_.record_result(key, std::move(content), std::move(status));
+  persist();
+}
+
+nlohmann::json FileJournal::dump() const { return inner_.dump(); }
+void FileJournal::load(nlohmann::json const& j) {
+  inner_.load(j);
+  persist();
+}
+
 // ---------------- SideEffectGuard ----------------
 
 std::string SideEffectGuard::key_for(message::ToolCall const& call, JournalKeyMode mode) {
@@ -88,12 +144,16 @@ std::string SideEffectGuard::key_for(message::ToolCall const& call, JournalKeyMo
   return call.name + ":" + call.args.dump();
 }
 
+std::string SideEffectGuard::prefixed_key(message::ToolCall const& call) const {
+  return opts_.key_prefix + key_for(call, opts_.key_mode);
+}
+
 std::optional<message::Message> SideEffectGuard::lookup_tool_result(message::ToolCall const& call,
                                                                    tool::ToolSpec const* spec) {
   // 只读工具无需防重放（重跑查询无害），也不该占用日志
   if (spec != nullptr && spec->read_only) return std::nullopt;
 
-  std::string const key = key_for(call, opts_.key_mode);
+  std::string const key = prefixed_key(call);
 
   auto const found = journal_->find(key);
   if (!found) {
