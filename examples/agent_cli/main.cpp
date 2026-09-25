@@ -10,8 +10,10 @@
 //   · react-trim    —— react + TrimHistory 历史压缩（长会话下对比 token 成本）；
 //                      --summarize 时用 LLM 摘要器压旧史（保记忆，代价是多一次模型调用），
 //                      否则朴素折叠占位（省 token 但早期事实会丢）
-//   · react-approve —— react + 假副作用工具 send_email / delete_file + ToolApproval
-//                      名单拒绝：模型调用即被拒并作为 error ToolMessage 回喂
+//   · react-approve —— react + 假副作用工具 send_email / delete_file + 副作用审批：
+//                      缺省名单拒绝（模型调用即被拒并 error 回喂）；
+//                      --allow-prefix <前缀> 切到按参数放行档 —— delete_file 的 path 在
+//                      前缀内才执行、前缀外拒绝回喂（send_email 恒拒）
 //
 // 输入源（三选一，互斥）：
 //   · -i / --interactive  交互式 REPL（缺省；同一 thread + MemoryCheckpointer 多轮记忆）
@@ -73,6 +75,7 @@ struct CliOptions {
   std::string file;
   bool json = false;
   bool summarize = false;  // react-trim 用 LLM 摘要器压缩（保记忆），否则朴素占位
+  std::string allow_prefix;  // react-approve：delete_file 的 path 允许前缀（按参数放行档）
   bool show_help = false;
   bool list_modes = false;
 };
@@ -167,6 +170,14 @@ std::optional<CliOptions> parse_cli(int argc, char** argv, std::string& err) {
       }
       if (!set_input(InputSource::File)) return std::nullopt;
       o.file = std::move(*v);
+    } else if (opt == "--allow-prefix") {
+      auto v = resolve(opt);
+      if (!v) return std::nullopt;
+      if (v->empty()) {
+        err = "--allow-prefix 的前缀为空";
+        return std::nullopt;
+      }
+      o.allow_prefix = std::move(*v);
     } else if (opt == "-m" || opt == "--mode") {
       auto v = resolve(opt);
       if (!v) return std::nullopt;
@@ -205,6 +216,9 @@ void usage(std::ostream& os) {
                "      --list-modes     列出全部模式及说明\n"
                "      --summarize      与 react-trim 搭配：压缩时用 LLM 摘要器（保留记忆，\n"
                "                        每触发一次压缩多一次模型调用），不指定则朴素折叠占位\n"
+               "      --allow-prefix <前缀>\n"
+               "                        与 react-approve 搭配：delete_file 按 path 参数前缀放行\n"
+               "                        （前缀内执行 / 外拒绝回喂），不指定则名单拒绝全部\n"
                "  -i, --interactive    交互式 REPL（缺省输入源；需终端，同一 thread 多轮记忆）\n"
                "  -p, --prompt <文本>  单条 prompt，跑完即止\n"
                "  -f, --file <路径>    文件批量：整行 --- 分隔多区块，# 开头整行为注释\n"
@@ -228,8 +242,10 @@ void list_modes(std::ostream& os) {
                "                WEB_SEARCH_API_KEY 时追加 web_search（真联网）\n"
                "  react-trim    react + TrimHistory 历史压缩（长会话下对比 token 成本；\n"
                "                配套 --summarize 用 LLM 摘要器保记忆，否则朴素折叠会丢早期事实）\n"
-               "  react-approve react + 假副作用工具 send_email / delete_file + ToolApproval\n"
-               "                名单拒绝：模型调用即被拒并作为 error ToolMessage 回喂");
+               "  react-approve react + 假副作用工具 send_email / delete_file + 副作用审批：\n"
+               "                缺省名单拒绝（模型调用即被拒并 error 回喂）；\n"
+               "                --allow-prefix 时改为按参数放行 —— delete_file 的 path 在\n"
+               "                前缀内才执行，前缀外拒绝，send_email 恒拒");
 }
 
 // ============================================================ 工具 Setup
@@ -240,6 +256,7 @@ struct Setup {
   tool::ToolRegistry registry;                 // direct 模式保持空（即"无工具"）
   std::shared_ptr<ToolApproval> approval;      // react-approve 注册
   std::shared_ptr<TrimHistory> trim;           // react-trim 注册
+  std::string allow_prefix;                    // 按参数放行档的允许前缀（展示用）
 };
 
 // LLM 摘要器：把被折叠的历史压成 ≤60 字摘要，只保留用户关心的事实与偏好。
@@ -262,7 +279,7 @@ TrimHistory::Summarizer build_llm_summarizer(model::ChatModel& model) {
 void configure_setup(Setup& s, Mode mode, model::ChatModel& model,
                      std::shared_ptr<http::Transport> const& transport,
                      std::string const& ws_base, std::string const& ws_key,
-                     std::string const& ca, bool summarize) {
+                     std::string const& ca, bool summarize, std::string allow_prefix) {
   if (mode == Mode::Direct) return;  // registry 留空
 
   tool::DatetimeToolConfig dtc;
@@ -303,6 +320,29 @@ void configure_setup(Setup& s, Mode mode, model::ChatModel& model,
         /*read_only=*/false));
     s.approval =
         std::make_shared<ToolApproval>(std::vector<std::string>{"send_email", "delete_file"});
+
+    // --allow-prefix：切到"按参数放行"档 —— delete_file 的 path 在允许前缀内才执行，
+    // 前缀外拒绝并作为 error ToolMessage 回喂；send_email 仍恒拒。同一工具的 A/B。
+    if (!allow_prefix.empty()) {
+      s.allow_prefix = std::move(allow_prefix);
+      s.approval = std::make_shared<ToolApproval>(
+          [prefix = s.allow_prefix](ToolCall const& call, std::string& why) {
+            if (call.name == "send_email") {
+              why = "工具 'send_email' 被策略禁止（副作用审批）";
+              return false;
+            }
+            if (call.name == "delete_file") {
+              auto it = call.args.find("path");
+              std::string const p =
+                  (it != call.args.end() && it->is_string()) ? it->get<std::string>() : "";
+              if (!p.empty() && p.starts_with(prefix)) return true;
+              why = "path '" + p + "' 不在允许前缀 '" + prefix + "' 内（按参数审批）；"
+                    "如需删除请用前缀内的路径";
+              return false;
+            }
+            return true;  // 其它工具照常放行
+          });
+    }
   }
 
   // --summarize：LLM 摘要器压缩（保记忆，成本 = 每次压缩多一次模型调用）
@@ -324,9 +364,13 @@ std::string system_prompt_for(Mode mode, Setup const& s) {
   std::string p = "你是会调用工具的助手。可用工具：" + names +
                   "。需要精确计算、当前时间或联网资料时调用工具，回答保持简短。"
                   "只调用上面列出的工具，其余工具不存在、调用必然失败。";
-  if (mode == Mode::ReactApprove)
-    p += " send_email 与 delete_file 是有副作用的工具，可能被审批策略拒绝：一旦被拒绝，"
+  if (mode == Mode::ReactApprove) {
+    p += " send_email 与 delete_file 是有副作用的工具，会被审批策略审查：一旦被拒绝，"
          "向用户说明原因，不要重复尝试同一调用。";
+    if (!s.allow_prefix.empty())
+      p += " 当前策略：delete_file 的 path 必须以 '" + s.allow_prefix +
+           "' 开头才会被执行，前缀外的路径会被拒绝。";
+  }
   if (mode == Mode::ReactTrim)
     p += " 长对话的历史可能被自动压缩为摘要，相关信息以摘要与最新消息为准。";
   return p;
@@ -635,10 +679,14 @@ int main(int argc, char** argv) {
   // --summarize 只对 react-trim 有意义（压缩才发生）；其余模式给个提示再忽略
   if (cli->summarize && cli->mode != Mode::ReactTrim)
     std::println(std::cerr, "提示: --summarize 只在 react-trim 模式生效（其它模式无历史压缩），已忽略。");
+  // --allow-prefix 只对 react-approve 有意义（副作用审批才发生）
+  if (!cli->allow_prefix.empty() && cli->mode != Mode::ReactApprove)
+    std::println(std::cerr, "提示: --allow-prefix 只在 react-approve 模式生效（其它模式无副作用审批），已忽略。");
 
   // 先构造 Setup（工具具名）→ 再建 Agent（句柄非拥有）→ 再跑
   Setup setup;
-  configure_setup(setup, cli->mode, model, transport, ws_base, ws_key, ca, cli->summarize);
+  configure_setup(setup, cli->mode, model, transport, ws_base, ws_key, ca, cli->summarize,
+                  cli->allow_prefix);
 
   if (!cli->json) {
     std::println("模式 {} | 模型 {} | 工具 {} 个 | web_search {}",
@@ -646,6 +694,11 @@ int main(int argc, char** argv) {
                  web_ok ? "已配置" : "未配置（不注册，模型按知识作答）");
     if (setup.trim)
       std::println("压缩: TrimHistory(6){}", cli->summarize ? " + LLM 摘要器" : "（朴素占位折叠）");
+    if (setup.approval)
+      std::println("审批: {}", cli->allow_prefix.empty()
+                                  ? "名单拒绝（send_email / delete_file）"
+                                  : "按参数放行（delete_file 允许前缀 '" + cli->allow_prefix +
+                                        "'，send_email 恒拒）");
   }
 
   if (repl)
