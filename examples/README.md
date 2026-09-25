@@ -29,6 +29,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `tools_basic` | M3：工具定义 → 绑定 → 模型发起 → ToolNode 执行 → ToolMessage 回填 → 最终答复；含**错误回喂** | `@tool` / `bind_tools` / `ToolNode` |
 | `tools_retrieval` | M3：**大批量工具查找**量化——体积压缩比 + precision/recall（含 IDF 前后对比） | 工具检索（langchain 生态的应用层职责） |
 | `tools_retrieval_vector` | **关键词 vs 向量对照实验**（需向量端点）：跨语言/同义改写下 2/8 → 8/8 | embedding 检索（语义召回） |
+| `tools_frontline` | 第一档内置工具：`get_datetime`（当前时间/时区）、`calculator`（精确计算兜底，安全求值非 eval）、`fetch_url`（网页正文提取，补全 搜索→打开详情页 闭环）；离线可跑 | `Calculator` / 自研时间工具 / `WebPageContentExtractor` |
 | `structured_output` | M4：结构化抽取、classify 路由/评判、**两策略遵循度对照**（需 LLM 端点） | `with_structured_output` |
 | `state_basics` | M5：状态归约（含**同 id 覆盖=压缩改写**）、快照链与回放、跨线程 Store | State/Reducer、Checkpointer、Store |
 | `graph_basics` | M6：线性 workflow、条件路由、循环上限、**中途快照恢复续跑** | LangGraph StateGraph |

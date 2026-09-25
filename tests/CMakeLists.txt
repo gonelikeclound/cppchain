@@ -40,7 +40,10 @@ add_executable(tool_tests
   tool/tool_node_test.cpp
   tool/embedding_selector_test.cpp
   tool/weather_test.cpp
-  tool/web_search_test.cpp)
+  tool/web_search_test.cpp
+  tool/datetime_test.cpp
+  tool/fetch_url_test.cpp
+  tool/calculator_test.cpp)
 
 target_link_libraries(tool_tests PRIVATE
   cppchain_tool

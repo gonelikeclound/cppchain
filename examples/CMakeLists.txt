@@ -15,7 +15,8 @@ set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream structured_output)
 # 需要真实 HTTP 传输的 demo（CPPCHAIN_BUILD_HTTP=ON 时才存在）
 set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo
-set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector)
+set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
+                         tools_frontline)
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
@@ -26,7 +27,8 @@ set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools histo
 set(OFFLINE_AGENT_EXAMPLES side_effect_guard)
 set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop context_budget stale_state)  # 需要真网络（embedding 端点）
 
-list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard)
+list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard
+                            tools_frontline)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)

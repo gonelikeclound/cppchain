@@ -53,3 +53,18 @@
 2. `select()` 目前 O(N) 全表扫描且每次重建 df；N≥5000 时 ~83 ms，需倒排索引/缓存。
 3. `tool_search` 元工具、分层命名空间 —— 见 `04-problems/01` §6。
 4. `read_only=false` 工具的审批路径留给 M7。
+
+## 6. 新增内置工具：get_datetime / calculator / fetch_url（第一档）
+
+> 承接 §2 的 `make_weather_tool` / `make_web_search_tool`，补全"自带工具箱"的第一档。
+> 选型依据：零密钥 / 可离线单测 / 直插当前 research 主线（见讨论文档 01-项目基调）。
+
+| 工具 | 实现 | langchain 参照 | 要点 |
+|---|---|---|---|
+| `get_datetime` | `src/tool/datetime.cpp` | 自研经典（langchain 无 canonical 内置） | 模型不知道"现在几点/星期几"；固定偏移时区（±HH:MM，**不依赖 tzdb**）；`DatetimeToolConfig::clock` 可注入 → 离线确定测试；`ttl=60s` |
+| `calculator` | `src/tool/calculator.cpp` | langchain 内置 `Calculator` | 递归下降 + 直接求值，**非 eval**（无任意代码执行风险）；`-2^2=-4`（对齐 Python）、`^`/`**` 右结合、常量 pi/e、函数 sqrt/abs/pow/min/max/log…；长度/嵌套深度双防御（防 LLM 生成病态输入）；`calculate()` / `format_number()` 纯函数可单测 |
+| `fetch_url` | `src/tool/fetch_url.cpp` | `WebPageContentExtractor` | 补全"搜索 → 打开详情页"闭环；GET 抓页 → `html_to_text`（剥 script/style/注释/标签、解码命名+数字实体、块级标签换行、压平空白）→ 标题 + 正文；`max_chars` 默认 4K/上限 20K 兜底上下文 |
+
+**决策**：时区用固定偏移而非 IANA 名称（`tzdb` 可用性不可控）；内部统一 UTC、模型可传 `offset`。
+**可测性**：纯函数暴露给单测，HTTP 路径复用 `FakeTransport` → 新增 **30 项测试全绿**、`ctest` 全量 210 通过。
+**demo**：`examples/tools_frontline`（离线跑通：时间/时区、精确计算、除零错误回喂、抓页剥标签）。

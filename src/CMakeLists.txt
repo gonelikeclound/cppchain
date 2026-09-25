@@ -44,7 +44,10 @@ add_library(cppchain_tool STATIC
   tool/embedding_selector.cpp
   tool/http_json.cpp
   tool/weather.cpp
-  tool/web_search.cpp)
+  tool/web_search.cpp
+  tool/datetime.cpp
+  tool/fetch_url.cpp
+  tool/calculator.cpp)
 
 target_include_directories(cppchain_tool PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
