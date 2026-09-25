@@ -47,7 +47,8 @@ add_library(cppchain_tool STATIC
   tool/web_search.cpp
   tool/datetime.cpp
   tool/fetch_url.cpp
-  tool/calculator.cpp)
+  tool/calculator.cpp
+  tool/file_tools.cpp)
 
 target_include_directories(cppchain_tool PUBLIC
   ${PROJECT_SOURCE_DIR}/include)

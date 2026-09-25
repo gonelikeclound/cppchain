@@ -68,3 +68,33 @@
 **决策**：时区用固定偏移而非 IANA 名称（`tzdb` 可用性不可控）；内部统一 UTC、模型可传 `offset`。
 **可测性**：纯函数暴露给单测，HTTP 路径复用 `FakeTransport` → 新增 **30 项测试全绿**、`ctest` 全量 210 通过。
 **demo**：`examples/tools_frontline`（离线跑通：时间/时区、精确计算、除零错误回喂、抓页剥标签）。
+
+## 7. 文件系统工具三件套：file_read / file_write / list_dir（第二档）
+
+> 对应 `04-problems/03-工具副作用`。写工具是项目里**第一个 `read_only=false`** 的内置工具：
+> 一进真实 Agent 循环就会被 `ToolApproval` 审批 + `SideEffectGuard` 防重放消费。
+
+| 工具 | langchain 参照 | read_only | 要点 |
+|---|---|---|---|
+| `file_read` | `ReadFileTool` | ✅ 只读 | `max_chars` 截断（UTF-8 安全）、NUL 二进制检测、是目录/不存在给出可自愈错误 |
+| `file_write` | `WriteFileTool` | ❌ **false（副作用）** | 覆盖/追加、自动建父目录、`max_write_chars` 上限；返回 `created` 与 `mode` |
+| `list_dir` | `ListDirectoryTool` | ✅ 只读 | 条目按名称排序 + 类型/大小/修改时间；`max_entries` 兜底 |
+
+**安全边界（本层最重要的设计）**：所有路径**相对沙箱根目录 `root_dir`** 解析，
+`resolve_path_in_root()` 三重拒绝后才会操作：
+1. **词法逃逸**：`..` / `a/../../b` 归一化后落在 root 外 → 拒绝（含"同名前缀兄弟目录"按 `/` 边界判定，不误伤 `x` 与 `x2`）；
+2. **绝对路径**：`/etc/passwd` 直接拒绝（契约：一律相对）；
+3. **符号链接逃逸**：`weakly_canonical` 解析后复查，root 内的链接指向 root 之外 → 拒绝。
+
+写路径**先拒绝后执行**——越界试探不会落盘（有测试断言"外面文件不存在"）。
+
+**踩坑记录**：
+- 默认参数 `arg<T>(k, false)` 缺省时返回**空字符串**而非"未设置"，曾覆盖 list_dir 的默认路径 `.` → handler 需再判空。
+- `lexically_normal()` 对 `root/.` 会**保留尾部斜杠**（`/tmp/x/`），导致与 root 本体比较不等 → 剥尾部空 filename。
+- `file_time_type` 的 epoch 与系统时钟**不保证一致**（本机沙箱文件系统实测偏离 ~204 年）→
+  modified 改用"同一时钟做差得 age → 系统时钟回推绝对时间"，与 epoch 基点无关。
+
+**验证**：26 项新测试全绿（含越界三类拒绝、写后真实落盘、二进制检测、UTF-8 截断、副作用标记）；
+`ctest` 全量 236 通过；`examples/tools_files` 离线 demo 通过（含越界/绝对路径被拒的展示）。
+**开放**：真实 Agent 循环里接 `ToolApproval`/`SideEffectGuard` 的端到端验证留作下一步
+（`side_effect_guard` 已用 send_email 覆盖该机制）。
