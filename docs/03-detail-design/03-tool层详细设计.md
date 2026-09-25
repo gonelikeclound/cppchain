@@ -98,3 +98,26 @@
 `ctest` 全量 236 通过；`examples/tools_files` 离线 demo 通过（含越界/绝对路径被拒的展示）。
 **开放**：真实 Agent 循环里接 `ToolApproval`/`SideEffectGuard` 的端到端验证留作下一步
 （`side_effect_guard` 已用 send_email 覆盖该机制）。
+
+## 8. arXiv 论文检索：arxiv_search（第三档）
+
+> 对应 langchain `ArxivQueryRun`。research 场景王牌工具，免费无需密钥。
+
+| 要点 | 说明 |
+|---|---|
+| 数据源 | arXiv 官方 **Atom API**（`export.arxiv.org/api/query`），返回 **XML 而非 JSON** |
+| 解析 | **内置轻量 Atom 提取**（无第三方 XML 库）：按 `<entry>` 切块 → 取 title/summary/id/作者/分类/时间；`totalResults` 兼容 `<opensearch:totalResults>` 命名空间写法 |
+| id 规范化 | `http://arxiv.org/abs/1706.03762v7` → `https://arxiv.org/abs/1706.03762`（去版本后缀 + 强制 https） |
+| 检索语法 | 原样透传 arXiv 语法：`all:/ti:/au:/cat:` 前缀、`AND/OR/NOT`、引号短语；空格→`+`，其余百分号编码 |
+| 摘要 | `default_summary_chars=800` UTF-8 安全截断，控制上下文占用 |
+| 空结果 | `total=0` → 错误回喂"未找到匹配论文，请换词"，与 web_search 的"空结果不假成功"纪律一致 |
+| ttl | 60 分钟（论文元数据更新慢） |
+
+**共享提取（本档顺手做的重构）**：fetch_url/web_search 里各自实现的实体解码、UTF-8 截断、
+空白压平（fetch_url 有过两套）重复到第三处（arxiv）之前，抽成 `include/cppchain/tool/text.hpp`：
+`ci_find / trim_ascii / collapse_whitespace / normalize_space / utf8_truncate / decode_entities`。
+fetch_url 改为复用（行为不变，测试全绿）；后续文本类工具直接引用。
+
+**验证**：14 项新测试全绿（查询 URL 构造、命名空间解析、primary_category 优先、作者截断、
+摘要 UTF-8 截断、空结果回喂、HTTP/网络错误、max_results 校验），`ctest` 全量 250 通过；
+`examples/tools_arxiv` 离线 demo 通过；`run-demo.sh` 三个新工具 demo 已登记。
