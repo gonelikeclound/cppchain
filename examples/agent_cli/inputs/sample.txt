@@ -1,0 +1,17 @@
+# agent_cli 文件模式样例：整行 `---` 分隔三个区块，# 开头整行为注释。
+# 同一文件配不同 --mode 跑，即可对比效果，例如：
+#   ./run-demo.sh agent_cli -m direct  -f examples/agent_cli/inputs/sample.txt
+#   ./run-demo.sh agent_cli -m react   -f examples/agent_cli/inputs/sample.txt
+#   ./run-demo.sh agent_cli -m react   -f examples/agent_cli/inputs/sample.txt --json > /tmp/react.json
+#   ./run-demo.sh agent_cli -m react-approve -p "用 send_email 给 boss@example.com 发一封辞职信"
+
+# 第一块：纯离线 calculator —— 无网络可确定性复现，模型调工具后作答
+请用 calculator 工具精确计算 17 * 43 + 256 / 8 等于多少，并给出算式。
+---
+# 第二块：get_datetime —— 模型需要"现在几点 / 星期几"，默认北京时间（+08:00）
+现在是北京时间几点？今天是星期几？请调用 get_datetime 工具确认后再回答。
+---
+# 第三块：web_search —— 有 WEB_SEARCH_API_KEY 时联网检索；无 key 时工具不注册，
+# 模型按提示降级为知识作答（对照"有网 / 无网"的差别）
+请用 web_search 查一下 2026 年 9 月人工智能领域最重要的新闻并附上来源。
+如果你没有可用的 web_search 工具，就直接基于你的知识回答。

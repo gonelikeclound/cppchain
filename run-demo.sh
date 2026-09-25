@@ -46,6 +46,7 @@ KNOWN_DEMOS=(
   "live_tools:M3 真网络工具 get_weather/web_search（需 .env：LLM + 搜索端点）"
   "history_agent:M7 会话历史——同一 thread 多轮记忆/无状态对照/thread 隔离（需 LLM 端点）"
   "research_chat:M7 意图二分连续聊天——casual(不带工具)/research(联网取数)+ 零外源兜底保证（需 .env：LLM + 搜索端点）"
+  "agent_cli:M7 命令行 single/react agent——--mode 四策略对比(direct/react/react-trim/react-approve)+ REPL/单条/文件批量（需 .env）"
   "context_budget:M7 token 成本量化（需 LLM 端点）"
   "side_effect_guard:M7 副作用防重放（离线）"
   "stale_state:状态时效性 A/B 对照（需 LLM 端点）"
@@ -189,7 +190,13 @@ printf '运行 %d 个 demo（工作目录=%s，.env=%s）\n' "${#to_run[@]}" "$S
 for name in "${to_run[@]}"; do
   printf '\n──────── %s —— %s ────────\n' "$name" "$(describe "$name")"
   start_ms=$(date +%s%3N)
-  "./$DEMO_DIR/$name"
+  # agent_cli 缺省输入源是交互 REPL（会占住终端）——run-all 时给非交互参数，
+  # 用样例文件批量跑 react 模式做冒烟。
+  if [[ "$name" == "agent_cli" ]]; then
+    "./$DEMO_DIR/$name" -m react -f examples/agent_cli/inputs/sample.txt --json >/dev/null
+  else
+    "./$DEMO_DIR/$name"
+  fi
   code=$?
   end_ms=$(date +%s%3N)
   elapsed=$((end_ms - start_ms))
