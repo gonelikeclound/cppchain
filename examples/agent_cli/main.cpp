@@ -7,7 +7,9 @@
 //   · direct        —— 不挂任何工具，模型直接回答（对照基线：拿不到外部信息）
 //   · react         —— 标准 ReAct：get_datetime + calculator（纯离线）；.env 有
 //                      WEB_SEARCH_API_KEY 时追加 web_search（真联网）
-//   · react-trim    —— react + TrimHistory 历史压缩（长会话下对比 token 成本）
+//   · react-trim    —— react + TrimHistory 历史压缩（长会话下对比 token 成本）；
+//                      --summarize 时用 LLM 摘要器压旧史（保记忆，代价是多一次模型调用），
+//                      否则朴素折叠占位（省 token 但早期事实会丢）
 //   · react-approve —— react + 假副作用工具 send_email / delete_file + ToolApproval
 //                      名单拒绝：模型调用即被拒并作为 error ToolMessage 回喂
 //
@@ -70,6 +72,7 @@ struct CliOptions {
   std::string prompt;
   std::string file;
   bool json = false;
+  bool summarize = false;  // react-trim 用 LLM 摘要器压缩（保记忆），否则朴素占位
   bool show_help = false;
   bool list_modes = false;
 };
@@ -142,6 +145,8 @@ std::optional<CliOptions> parse_cli(int argc, char** argv, std::string& err) {
       o.list_modes = true;
     } else if (opt == "--json") {
       o.json = true;
+    } else if (opt == "--summarize") {
+      o.summarize = true;
     } else if (opt == "-i" || opt == "--interactive") {
       if (!set_input(InputSource::Interactive)) return std::nullopt;
     } else if (opt == "-p" || opt == "--prompt") {
@@ -198,6 +203,8 @@ void usage(std::ostream& os) {
                "  -m, --mode <模式>    agent 策略：direct | react | react-trim | react-approve\n"
                "                        （缺省 react）\n"
                "      --list-modes     列出全部模式及说明\n"
+               "      --summarize      与 react-trim 搭配：压缩时用 LLM 摘要器（保留记忆，\n"
+               "                        每触发一次压缩多一次模型调用），不指定则朴素折叠占位\n"
                "  -i, --interactive    交互式 REPL（缺省输入源；需终端，同一 thread 多轮记忆）\n"
                "  -p, --prompt <文本>  单条 prompt，跑完即止\n"
                "  -f, --file <路径>    文件批量：整行 --- 分隔多区块，# 开头整行为注释\n"
@@ -219,7 +226,8 @@ void list_modes(std::ostream& os) {
                "  direct        不挂工具，模型直接回答（对照基线：拿不到外部信息）\n"
                "  react         标准 ReAct：get_datetime + calculator（离线）；.env 有\n"
                "                WEB_SEARCH_API_KEY 时追加 web_search（真联网）\n"
-               "  react-trim    react + TrimHistory 历史压缩（长会话下对比 token 成本）\n"
+               "  react-trim    react + TrimHistory 历史压缩（长会话下对比 token 成本；\n"
+               "                配套 --summarize 用 LLM 摘要器保记忆，否则朴素折叠会丢早期事实）\n"
                "  react-approve react + 假副作用工具 send_email / delete_file + ToolApproval\n"
                "                名单拒绝：模型调用即被拒并作为 error ToolMessage 回喂");
 }
@@ -234,9 +242,27 @@ struct Setup {
   std::shared_ptr<TrimHistory> trim;           // react-trim 注册
 };
 
-void configure_setup(Setup& s, Mode mode, std::shared_ptr<http::Transport> const& transport,
+// LLM 摘要器：把被折叠的历史压成 ≤60 字摘要，只保留用户关心的事实与偏好。
+// 每触发一次压缩多一次模型调用（token 成本换记忆保留）；参照 agent_loop ④。
+TrimHistory::Summarizer build_llm_summarizer(model::ChatModel& model) {
+  return [&model](std::vector<Message> const& dropped)
+      -> std::expected<std::string, model::ModelError> {
+    std::vector<Message> prompt{message::system_message(
+        "把下面的对话压缩成不超过 60 字的摘要，只保留用户关心的事实与偏好，直接输出摘要。")};
+    for (auto const& m : dropped) {
+      if (m.type == Role::Ai && !m.tool_calls.empty()) continue;  // 工具调用细节可丢
+      prompt.push_back(m);
+    }
+    auto r = model.invoke(prompt, model::CallOptions{});
+    if (!r) return std::unexpected(r.error());
+    return r->text();
+  };
+}
+
+void configure_setup(Setup& s, Mode mode, model::ChatModel& model,
+                     std::shared_ptr<http::Transport> const& transport,
                      std::string const& ws_base, std::string const& ws_key,
-                     std::string const& ca) {
+                     std::string const& ca, bool summarize) {
   if (mode == Mode::Direct) return;  // registry 留空
 
   tool::DatetimeToolConfig dtc;
@@ -279,7 +305,10 @@ void configure_setup(Setup& s, Mode mode, std::shared_ptr<http::Transport> const
         std::make_shared<ToolApproval>(std::vector<std::string>{"send_email", "delete_file"});
   }
 
-  if (mode == Mode::ReactTrim) s.trim = std::make_shared<TrimHistory>(6);
+  // --summarize：LLM 摘要器压缩（保记忆，成本 = 每次压缩多一次模型调用）
+  if (mode == Mode::ReactTrim)
+    s.trim = summarize ? std::make_shared<TrimHistory>(6, build_llm_summarizer(model))
+                       : std::make_shared<TrimHistory>(6);
 }
 
 std::string system_prompt_for(Mode mode, Setup const& s) {
@@ -603,14 +632,20 @@ int main(int argc, char** argv) {
   auto transport = std::make_shared<http::CurlMultiTransport>();
   model::openai::OpenAIChatModel model(cfg, transport);
 
+  // --summarize 只对 react-trim 有意义（压缩才发生）；其余模式给个提示再忽略
+  if (cli->summarize && cli->mode != Mode::ReactTrim)
+    std::println(std::cerr, "提示: --summarize 只在 react-trim 模式生效（其它模式无历史压缩），已忽略。");
+
   // 先构造 Setup（工具具名）→ 再建 Agent（句柄非拥有）→ 再跑
   Setup setup;
-  configure_setup(setup, cli->mode, transport, ws_base, ws_key, ca);
+  configure_setup(setup, cli->mode, model, transport, ws_base, ws_key, ca, cli->summarize);
 
   if (!cli->json) {
     std::println("模式 {} | 模型 {} | 工具 {} 个 | web_search {}",
                  mode_str(cli->mode), model_name, setup.registry.size(),
                  web_ok ? "已配置" : "未配置（不注册，模型按知识作答）");
+    if (setup.trim)
+      std::println("压缩: TrimHistory(6){}", cli->summarize ? " + LLM 摘要器" : "（朴素占位折叠）");
   }
 
   if (repl)

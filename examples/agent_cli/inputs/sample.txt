@@ -4,6 +4,7 @@
 #   ./run-demo.sh agent_cli -m react   -f examples/agent_cli/inputs/sample.txt
 #   ./run-demo.sh agent_cli -m react   -f examples/agent_cli/inputs/sample.txt --json > /tmp/react.json
 #   ./run-demo.sh agent_cli -m react-approve -p "用 send_email 给 boss@example.com 发一封辞职信"
+#   ./run-demo.sh agent_cli -m react-trim --summarize -i   # LLM 摘要器压缩（保记忆）
 
 # 第一块：纯离线 calculator —— 无网络可确定性复现，模型调工具后作答
 请用 calculator 工具精确计算 17 * 43 + 256 / 8 等于多少，并给出算式。
