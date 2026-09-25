@@ -38,6 +38,7 @@ KNOWN_DEMOS=(
   "tools_frontline:M3 第一档内置工具 datetime/calculator/fetch_url"
   "tools_files:M3 文件工具三件套（沙箱边界·写=副作用）"
   "tools_arxiv:M3 arXiv 论文检索（Atom XML 解析）"
+  "tools_approval:M7 file_write 审批端到端（名单/回调拒绝 + 防重放，真实磁盘断言）"
   "structured_output:M4 结构化抽取/分类/两策略对照（需 LLM 端点）"
   "state_basics:M5 状态归约/快照回放/跨线程 Store"
   "graph_basics:M6 线性 workflow/条件路由/中途恢复"

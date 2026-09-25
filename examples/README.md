@@ -32,6 +32,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `tools_frontline` | 第一档内置工具：`get_datetime`（当前时间/时区）、`calculator`（精确计算兜底，安全求值非 eval）、`fetch_url`（网页正文提取，补全 搜索→打开详情页 闭环）；离线可跑 | `Calculator` / 自研时间工具 / `WebPageContentExtractor` |
 | `tools_files` | 第二档文件工具：`file_read` / `file_write` / `list_dir`（沙箱根目录限定）；**写工具 `read_only=false`**——越界/绝对路径/符号链接逃逸三重拒绝，离线演示副作用标记 | `FileManagementToolkit`（`ReadFileTool`/`WriteFileTool`/`ListDirectoryTool`） |
 | `tools_arxiv` | 第三档：`arxiv_search` 论文检索（arXiv Atom API，**内置 XML 解析**，免费无 key）；离线演示查询 URL 构造/解析/空结果回喂 | `ArxivQueryRun` |
+| `tools_approval` | M7：真实 `file_write` 副作用审批端到端——名单拒绝/回调按参数放行（只许 `notes/`）/**同 call 崩溃重启重放不重复写盘**，硬断言全部基于真实磁盘状态 | LangGraph interrupt 审批前身 + 幂等约束 |
 | `structured_output` | M4：结构化抽取、classify 路由/评判、**两策略遵循度对照**（需 LLM 端点） | `with_structured_output` |
 | `state_basics` | M5：状态归约（含**同 id 覆盖=压缩改写**）、快照链与回放、跨线程 Store | State/Reducer、Checkpointer、Store |
 | `graph_basics` | M6：线性 workflow、条件路由、循环上限、**中途快照恢复续跑** | LangGraph StateGraph |
