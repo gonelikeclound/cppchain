@@ -38,6 +38,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `stale_state` | **状态时效性**（真机 A/B）：无守卫用旧值作答 vs 守卫促使重新取数 | 观测时间戳 + TTL 失效标注 |
 | `live_tools` | **真网络工具**（真机）：`get_weather`（Open-Meteo，实时天气+预报）与 `web_search`（火山方舟 Responses · 豆包搜索）；LLM 密钥缺失时退化为工具直连自检 | 真实 provider 工具端到端 |
 | `history_agent` | **会话历史**（真机）：同一 thread 多轮续跑历史累积 / 不带 checkpointer 的无状态对照 / 不同 thread 的隔离；探针中间件打印"发往模型的 messages 条数"作机械证明 | `thread_id` + Checkpointer 续跑 |
+| `research_chat` | **意图二分连续聊天**（真机）：路由器只分 casual（不带工具）/ research（资料查询，挂全部外部数据源工具）；**research 轮必须有一次成功的外部取数** —— web_search 或 get_weather 等专用实时源均可，整轮零外源才由 harness 兜底强制 web_search；判定遍历注册表整表，加新工具不分类；同 thread 多轮记忆 | Router + Skill、Single-Agent、联网取数兜底 |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
