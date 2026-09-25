@@ -68,7 +68,14 @@ inline nlohmann::json build_request(std::span<Message const> msgs, CallOptions c
   for (auto const& m : msgs) arr.push_back(message_to_openai(m));
   body["messages"] = std::move(arr);
 
-  if (stream) body["stream"] = true;
+  // 流式默认不回传 usage（多数兼容端点在终态给 usage-only 帧需要显式请求）。
+  // 这里统一打开：流式调用同样能在 Message.usage 拿到 token 用量（参照 OpenAI 规范
+  // stream_options.include_usage；DeepSeek/vLLM/Ollama 兼容）。非标准字段不识别时
+  // 兼容端点一般直接忽略，不影响请求形状。
+  if (stream) {
+    body["stream"] = true;
+    body["stream_options"] = {{"include_usage", true}};
+  }
   if (opts.temperature) body["temperature"] = *opts.temperature;
   if (opts.max_tokens) body["max_tokens"] = *opts.max_tokens;
   if (!opts.stop.empty()) body["stop"] = opts.stop;

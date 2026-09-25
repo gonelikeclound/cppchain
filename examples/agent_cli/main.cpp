@@ -32,7 +32,6 @@
 #include <cppchain/tool/datetime.hpp>
 #include <cppchain/tool/web_search.hpp>
 
-#include <algorithm>
 #include <cstddef>
 #include <expected>
 #include <filesystem>
@@ -346,18 +345,24 @@ Ctrs counters_of(Setup const& s) {
 }
 
 // 跑一轮（Agent 可能已含历史）。human=true 时打印轨迹与 stats。
-// 本轮切片 = invoke 后 transcript 的 [from, size)，from 在 invoke 前记录；
-// 中间件（TrimHistory）改写过消息后，不猜内容、只按 transcript 长度切，最稳。
+// 本轮切片起点 = invoke 后转录里**最后一条 Human 消息**（本轮输入；模型与工具
+// 都不会产生 Human）。不用「invoke 前 transcript 长度」做基准：TrimHistory 等
+// 中间件会重建消息列表（折叠旧史 → 净长度不变甚至变短），按下标差切会得到空片，
+// 使 usage / 工具计数漏计（实测 react-trim REPL 压缩后轮次 stats 全 0 即此）。
 nlohmann::json run_one(Agent& agent, Setup const& setup, std::string_view mode_name,
                        std::string const& prompt, bool human) {
   auto const t0 = std::chrono::steady_clock::now();
-  std::size_t const base = agent.transcript().size();
   Ctrs const c0 = counters_of(setup);
 
   auto r = agent.invoke({message::human_message(prompt)});
 
   auto const& tr = agent.transcript();
-  std::size_t const from = std::min(base, tr.size());
+  std::size_t from = 0;
+  for (std::size_t i = tr.size(); i-- > 0;)
+    if (tr[i].type == Role::Human) {
+      from = i;
+      break;
+    }
   std::size_t const d_denials = counters_of(setup).denials - c0.denials;
   std::size_t const d_trim = counters_of(setup).compressions - c0.compressions;
 

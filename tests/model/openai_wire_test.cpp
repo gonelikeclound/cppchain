@@ -97,9 +97,14 @@ TEST(Wire, build_request_params_and_extra_passthrough) {
   auto body = openai::build_request(msgs, opts, cfg, /*stream=*/true);
   EXPECT_EQ(body.at("model").get<std::string>(), "deepseek-chat");
   EXPECT_TRUE(body.at("stream").get<bool>());
+  EXPECT_TRUE(body.at("stream_options").at("include_usage").get<bool>());
   EXPECT_DOUBLE_EQ(body.at("temperature").get<double>(), 0.2);
   EXPECT_EQ(body.at("max_tokens").get<int>(), 128);
   EXPECT_DOUBLE_EQ(body.at("top_p").get<double>(), 0.9);
+
+  // 非流式请求不带 stream_options（usage 走响应体 usage 字段，无需请求）
+  auto nb = openai::build_request(msgs, opts, cfg, /*stream=*/false);
+  EXPECT_FALSE(nb.contains("stream_options"));
 }
 
 // ---------- wire：入站（非流式） ----------
