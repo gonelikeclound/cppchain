@@ -2,8 +2,8 @@
 //
 // 需要 .env 提供：
 //   LLM_API_KEY / LLM_BASE_URL / LLM_MODEL   —— Agent 的对话模型（如 DeepSeek）
-//   WEB_SEARCH_API_KEY                        —— 火山方舟 API Key（UUID 格式）
-//   （可选）WEB_SEARCH_BASE_URL / WEB_SEARCH_PATH / WEB_SEARCH_MODEL
+//   WEB_SEARCH_API_KEY                        —— feedcoop 搜索 API Key（Bearer，参考 simple-agent）
+//   （可选）WEB_SEARCH_BASE_URL                —— 默认 open.feedcoopapi.com/search_api/global_search
 //
 // 若 LLM_API_KEY 缺失，则退化为「工具直连自检」：不经过模型，直接调用 get_weather /
 // web_search 的 handler，验证工具本身在真实网络下可用。也可用 LIVE_TOOLS_DIRECT=1 强制直连模式。
@@ -13,7 +13,7 @@
 //
 // 实测：
 //   · get_weather 走 Open-Meteo（免费、无需密钥）：中文/英文地名 → 经纬度 → 实时天气 + 预报
-//   · web_search 走火山方舟 Responses API 的 web_search(sources=[doubao])
+//   · web_search 走 feedcoop global search（Bearer key，返回原始文档列表，见 web_search.hpp）
 #include <cppchain/agent/agent.hpp>
 #include <cppchain/http/curl_multi_transport.hpp>
 #include <cppchain/model/openai/openai_chat_model.hpp>
@@ -112,22 +112,18 @@ int main() {
   tools.add(tool::make_weather_tool(transport, std::move(wc)));
 
   tool::WebSearchConfig sc;
-  std::string const ws_url = demo::env_or(dotenv, "WEB_SEARCH_BASE_URL",
-                                          "https://ark.cn-beijing.volces.com");
-  std::string const ws_path = demo::env_or(dotenv, "WEB_SEARCH_PATH", "/api/v3/responses");
-  std::string const ws_model = demo::env_or(dotenv, "WEB_SEARCH_MODEL", "doubao-seed-2-1-pro-260628");
+  std::string const ws_url =
+      demo::env_or(dotenv, "WEB_SEARCH_BASE_URL",
+                   "https://open.feedcoopapi.com/search_api/global_search");
   std::string const ws_key = demo::env_or(dotenv, "WEB_SEARCH_API_KEY");
   sc.base_url = ws_url;
-  sc.path = ws_path;
-  sc.model = ws_model;
   sc.api_key = ws_key;
   sc.ca_info = ca;
   tools.add(tool::make_web_search_tool(transport, std::move(sc)));
   // 注意：不可在 move 之后再读 sc.*（moved-from 为空串）——上面先拷贝到了本地变量
 
   std::println("get_weather : Open-Meteo（免费，无需密钥）");
-  std::println("web_search  : {} {}（模型 {}，密钥 {}）", ws_url, ws_path, ws_model,
-               ws_key.empty() ? "未配置" : "已加载");
+  std::println("web_search  : {}（feedcoop，密钥 {}）", ws_url, ws_key.empty() ? "未配置" : "已加载");
   std::println("CA bundle   : {}\n", ca.empty() ? "(系统默认)" : ca);
 
   // 直连自检模式：显式 `LIVE_TOOLS_DIRECT=1` 或缺少 LLM 密钥时，不经过 Agent 直接调工具
@@ -165,7 +161,7 @@ int main() {
     std::println("→ 迭代 {} 轮\n{}", agent.iterations(), r->text());
   }
 
-  // ---- ② 联网搜索（火山方舟 Responses · web_search）----
+  // ---- ② 联网搜索（feedcoop global search，原始文档列表）----
   {
     std::println("\n=== ② 联网搜索：langchain 最新动态 ===");
     agent::AgentOptions opts;

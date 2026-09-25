@@ -10,7 +10,10 @@
 namespace cppchain::tool {
 
 namespace {
-constexpr std::size_t kRawLimit = 4096;  // 错误诊断只需响应头 + 开头
+// 响应体上限（防御性，防止异常巨响应吃内存；正常响应远小于此）。
+// 必须远大于工具返回体（如 feedcoop web_search ~16KB）—— 此前硬编码 4KB 会把
+// 大响应截断成非法 JSON，解析成"空结果"（只有小响应体 + 401 路径测不出来）。
+constexpr std::size_t kBodyLimit = 16 * 1024 * 1024;
 }  // namespace
 
 std::expected<JsonResponse, ToolError> http_json(http::Transport& transport,
@@ -28,8 +31,8 @@ std::expected<JsonResponse, ToolError> http_json(http::Transport& transport,
   http::HttpCallbacks cbs;
   cbs.on_status = [st](long s) { st->status = s; };
   cbs.on_body_chunk = [st](std::string_view b) {
-    if (st->body.size() < kRawLimit) {
-      auto n = std::min(kRawLimit - st->body.size(), b.size());
+    if (st->body.size() < kBodyLimit) {
+      auto n = std::min(kBodyLimit - st->body.size(), b.size());
       st->body.append(b.substr(0, n));
     }
   };

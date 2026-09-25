@@ -19,7 +19,7 @@
 //
 // 需要 .env：
 //   LLM_API_KEY / LLM_BASE_URL / LLM_MODEL        —— 对话与意图路由模型（如 DeepSeek）
-//   WEB_SEARCH_API_KEY（与搜索端点）               —— 火山方舟 UUID 密钥（见 live_tools）
+//   WEB_SEARCH_API_KEY                            —— feedcoop 搜索 API Key（Bearer，参考 simple-agent）
 //   缺 LLM 密钥时退化为「工具直连自检」（也可 RESEARCH_CHAT_DIRECT=1 强制直连）。
 //   兜底路径可被 `RESEARCH_CHAT_FORCE_BACKSTOP=1` 强制走一遍（确定性演示兜底机制）。
 #include <cppchain/agent/agent.hpp>
@@ -147,16 +147,20 @@ std::string tools_str(tool::ToolRegistry const& reg) {
   return s;
 }
 
-// 格式化成模型可见的检索结果文本
+// 格式化成模型可见的检索结果文本（feedcoop：原始文档列表）
 std::string render_search_result(nlohmann::json const& r) {
   std::string out;
   if (r.contains("query")) out += "  查询词: " + r["query"].get<std::string>() + "\n";
-  if (r.contains("answer"))
-    out += "  摘要: " + std::string(r["answer"].get<std::string>()) + "\n";
-  if (r.contains("citations") && r["citations"].is_array()) {
-    out += "  来源:\n";
-    for (auto const& c : r["citations"])
-      out += "    - " + c.value("title", "(无标题)") + "  " + c.value("url", "") + "\n";
+  auto const& docs = r.contains("documents") ? r["documents"] : nlohmann::json::array();
+  for (auto const& d : docs) {
+    if (!d.is_object()) continue;
+    out += "  - " + d.value("title", "(无标题)") + "\n    " + d.value("url", "");
+    std::string const host = d.value("hostname", "");
+    if (!host.empty()) out += "（" + host + "）";
+    out += "\n";
+    if (d.contains("snippet") && d["snippet"].is_string())
+      if (!d["snippet"].get<std::string>().empty())
+        out += "    摘要: " + d["snippet"].get<std::string>() + "\n";
   }
   return out;
 }
@@ -327,21 +331,18 @@ int main() {
   reg_research.add(tool::make_weather_tool(transport, std::move(wc)));
 
   tool::WebSearchConfig sc;
-  std::string const ws_url = demo::env_or(dotenv, "WEB_SEARCH_BASE_URL",
-                                          "https://ark.cn-beijing.volces.com");
-  std::string const ws_path = demo::env_or(dotenv, "WEB_SEARCH_PATH", "/api/v3/responses");
-  std::string const ws_model = demo::env_or(dotenv, "WEB_SEARCH_MODEL", "doubao-seed-2-1-pro-260628");
+  std::string const ws_url =
+      demo::env_or(dotenv, "WEB_SEARCH_BASE_URL",
+                   "https://open.feedcoopapi.com/search_api/global_search");
   std::string const ws_key = demo::env_or(dotenv, "WEB_SEARCH_API_KEY");
   sc.base_url = ws_url;
-  sc.path = ws_path;
-  sc.model = ws_model;
   sc.api_key = ws_key;
   sc.ca_info = ca;
   reg_research.add(tool::make_web_search_tool(transport, std::move(sc)));
 
   std::println("research_chat：单 Agent 连续聊天 · 意图二分(casual/research) · 联网取数兜底保证");
   std::println("  对话模型 : {} @ {}", llm_model, llm_base);
-  std::println("  web_search: {} {}{}", ws_url, ws_path, ws_key.empty() ? "（无密钥）" : "");
+  std::println("  web_search: {}（feedcoop）{}", ws_url, ws_key.empty() ? "（无密钥）" : "");
   std::println("  工具集   : casual=∅ | research={}（全部外部数据源，模型自选）", tools_str(reg_research));
 
   bool const direct = demo::env_or(dotenv, "RESEARCH_CHAT_DIRECT") == "1" || llm_key.empty();
