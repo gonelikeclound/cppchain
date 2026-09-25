@@ -208,8 +208,18 @@ ToolSpec make_arxiv_search_tool(std::shared_ptr<http::Transport> transport, Arxi
 
         auto r = http_json(*transport, req, ctx.cancel);
         if (!r) return std::unexpected(r.error());
-        if (auto e = http_status_error(r->status, "arXiv 检索服务", r->raw))
+        if (r->status == 406) {
+          // arXiv 官方 API 文档：406 表示请求被拒（常见于偶发限流/过滤），建议重试一次
+          r = http_json(*transport, req, ctx.cancel);
+          if (!r) return std::unexpected(r.error());
+        }
+        if (auto e = http_status_error(r->status, "arXiv 检索服务", r->raw)) {
+          if (r->status == 406)
+            return std::unexpected(ToolError{
+                "arXiv 拒绝了该查询（HTTP 406，可能是临时过滤或限流）。"
+                "请换更常见的检索词，或改用 cat: 分类前缀（如 cat:cs.AI）重试。"});
           return std::unexpected(*e);
+        }
 
         auto parsed = parse_arxiv_response(r->raw, *q, cfg.default_summary_chars);
         if (parsed.value("papers", nlohmann::json::array()).empty()) {

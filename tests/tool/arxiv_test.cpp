@@ -187,6 +187,40 @@ TEST(Arxiv, HandlerReportsHttpError) {
   EXPECT_NE(r.error().message.find("HTTP 422"), std::string::npos);
 }
 
+TEST(Arxiv, RetriesOnceOn406ThenSucceeds) {
+  // arXiv 官方建议对 406 重试一次：406 → 200 应成功，且发过 2 个请求
+  auto tp = std::make_shared<http::FakeTransport>();
+  http::FakeTransport::Script bad;
+  bad.status = 406;
+  http::FakeTransport::Script ok;
+  ok.status = 200;
+  ok.chunks = {std::string(kFeed)};
+  tp->push(std::move(bad));
+  tp->push(std::move(ok));
+  auto spec = make_spec(tp);
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"search_query", "all:x"}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  ASSERT_EQ(r->at("papers").size(), 2u);
+  EXPECT_EQ(tp->requests().size(), 2u);
+}
+
+TEST(Arxiv, Persistent406IsActionable) {
+  auto tp = std::make_shared<http::FakeTransport>();
+  for (int i = 0; i < 2; ++i) {
+    http::FakeTransport::Script s;
+    s.status = 406;
+    tp->push(std::move(s));
+  }
+  auto spec = make_spec(tp);
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"search_query", "all:x"}}, ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().message.find("cat:"), std::string::npos);  // 指引模型换词/用 cat: 前缀
+}
+
 TEST(Arxiv, HandlerTransportFailureIsFedBack) {
   auto tp = std::make_shared<http::FakeTransport>();
   http::FakeTransport::Script s;

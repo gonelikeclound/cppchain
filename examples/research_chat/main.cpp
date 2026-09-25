@@ -3,8 +3,9 @@
 // 架构参照 myplane.md 的「Single-Agent + Router + Skill」。
 // 路由器只分两类（不做按工具的分类 —— 否则以后每加一个工具就要加一个意图标签）：
 //   · casual   → 不挂任何工具（闲聊/记忆问答/常识答复）
-//   · research → 挂上「全部外部数据源」工具集（现在 = web_search + get_weather；
-//                以后加新工具直接 add 进同一个注册表即可，路由器不用改）
+//   · research → 挂上「全部外部数据源」工具集（现在 = web_search + get_weather +
+//                arxiv_search + fetch_url；以后加新工具直接 add 进同一个注册表即可，
+//                路由器与兜底判定都不用改——它们都遍历注册表整表，不针对工具名写死）
 // 所有轮次共用 同一个 thread_id + MemoryCheckpointer → 「连续聊天」= 天然的多轮记忆。
 //
 // 核心保证（本 demo 的看点）：一旦意图被识别为 research（资料查询类），harness 必须确保
@@ -27,12 +28,15 @@
 #include <cppchain/model/openai/openai_chat_model.hpp>
 #include <cppchain/model/structured.hpp>
 #include <cppchain/state/checkpointer.hpp>
+#include <cppchain/tool/arxiv.hpp>
+#include <cppchain/tool/fetch_url.hpp>
 #include <cppchain/tool/weather.hpp>
 #include <cppchain/tool/web_search.hpp>
 
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <print>
 #include <span>
@@ -66,8 +70,7 @@ std::string_view intent_name(Intent i) {
 struct Stats {
   int turns = 0;
   int n_casual = 0, n_research = 0;
-  int weather_hits = 0;    // get_weather 成功执行次数（任一轮）
-  int web_hits = 0;        // web_search 成功执行次数（含 harness 兜底成功）
+  std::map<std::string, int> tool_hits;  // 各外源工具成功执行累计（web_search 含 harness 兜底）
   int web_backstops = 0;   // harness 兜底直接 web_search 的尝试次数（含失败）
   int unretrieved = 0;     // research 轮中「零成功外源取数」的轮数
   std::vector<std::size_t> history_sent;  // 每轮首次发往模型的消息条数（记忆增长的机械证据）
@@ -308,6 +311,12 @@ void run_direct_tools(tool::ToolRegistry const& reg_research) {
   probe("get_weather", reg_research.find("get_weather"), {{"city", "北京"}, {"days", 1}});
   std::println("\n→ web_search（2025 大模型进展）：");
   probe("web_search", reg_research.find("web_search"), {{"query", "2025 年大语言模型最重要进展"}});
+  std::println("\n→ arxiv_search（2025 机器学习代表论文，走可过的查询）：");
+  probe("arxiv_search", reg_research.find("arxiv_search"),
+        {{"search_query", "all:transformer"}, {"max_results", 2}});
+  std::println("\n→ fetch_url（arXiv 论文页正文）：");
+  probe("fetch_url", reg_research.find("fetch_url"),
+        {{"url", "https://arxiv.org/abs/1706.03762"}, {"max_chars", 600}});
 }
 
 }  // namespace
@@ -339,6 +348,14 @@ int main() {
   sc.api_key = ws_key;
   sc.ca_info = ca;
   reg_research.add(tool::make_web_search_tool(transport, std::move(sc)));
+
+  tool::ArxivConfig ac;
+  ac.ca_info = ca;
+  reg_research.add(tool::make_arxiv_search_tool(transport, std::move(ac)));
+
+  tool::FetchUrlConfig fc;
+  fc.ca_info = ca;
+  reg_research.add(tool::make_fetch_url_tool(transport, std::move(fc)));
 
   std::println("research_chat：单 Agent 连续聊天 · 意图二分(casual/research) · 联网取数兜底保证");
   std::println("  对话模型 : {} @ {}", llm_model, llm_base);
@@ -375,19 +392,26 @@ int main() {
       "  2. 资料查询必须调用合适的外部数据源，并基于结果回答、尽量附来源：\n"
       "     - 天气问题 → get_weather（专用实时源）；\n"
       "     - 其他需要最新/精确/外部资料的问题（新闻、数据、事实核实、进展等）→ web_search；\n"
-      "     - 不要用 get_weather 回答非天气问题，也不要拿它当作万能检索。\n"
+      "     - 学术/论文调研（某方向是否有论文、找综述或代表工作）→ arxiv_search（只查论文）；\n"
+      "     - 已经拿到一个网址、要读它的网页正文详情时 → fetch_url（会剥掉标签返回纯文本）。\n"
+      "     - 不要拿 get_weather 答非天气问题，也不要拿 arxiv_search 当通用网络搜索。\n"
       "  3. 不确定或信息可能过时，宁可检索也不要编造。\n"
       "  4. 回答保持简短有力。";
   base_opts.checkpointer = &cp;
   base_opts.thread_id = "research-chat-u1";
 
-  // 演示剧本：闲聊 → 资料查询(天气→专用实时源) → 资料查询(联网检索) → 记忆考核 → 资料查询(知识题) → 收尾
+  // 演示剧本：闲聊 → 天气(专用实时源) → 联网检索 → 记忆考核 → 知识题(触发兜底) →
+  //            学术检索(arxiv_search) → 网页正文(fetch_url) → 收尾
   std::vector<std::string> const scenario{
       "嗨，跟我随便聊聊吧，今天想聊点轻松的话题。",
       "上海明天天气怎么样？我需要带伞或加衣服吗？",
       "用联网搜索查一下：2025 年大语言模型领域最重要的技术进展有哪些？",
       "我刚才问的是哪个城市明天的天气？",
       "珠穆朗玛峰最新的精确海拔是多少米？（数据需要外部核实）",
+      "用 arXiv 学术检索帮我找两篇 Transformer 架构的代表性论文，"
+      "给出标题、分类（如 cs.LG/cs.CL）和一段摘要。",
+      "请用网页正文工具打开论文页面 https://arxiv.org/abs/1706.03762，"
+      "把它的标题和摘要读给我。",
       "好的，今天聊得不错，谢谢你！",
   };
 
@@ -429,11 +453,14 @@ int main() {
     thread = out.thread;
     ++st.turns;
     if (intent == Intent::Research) ++st.n_research; else ++st.n_casual;
-    st.weather_hits += count_executed(this_turn_slice(out), "get_weather");
-    st.web_hits += out.web_hits;
+    // 外源工具成功累计：web_search 用 out.web_hits（含 harness 兜底直查那一次）；
+    // 其余工具只统计 thread 内的成功执行（都遍历注册表整表，新增工具自动纳入）
+    st.tool_hits["web_search"] += out.web_hits;
+    for (auto const& spec : reg_research.all())
+      if (spec.name != "web_search")
+        st.tool_hits[spec.name] += count_executed(this_turn_slice(out), spec.name);
     if (out.sent > 0) st.history_sent.push_back(out.sent);  // 无模型调用的轮次不进记忆链
-    if (intent == Intent::Research && out.web_hits + count_executed(this_turn_slice(out), "get_weather") == 0)
-      ++st.unretrieved;
+    if (intent == Intent::Research && out.used_tools.empty()) ++st.unretrieved;
 
     std::println("  ② 工具集   → {}", intent == Intent::Casual ? "∅（不挂工具）" : tools_str(reg_research));
     if (intent == Intent::Research) {
@@ -464,13 +491,20 @@ int main() {
   // ---- 汇总 ----
   std::println("\n──────────────── 汇总 ────────────────");
   std::println("意图分布   : casual {} 轮 | research {} 轮", st.n_casual, st.n_research);
-  std::println("工具执行   : get_weather 成功 ×{} | web_search 成功 ×{}（含兜底成功）；"
-               "harness 兜底尝试 ×{}",
-               st.weather_hits, st.web_hits, st.web_backstops);
+  int total_hits = 0;
+  std::string hits_line;
+  for (auto const& spec : reg_research.all()) {
+    int const h = st.tool_hits.count(spec.name) ? st.tool_hits.at(spec.name) : 0;
+    total_hits += h;
+    if (!hits_line.empty()) hits_line += " | ";
+    hits_line += spec.name + " ×" + std::to_string(h);
+  }
+  std::println("工具执行   : {}（共 {} 次成功外源取数）", hits_line, total_hits);
+  std::println("  harness 兜底尝试 ×{}", st.web_backstops);
   // research 轮的「检索保证」是构造性的：run_research_turn 要么放行模型自发的任意外源取数，
   // 要么兜底强制 web_search —— 判定遍历注册表整表（非 per-tool 硬编码），加新工具不改口径。
   // 但“取数发生”不等于“取数成功”：端点不可用（如 401）时本轮如实记为 unretrieved。
-  std::println("检索保证   : research {} 轮全部确保调用外部数据源（web_search 或专用实时源）；"
+  std::println("检索保证   : research {} 轮全部确保调用外部数据源；"
                "其中取到有效结果 {} 轮，无有效结果 {} 轮",
                st.n_research, st.n_research - st.unretrieved, st.unretrieved);
 

@@ -121,3 +121,19 @@ fetch_url 改为复用（行为不变，测试全绿）；后续文本类工具�
 **验证**：14 项新测试全绿（查询 URL 构造、命名空间解析、primary_category 优先、作者截断、
 摘要 UTF-8 截断、空结果回喂、HTTP/网络错误、max_results 校验），`ctest` 全量 250 通过；
 `examples/tools_arxiv` 离线 demo 通过；`run-demo.sh` 三个新工具 demo 已登记。
+
+### 8.1 接入 research_chat（真机验证）与 406 环境发现
+
+`arxiv_search` 与 `fetch_url` 已接入 `examples/research_chat`：直接 `reg_research.add(...)`，
+路由器、工具集打印、兜底判定（遍历注册表整表）**全部无需改动**——这就是设计里"加新工具不改口径"的兑现。
+真机 8 轮全过：`fetch_url` 模型自发打开 arXiv 论文页读标题+摘要成功；`unretrieved=0`。
+
+⚠️ **406 环境发现（重要）**：本机企业 MITM 代理对 arXiv API 存在**按 URL 的内容过滤/限流**——
+同一查询 `all:transformer` 时 200 时 406（与 `max_results` 数值无关、随判定缓存、动态漂移）、
+406 响应体为空。结论：**工具实现本身正确**（标准客户端，离线 FakeTransport 全绿），
+406 是本环境代理的事故。工程的应对：
+1. 工具侧按 arXiv 官方建议对 406 **重试一次**（`RetriesOnceOn406ThenSucceeds` / `Persistent406IsActionable` 测试）；
+2. 连续 406 给出**可行动错误回喂**（"换词或用 cat: 分类前缀，如 cat:cs.AI"），
+   模型据此换策略；research_chat 里模型自然回退到 web_search 兜底 → 检索保证不破。
+   注意验证型 demo 的纪律（见 05 盘点）：**曾把代理的 406 误读成工具 bug，
+   靠"curl 与工具同 URL 对照 + 空响应体 + 跨词规律"才判定为环境**。`curl -w '%{http_code}'` 是这类排查的第一工具。
