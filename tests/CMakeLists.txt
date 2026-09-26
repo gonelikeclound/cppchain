@@ -70,7 +70,8 @@ gtest_discover_tests(state_tests)
 
 # ---- M6: Graph 引擎测试 ----
 add_executable(graph_tests
-  graph/graph_test.cpp)
+  graph/graph_test.cpp
+  graph/agent_node_test.cpp)
 
 target_link_libraries(graph_tests PRIVATE
   cppchain_graph
@@ -82,6 +83,7 @@ gtest_discover_tests(graph_tests)
 # ---- M7: Agent 循环与中间件测试 ----
 add_executable(agent_tests
   agent/agent_test.cpp
+  agent/subagent_test.cpp
   agent/journal_test.cpp
   agent/journal_persistence_test.cpp
   agent/stale_test.cpp
@@ -89,7 +91,8 @@ add_executable(agent_tests
 
 target_link_libraries(agent_tests PRIVATE
   cppchain_agent
-  GTest::gtest_main)
+  GTest::gtest_main
+  Threads::Threads)
 
 target_compile_options(agent_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(agent_tests)

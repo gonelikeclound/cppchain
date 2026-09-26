@@ -16,3 +16,4 @@
 | 06 | [06-state层架构设计.md](06-state层架构设计.md) | M5 状态层：reducer/add_messages + Checkpointer + Store | ✅ 已实现 |
 | 07 | [07-graph引擎架构设计.md](07-graph引擎架构设计.md) | M6 Graph 引擎（极简）：顺序 super-step + 快照恢复 | ✅ 已实现 |
 | 08 | [08-agent循环架构设计.md](08-agent循环架构设计.md) | M7 Agent 循环：middleware + 三个卡位问题落地 | ✅ 已实现 |
+| 09 | [09-多智能体架构设计.md](09-多智能体架构设计.md) | M8 多智能体：subagent-as-tool + orchestrator-worker(串行) + handoff | ✅ 已实现 |

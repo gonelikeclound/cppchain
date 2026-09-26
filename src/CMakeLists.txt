@@ -100,9 +100,10 @@ endif()
 add_executable(smoke smoke/main.cpp)
 target_link_libraries(smoke PRIVATE cppchain_message)
 target_compile_options(smoke PRIVATE -Wall -Wextra -Wpedantic)
-# ---- M6: cppchain_graph（极简 Graph 引擎）----
+# ---- M6: cppchain_graph（极简 Graph 引擎 + M8 的 Agent 节点适配）----
 add_library(cppchain_graph STATIC
-  graph/graph.cpp)
+  graph/graph.cpp
+  graph/agent_node.cpp)
 
 target_include_directories(cppchain_graph PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
@@ -112,15 +113,17 @@ target_include_directories(cppchain_graph SYSTEM BEFORE PUBLIC
 
 target_link_libraries(cppchain_graph PUBLIC
   cppchain_state
+  cppchain_agent   # M8: as_agent_node 需要 Agent（agent 不依赖 graph，单向无环）
   nlohmann_json::nlohmann_json)
 
 target_compile_options(cppchain_graph PRIVATE -Wall -Wextra -Wpedantic)
 
-# ---- M7: cppchain_agent（Agent 循环 + middleware）----
+# ---- M7: cppchain_agent（Agent 循环 + middleware + M8 的 subagent-as-tool）----
 add_library(cppchain_agent STATIC
   agent/agent.cpp
   agent/journal.cpp
-  agent/stale.cpp)
+  agent/stale.cpp
+  agent/subagent.cpp)
 
 target_include_directories(cppchain_agent PUBLIC
   ${PROJECT_SOURCE_DIR}/include)

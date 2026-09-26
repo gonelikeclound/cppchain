@@ -75,7 +75,7 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 | **M5** ✅ | **State/Reducer + 内存 Checkpointer + Store 接口** | M1 | `MessagesState`/`add_messages`；thread 快照五方法+内存实现 | 上下文压缩（消息历史状态垫底） |
 | **M6** ✅ | **Graph 引擎（极简）**：StateGraph、Node/Edge/ConditionalEdge、顺序 super-step、Command 简版、checkpoint 挂接 | M5 | 确定性 workflow + conditional 路由 demo | — |
 | **M7** ✅ | **Agent 循环**：create_agent 等价物（middleware 简版 + 工具路由） | M2 M3 M6 | ReAct 风格可用 agent | **上下文压缩**（hot-path 压缩中间件）；**超长工具返回**（截断/摘要）；副作用可控执行 |
-| **M8** | **Subagent/多智能体**：subgraph-as-tool、orchestrator-worker（串行版）、handoff 简化 | M6 M7 | ask_expert / supervisor demo | **副作用与子代理**（主上下文干净验证 + fork 语义对照） |
+| **M8** ✅ | **Subagent/多智能体**：subgraph-as-tool、orchestrator-worker（串行版）、handoff 简化 | M6 M7 | ask_expert / supervisor demo | **副作用与子代理**（主上下文干净验证 + fork 语义对照） |
 | **M9** | **五大问题集中收官**：每个解法一个 demo + 横向对比结论 | 全部 | `examples/` 沉淀 + `04-problems/` 成稿 | ⭐ 核心主线 |
 | **M10** | **运行时补全**（视 M6 表现取舍）：Streaming / Interrupt / Send 动态 fan-out / 时间旅行 | M6 M7 | 补全后可支撑更复杂的 agent 实验 | 子代理并行 |
 
@@ -104,5 +104,7 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 - [x] **M5 完成**：状态归约 + 内存 Checkpointer/Store（116 测试）
 - [x] **M6 完成**：极简 Graph 引擎（顺序 super-step + 每步快照 + 中途恢复；126 测试）
 - [x] **M7 完成**：Agent 循环 + 三中间件（超长返回/副作用/压缩），真机验证（136 测试 / 14 demo）
-- [ ] **M8**：Subagent/多智能体（subgraph-as-tool、orchestrator-worker、handoff）
+- [x] **M8 完成**：子代理/多智能体（subagent-as-tool、orchestrator-worker 串行版、handoff 简化；
+  `make_subagent_tool` + `as_agent_node` 零既有接口改动），真机三 demo + 07-cases 单测；
+  收口于 `04-problems/09`（副作用隔离 + fork 语义对照）
 - [ ] **M9**：五大问题集中收官（含把 M7 的三个中间件做深：阈值策略/token 量化/审批记忆化）

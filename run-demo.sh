@@ -50,6 +50,9 @@ KNOWN_DEMOS=(
   "context_budget:M7 token 成本量化（需 LLM 端点）"
   "side_effect_guard:M7 副作用防重放（离线）"
   "stale_state:状态时效性 A/B 对照（需 LLM 端点）"
+  "subagent_ask_expert:M8 ask_expert——子代理整体委派 + 主上下文干净 + 副作用透传（需 LLM 端点）"
+  "subagent_workers:M8 orchestrator-worker 串行版——supervisor 拆任务 + 条件路由 + finalize 汇总（需 LLM 端点）"
+  "subagent_handoff:M8 handoff 简化——worker 上交回主管 + redispatch 上限兜底（需 LLM 端点）"
 )
 
 describe() {

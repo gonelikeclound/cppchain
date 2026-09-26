@@ -44,6 +44,9 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `history_agent` | **会话历史**（真机）：同一 thread 多轮续跑历史累积 / 不带 checkpointer 的无状态对照 / 不同 thread 的隔离；探针中间件打印"发往模型的 messages 条数"作机械证明 | `thread_id` + Checkpointer 续跑 |
 | `research_chat` | **意图二分连续聊天**（真机）：路由器只分 casual（不带工具）/ research（资料查询，挂全部外部数据源工具 = web_search / get_weather / arxiv_search / fetch_url）；**research 轮必须有一次成功的外部取数** —— 任一外源工具成功均可，整轮零外源才由 harness 兜底强制 web_search；判定遍历注册表整表，加新工具不分类；同 thread 多轮记忆 | Router + Skill、Single-Agent、联网取数兜底 |
 | `agent_cli` | **命令行 single/react agent**（真机）：`--mode direct/react/react-trim/react-approve` 同一可执行体切四种策略，同一输入对比效果；`-i` 交互 REPL（同 thread 多轮记忆）/ `-p` 单条 / `-f` 文件批量（`---` 分块、`#` 注释）；每轮可读轨迹 + stats（工具往返/拒绝/压缩/token），`--json` 结构化输出供 jq/diff 脚本对比 | `create_agent` + middleware 组合策略、ReAct |
+| `subagent_ask_expert` | **M8 ask_expert（真机）**：父把子任务整体委派给 `make_subagent_tool` 包出的子代理，只回 `answer + stats`；token 会计证明主上下文不膨胀；子代理内部副作用工具仍走它自己的审批（父不豁免） | langgraph subgraph-as-tool、ask_expert |
+| `subagent_workers` | **M8 orchestrator-worker（串行版，真机）**：supervisor 用 M4 结构化输出拆任务 → 条件 router 按 results 下标串行点选 worker → finalize 汇总；worker 结果只进 `results` 槽，主线 messages 保持干净 | orchestrator-worker（无 Send 的串行版） |
+| `subagent_handoff` | **M8 handoff 简化（真机）**：worker 判领域不符 → 调用保留工具 `call_supervisor` → 包裹层 `Command{goto:["supervisor"]}` 上交 → 主管重派 → redispatch 上限兜底 | LangGraph `Command`(goto)/ handoff |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。

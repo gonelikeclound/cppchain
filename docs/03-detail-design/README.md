@@ -12,3 +12,4 @@
 | 02 | [02-chatmodel层详细设计.md](02-chatmodel层详细设计.md) | M2 实现细节：回调内核/curl_multi/真机联调发现的 4 个缺陷 | ✅ 已定稿 |
 | 03 | [03-tool层详细设计.md](03-tool层详细设计.md) | M3 实现细节：显式 schema/ToolNode 并行/检索三项修复与方法论教训 | ✅ 已定稿 |
 | 04 | [04-m4-m7实现要点与踩坑.md](04-m4-m7实现要点与踩坑.md) | M4–M7 实现要点、7 项踩坑、真机 demo 的演示设计教训 | ✅ 已定稿 |
+| 05 | [05-m8多智能体详细设计.md](05-m8多智能体详细设计.md) | M8 详细设计（落地前）：subagent-as-tool / as_agent_node / 串行 orchestrator / handoff | ✅ 已实现 |

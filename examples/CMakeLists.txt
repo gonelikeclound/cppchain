@@ -23,6 +23,9 @@ set(STATE_EXAMPLE_TARGETS state_basics)
 set(GRAPH_EXAMPLE_TARGETS graph_basics)
 # 需要 agent 库（真机）的 demo
 set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools history_agent research_chat agent_cli)
+# M8 子代理 demo：额外依赖 graph 库（as_agent_node / StateGraph）
+set(SUBAGENT_EXAMPLE_TARGETS subagent_ask_expert subagent_workers subagent_handoff)
+list(APPEND AGENT_EXAMPLE_TARGETS ${SUBAGENT_EXAMPLE_TARGETS})
 # 离线（用 FakeTransport）但需要 agent 库的 demo
 set(OFFLINE_AGENT_EXAMPLES side_effect_guard tools_approval)
 set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop context_budget stale_state)  # 需要真网络（embedding 端点）
@@ -38,6 +41,9 @@ if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS history_agent)
   list(APPEND EXAMPLE_TARGETS research_chat)
   list(APPEND EXAMPLE_TARGETS agent_cli)
+  list(APPEND EXAMPLE_TARGETS subagent_ask_expert)
+  list(APPEND EXAMPLE_TARGETS subagent_workers)
+  list(APPEND EXAMPLE_TARGETS subagent_handoff)
 endif()
 
 if(CPPCHAIN_BUILD_HTTP)
@@ -50,7 +56,12 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic)
   if(t IN_LIST AGENT_EXAMPLE_TARGETS)
-    target_link_libraries(${t} PRIVATE cppchain_agent cppchain_http_curl)
+    if(t IN_LIST SUBAGENT_EXAMPLE_TARGETS)
+      # graph → agent（graph PUBLIC 依赖 agent），满足静态库链接顺序
+      target_link_libraries(${t} PRIVATE cppchain_graph cppchain_agent cppchain_http_curl)
+    else()
+      target_link_libraries(${t} PRIVATE cppchain_agent cppchain_http_curl)
+    endif()
   elseif(t IN_LIST OFFLINE_AGENT_EXAMPLES)
     target_link_libraries(${t} PRIVATE cppchain_agent)
   elseif(t IN_LIST HTTP_NEEDED_EXAMPLES)
