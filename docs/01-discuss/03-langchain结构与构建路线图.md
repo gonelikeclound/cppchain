@@ -112,3 +112,51 @@ Message/ContentBlock（无 provider 依赖的领域模型）
   `Message::artifact` + `ArtifactToolResults` 落盘）；`04-problems/10` 横向对照总表；
   +24 单测（283 全绿）、4 个 m9_* demo
 - [ ] **M10**：运行时补全（弹性）——Streaming / Interrupt / Send / 时间旅行（fork）
+
+---
+
+## 收官记录（2026-09-26 · M0–M9 主线闭口）
+
+> 本段是完成总结的备查：本轮交付了什么、量化底座是多少、从哪继续。作为 M0–M9 主线的收尾标记。
+
+### 本轮里程碑提交
+
+| commit | 内容 |
+|--------|------|
+| `ea16c69` | **M8** 子代理/多智能体：subagent-as-tool + orchestrator-worker(串行) + handoff（21 文件 / +1894 行） |
+| `df05be2` | **M9** 五大问题集中收官：三中间件做深 + 混合检索 + artifact 落盘（31 文件 / +1807 行） |
+
+### 收官日量化底座
+
+| 项 | 数值 |
+|----|------|
+| 测试 | **283/283 全绿**、零编译告警 |
+| demo | **22 个** 可 `./run-demo.sh`（真机 13 / 离线 9） |
+| 文档 | 01 讨论 3 · 02 架构 10 · 03 详细设计 6 · 04 问题卡 10 |
+
+### 本轮关键观测数字（真机/确定性可复现）
+
+- **M8 ask_expert**：父轮 input **539 tok**，子代理内部 566 tok 不进父上下文 → 隔离是结构性的
+- **M8 orchestrator 串行**：主线 messages 只有 [提问, 汇总]；results 下标对齐 = 执行序
+- **M8 handoff**：`call_supervisor`（确定性信号）→ `Command(goto)` 上交 → redispatch 上限兜底
+- **M9 artifact**：8151B（≈2698 tok）→ **67 tok** 内联，全文进文件
+- **M9 hybrid**：keyword 3/5 → vector/hybrid 4/5（stub 语义轴缺「大盘→行情」是未覆盖项，如实留档）
+- **M9 budget（真机）**：8 次压缩、摘要真实 usage 输入 3958/输出 361，估算省 ~10223 tok
+  → **~360 输出 token 换 ~10k 输入 token**
+
+### 状态与「从哪继续」
+
+- **主线闭口**：M0–M9 全部 ✅，langchain/langgraph 核心抽象（Message/Model/Tool/State/Graph/Agent/
+  多智能体）+ 五大问题解法已跑通验证。M10 为弹性项，**是否推进交由后续讨论，非欠债**。
+- **暂缓备选**：
+  - M10：Interrupt（真 HITL 审批，价值最高）/ Streaming / Send fan-out / 时间旅行(fork)
+  - M9 开放点：动作级评测集、精确 tokenizer、Journal 持久层、`tool_search` 元工具
+- **继续入口**：读本文件「下一步」与「路线图 B1」；增量需求按对应层的 arch/详细设计追加。
+
+### 阅读导航（按需）
+
+| 想看 | 去读 |
+|------|------|
+| 多智能体设计与落地 | `02-arch-design/09` + `03-detail-design/05` + `04-problems/09` + `examples/subagent_*` |
+| 五大问题如何收口 | `02-arch-design/10` + `03-detail-design/06` + `04-problems/10` + `examples/m9_*` |
+| 各层抽象（Message/Model/Tool/State/Graph/Agent） | `02-arch-design/01..08` + `04-problems/README` 文件列表 |
