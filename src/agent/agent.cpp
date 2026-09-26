@@ -7,6 +7,7 @@
 
 #include "cppchain/message/chunk.hpp"
 #include "cppchain/agent/freshness.hpp"
+#include "cppchain/agent/tokens.hpp"
 #include "cppchain/message/serializer.hpp"   // Message ↔ JSON（快照需要）
 #include "cppchain/state/state.hpp"
 
@@ -34,9 +35,55 @@ std::string truncate_utf8(std::string const& s, std::size_t max_bytes) {
 
 void TruncateToolResults::after_tool(Message& tool_message) {
   std::string const text = tool_message.text();
-  if (text.size() <= max_chars_) return;
+  if (text.empty()) return;
 
-  std::string const kept = truncate_utf8(text, max_chars_);
+  if (opts_.max_tokens) {  // M9：token 预算模式（标注本身也算 token，用有效预算线性扫描）
+    namespace tok = cppchain::agent::tokens;
+    std::size_t const budget = *opts_.max_tokens;
+    if (tok::estimate(text) <= budget) return;
+
+    // 标注文案（含真实数字；kept 变化仅影响末几位数字，先以 kept=0 估算其固定的成本）
+    auto annotation = [&](std::size_t kept) {
+      return std::string("\n…[已按 token 预算截断：原文约 ") + std::to_string(tok::estimate(text)) +
+             " tokens，保留前 " + std::to_string(tok::estimate(text.substr(0, kept))) +
+             " tokens（" + std::to_string(text.size()) + "→" + std::to_string(kept) + " 字节）]";
+    };
+
+    // 与 estimate() 同口径增量累计：wide(多字节字符)+ceil(ascii/4)，天然停在字符边界。
+    // 有效预算 = 总预算 - 标注成本。
+    std::size_t const ann_cost = tok::estimate(annotation(0));
+    std::size_t const eff = budget > ann_cost ? budget - ann_cost : 0;
+    std::size_t kept = 0, wide = 0, ascii = 0;
+    for (std::size_t i = 0; i < text.size();) {
+      unsigned char const b = static_cast<unsigned char>(text[i]);
+      if (b < 0x80) { ++ascii; ++i; }
+      else if (b < 0xC0) { ++i; continue; }
+      else {
+        ++wide; ++i;
+        while (i < text.size() && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) ++i;
+      }
+      if (wide + (ascii + 3) / 4 <= eff) kept = i;  // 刚消耗完一个完整字符 → i 是字符边界
+      else break;
+    }
+
+    // 校正循环：标注用真实数字后若仍超预算，逐字符回退（ann_cost 用 kept=0，数字变大只差 1~2 token）
+    auto prev_char_start = [&](std::size_t p) {
+      std::size_t q = p - 1;
+      while (q > 0 && (static_cast<unsigned char>(text[q]) & 0xC0) == 0x80) --q;
+      return q;
+    };
+    while (kept > 0 && tok::estimate(text.substr(0, kept) + annotation(kept)) > budget)
+      kept = prev_char_start(kept);
+
+    std::string const kept_text = text.substr(0, kept);
+    tool_message.content.clear();
+    tool_message.content.push_back(TextBlock{kept_text + annotation(kept), std::nullopt});
+    return;
+  }
+
+  // 字节模式（原语义，回归路径）
+  if (text.size() <= opts_.max_chars) return;
+  std::string const kept = truncate_utf8(text, opts_.max_chars);
   std::size_t const dropped = text.size() - kept.size();
   tool_message.content.clear();
   tool_message.content.push_back(
@@ -71,7 +118,10 @@ std::size_t TrimHistory::safe_boundary(std::vector<Message> const& msgs, std::si
 }
 
 void TrimHistory::before_model(std::vector<Message>& msgs) {
-  if (msgs.size() <= opts_.max_messages) return;
+  namespace tok = cppchain::agent::tokens;
+  bool const over_token =
+      opts_.max_tokens.has_value() && tok::estimate_msgs(msgs) > *opts_.max_tokens;
+  if (msgs.size() <= opts_.max_messages && !over_token) return;
 
   // 保留系统提示
   std::vector<Message> head;
@@ -81,8 +131,18 @@ void TrimHistory::before_model(std::vector<Message>& msgs) {
     keep_from = 1;
   }
 
-  std::size_t drop_count = msgs.size() - opts_.max_messages;
-  if (drop_count <= keep_from) return;
+  std::size_t drop_count = msgs.size() > opts_.max_messages ? msgs.size() - opts_.max_messages : 0;
+
+  // M9：token 触发 → 加大折叠量，直到存活区（head + 尾部）估算不超限；保底留一条非系统消息。
+  if (over_token) {
+    std::size_t const budget = *opts_.max_tokens;
+    std::size_t const head_tokens = tok::estimate_msgs(head);
+    while (drop_count < msgs.size() - 1 &&
+           head_tokens +
+                   tok::estimate_msgs(std::span<Message const>(msgs).subspan(drop_count)) >
+               budget)
+      ++drop_count;
+  }
 
   // ① 边界安全校正
   drop_count = safe_boundary(msgs, keep_from, drop_count);
@@ -136,6 +196,7 @@ void TrimHistory::before_model(std::vector<Message>& msgs) {
   if (opts_.summarizer && !to_summarize.empty()) {
     auto s = opts_.summarizer(to_summarize);
     summary_text = s ? *s : ("（摘要失败：" + s.error().message + "）");
+    if (s) ++summaries_;  // M9：记录了真实的 LLM 摘要次数（成本观测）
   } else {
     summary_text = "（此前 " + std::to_string(to_summarize.size()) + " 条消息因超长已省略）";
   }
@@ -149,16 +210,63 @@ void TrimHistory::before_model(std::vector<Message>& msgs) {
   rebuilt.push_back(message::system_message("[历史摘要] " + summary_text));
   rebuilt.insert(rebuilt.end(), msgs.begin() + static_cast<std::ptrdiff_t>(drop_count), msgs.end());
 
+  // M9：估算省下的 token = 被折叠区间 - 摘要文本（供横向表"成本 vs 收益"列）
+  namespace tok = cppchain::agent::tokens;
+  long long const saved =
+      static_cast<long long>(tok::estimate_msgs(to_summarize)) -
+      static_cast<long long>(tok::estimate(summary_text));
+  if (saved > 0) tokens_saved_ += static_cast<std::size_t>(saved);
+
   msgs = std::move(rebuilt);
   ++compressions_;
 }
 
 // ---------------- ToolApproval ----------------
 
-ToolApproval::ToolApproval(std::vector<std::string> denied_tools)
-    : denied_(std::move(denied_tools)) {}
+namespace {
+
+// 参数指纹：递归按键排序 → 稳定 dump，保证 {"a":1,"b":2} 与 {"b":2,"a":1} 同一指纹
+// （nlohmann 对象键无序，直接 dump 不稳定 → 会误伤"同一参数不同写法"的记忆化命中）。
+std::string canonical_json(nlohmann::json const& v) {
+  if (!v.is_object()) return v.is_string() ? v.get<std::string>() : v.dump();
+  std::vector<std::string> keys;
+  keys.reserve(v.size());
+  for (auto it = v.begin(); it != v.end(); ++it) keys.push_back(it.key());
+  std::sort(keys.begin(), keys.end());
+  std::string out{'{'};
+  bool first = true;
+  for (auto const& k : keys) {
+    if (!first) out += ',';
+    first = false;
+    out += k;
+    out += ':';
+    out += canonical_json(v.at(k));
+  }
+  out += '}';
+  return out;
+}
+
+}  // namespace
+
+ToolApproval::ToolApproval(std::vector<std::string> denied_tools, Options opts)
+    : denied_(std::move(denied_tools)), opts_(std::move(opts)) {}
 
 bool ToolApproval::approve_tool_call(ToolCall const& call, std::string& why) {
+  // M9：收到 registry 的只读工具 → 免审（缺省 registry==nullptr → 行为与旧版一致）
+  if (opts_.registry) {
+    if (auto const* spec = opts_.registry->find(call.name); spec != nullptr && spec->read_only)
+      return true;
+  }
+
+  std::string const fp = call.name + "|" + canonical_json(call.args);
+  auto const cached = std::find_if(memo_.begin(), memo_.end(),
+                                   [&](auto const& e) { return e.first == fp; });
+  if (cached != memo_.end()) {
+    ++memo_hits_;
+    if (!cached->second) why = "工具 '" + call.name + "' 本会话已被拒绝（记忆化，不再重复询问）";
+    return cached->second;
+  }
+
   bool allowed = true;
   if (decider_) {
     allowed = decider_(call, why);
@@ -167,6 +275,14 @@ bool ToolApproval::approve_tool_call(ToolCall const& call, std::string& why) {
     if (!allowed) why = "工具 '" + call.name + "' 被策略禁止（副作用审批）";
   }
   if (!allowed) ++denials_;
+
+  // 有界记忆：拒绝永远记（RememberDeny/All 都记）；放行仅 RememberAll 记（放行是副作用敞口，默认每次仍审）
+  bool const remember = (!allowed && opts_.memo != MemoPolicy::Off) ||
+                        (allowed && opts_.memo == MemoPolicy::RememberAll);
+  if (remember) {
+    if (memo_.size() >= opts_.max_entries) memo_.erase(memo_.begin());  // FIFO 逐出最旧
+    memo_.emplace_back(fp, allowed);
+  }
   return allowed;
 }
 

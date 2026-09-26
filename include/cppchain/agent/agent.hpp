@@ -7,6 +7,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,14 +52,23 @@ class Middleware {
 
 // ---- 预置中间件 ----
 
-// 超长工具返回：超过 max_chars 截断，并标注被截断的字节数
+// 超长工具返回：超过上限截断，并标注被截断量。
+//   max_chars  → 字节上限（原语义，缺省行为）；
+//   max_tokens → 设置后改用 token 预算截断（M9，见 02-arch-design/10 A2②）
 class TruncateToolResults final : public Middleware {
  public:
-  explicit TruncateToolResults(std::size_t max_chars = 2000) : max_chars_(max_chars) {}
+  struct Options {
+    std::size_t max_chars = 2000;
+    std::optional<std::size_t> max_tokens;  // 设置了 → token 预算模式（二分回退字符边界）
+  };
+
+  explicit TruncateToolResults(Options opts) : opts_(std::move(opts)) {}
+  explicit TruncateToolResults(std::size_t max_chars) { opts_.max_chars = max_chars; }
+
   void after_tool(Message& tool_message) override;
 
  private:
-  std::size_t max_chars_;
+  Options opts_;
 };
 
 // 上下文压缩：消息数超过 max_messages 时折叠早期历史。
@@ -81,6 +91,8 @@ class TrimHistory final : public Middleware {
 
   struct Options {
     std::size_t max_messages = 20;
+    // M9：token 占用触发（估算，见 tokens.hpp）。设了且估算超限 → 即使条数未超也压缩。
+    std::optional<std::size_t> max_tokens;
     Summarizer summarizer;
     VolatilePolicy volatile_policy = VolatilePolicy::Fold;
   };
@@ -97,6 +109,9 @@ class TrimHistory final : public Middleware {
   [[nodiscard]] std::size_t compressions() const { return compressions_; }
   [[nodiscard]] std::size_t preserved_groups() const { return preserved_groups_; }
   [[nodiscard]] std::size_t dropped_groups() const { return dropped_groups_; }
+  // M9：LLM 摘要次数 / 累计估算省下的 token（= 被折叠区间 - 摘要文本）
+  [[nodiscard]] std::size_t summaries() const { return summaries_; }
+  [[nodiscard]] std::size_t estimated_tokens_saved() const { return tokens_saved_; }
 
   // 折叠边界的安全校正（public static：便于单测直接验证）
   [[nodiscard]] static std::size_t safe_boundary(std::vector<Message> const& msgs,
@@ -107,24 +122,48 @@ class TrimHistory final : public Middleware {
   std::size_t compressions_ = 0;
   std::size_t preserved_groups_ = 0;
   std::size_t dropped_groups_ = 0;
+  std::size_t summaries_ = 0;
+  std::size_t tokens_saved_ = 0;
 };
 
-// 工具副作用：按名单拒绝（可扩展为回调/白名单）
+// 工具副作用：按名单/回调拒绝（M9 追加审批记忆化 + 只读免审，见 06 详细设计 §2.4）
 class ToolApproval final : public Middleware {
  public:
   using Decider = std::function<bool(ToolCall const&, std::string& why)>;
 
-  explicit ToolApproval(std::vector<std::string> denied_tools);
-  explicit ToolApproval(Decider decider) : decider_(std::move(decider)) {}
+  enum class MemoPolicy { Off, RememberDeny, RememberAll };
+
+  struct Options {
+    MemoPolicy memo = MemoPolicy::RememberDeny;  // 缺省=只记忆"拒绝"（放行每次仍审，副作用敞口）
+    std::size_t max_entries = 128;               // FIFO 有界
+    tool::ToolRegistry const* registry = nullptr;  // 非拥有；给定时按 read_only 免审
+  };
+
+  // 便捷重载：缺省 Options（默认 RememberDeny / 有界 / 无 registry）。
+  // 注意：GCC 不允许"带 DMI 的嵌套聚合"作默认参数（会报 enclosing class 错误），
+  // 故用委托构造 + Options{} 于 mem-init 列表。
+  explicit ToolApproval(std::vector<std::string> denied_tools)
+      : ToolApproval(std::move(denied_tools), Options{}) {}
+  explicit ToolApproval(std::vector<std::string> denied_tools, Options opts);
+  explicit ToolApproval(Decider decider) : ToolApproval(std::move(decider), Options{}) {}
+  explicit ToolApproval(Decider decider, Options opts)
+      : decider_(std::move(decider)), opts_(std::move(opts)) {}
 
   bool approve_tool_call(ToolCall const& call, std::string& why) override;
 
   [[nodiscard]] std::size_t denials() const { return denials_; }
+  // M9：记忆命中的次数（证明"不重复问"路径真的被走到）
+  [[nodiscard]] std::size_t memo_hits() const { return memo_hits_; }
+  [[nodiscard]] std::size_t memo_size() const { return memo_.size(); }
 
  private:
   std::vector<std::string> denied_;
   Decider decider_;
+  Options opts_;
   std::size_t denials_ = 0;
+  std::size_t memo_hits_ = 0;
+  // fingerprint → 已决结论（true=放行）。FIFO：满则逐出最旧。
+  std::vector<std::pair<std::string, bool>> memo_;
 };
 
 // ---- Agent ----

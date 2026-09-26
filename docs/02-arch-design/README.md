@@ -17,3 +17,4 @@
 | 07 | [07-graph引擎架构设计.md](07-graph引擎架构设计.md) | M6 Graph 引擎（极简）：顺序 super-step + 快照恢复 | ✅ 已实现 |
 | 08 | [08-agent循环架构设计.md](08-agent循环架构设计.md) | M7 Agent 循环：middleware + 三个卡位问题落地 | ✅ 已实现 |
 | 09 | [09-多智能体架构设计.md](09-多智能体架构设计.md) | M8 多智能体：subagent-as-tool + orchestrator-worker(串行) + handoff | ✅ 已实现 |
+| 10 | [10-m9收官设计.md](10-m9收官设计.md) | M9 收官：三中间件做深（token 阈值/成本量化/审批记忆化）+ 混合检索 + artifact 落盘 | ✅ 已实现 |

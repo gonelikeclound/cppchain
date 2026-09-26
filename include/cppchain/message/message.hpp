@@ -50,6 +50,8 @@ struct Message {
   // Role::Tool 专用
   std::optional<std::string> tool_call_id;  // 回填 target tool call（不变式，见 validate_sequence）
   std::string status = "success";           // "success" | "error"
+  // 完整结果落盘后的引用（M9 artifact 落盘，见 02-arch-design/10）。缺省为空 → 正常内联内容。
+  std::optional<std::string> artifact;
 
   // Role::Ai 专用
   std::vector<ToolCall> tool_calls;

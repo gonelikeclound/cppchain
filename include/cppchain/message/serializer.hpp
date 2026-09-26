@@ -130,7 +130,8 @@ inline void to_json(nlohmann::json& j, Message const& m) {
        {"name", m.name ? nlohmann::json(*m.name) : nlohmann::json(nullptr)},
        {"status", m.status},
        {"tool_call_id",
-        m.tool_call_id ? nlohmann::json(*m.tool_call_id) : nlohmann::json(nullptr)}};
+        m.tool_call_id ? nlohmann::json(*m.tool_call_id) : nlohmann::json(nullptr)},
+       {"artifact", m.artifact ? nlohmann::json(*m.artifact) : nlohmann::json(nullptr)}};
   if (!m.tool_calls.empty()) j["tool_calls"] = m.tool_calls;
   if (!m.invalid_tool_calls.empty()) j["invalid_tool_calls"] = m.invalid_tool_calls;
   if (m.usage) j["usage"] = *m.usage;
@@ -147,6 +148,7 @@ inline void from_json(nlohmann::json const& j, Message& m) {
   m.name = detail::opt_str(j, "name");
   if (j.contains("status")) j.at("status").get_to(m.status);
   m.tool_call_id = detail::opt_str(j, "tool_call_id");
+  m.artifact = detail::opt_str(j, "artifact");
   if (j.contains("tool_calls")) j.at("tool_calls").get_to(m.tool_calls);
   if (j.contains("invalid_tool_calls")) j.at("invalid_tool_calls").get_to(m.invalid_tool_calls);
   if (j.contains("usage")) j.at("usage").get_to(m.usage);

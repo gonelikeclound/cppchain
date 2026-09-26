@@ -76,7 +76,7 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 | **M6** ✅ | **Graph 引擎（极简）**：StateGraph、Node/Edge/ConditionalEdge、顺序 super-step、Command 简版、checkpoint 挂接 | M5 | 确定性 workflow + conditional 路由 demo | — |
 | **M7** ✅ | **Agent 循环**：create_agent 等价物（middleware 简版 + 工具路由） | M2 M3 M6 | ReAct 风格可用 agent | **上下文压缩**（hot-path 压缩中间件）；**超长工具返回**（截断/摘要）；副作用可控执行 |
 | **M8** ✅ | **Subagent/多智能体**：subgraph-as-tool、orchestrator-worker（串行版）、handoff 简化 | M6 M7 | ask_expert / supervisor demo | **副作用与子代理**（主上下文干净验证 + fork 语义对照） |
-| **M9** | **五大问题集中收官**：每个解法一个 demo + 横向对比结论 | 全部 | `examples/` 沉淀 + `04-problems/` 成稿 | ⭐ 核心主线 |
+| **M9** ✅ | **五大问题集中收官**：每个解法一个 demo + 横向对比结论 | 全部 | `examples/` 沉淀 + `04-problems/` 成稿 | ⭐ 核心主线 |
 | **M10** | **运行时补全**（视 M6 表现取舍）：Streaming / Interrupt / Send 动态 fan-out / 时间旅行 | M6 M7 | 补全后可支撑更复杂的 agent 实验 | 子代理并行 |
 
 ### B2. 简化取舍点（已答）
@@ -107,4 +107,8 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 - [x] **M8 完成**：子代理/多智能体（subagent-as-tool、orchestrator-worker 串行版、handoff 简化；
   `make_subagent_tool` + `as_agent_node` 零既有接口改动），真机三 demo + 07-cases 单测；
   收口于 `04-problems/09`（副作用隔离 + fork 语义对照）
-- [ ] **M9**：五大问题集中收官（含把 M7 的三个中间件做深：阈值策略/token 量化/审批记忆化）
+- [x] **M9 完成**：五大问题集中收官——三中间件做深（token 阈值 `TrimHistory.max_tokens`、
+  截断 `max_tokens` 预算模式、审批记忆化 `ToolApproval.memo`）+ 收官件（`HybridSelector` 混合召回、
+  `Message::artifact` + `ArtifactToolResults` 落盘）；`04-problems/10` 横向对照总表；
+  +24 单测（283 全绿）、4 个 m9_* demo
+- [ ] **M10**：运行时补全（弹性）——Streaming / Interrupt / Send / 时间旅行（fork）

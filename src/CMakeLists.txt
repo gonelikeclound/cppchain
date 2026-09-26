@@ -49,7 +49,8 @@ add_library(cppchain_tool STATIC
   tool/fetch_url.cpp
   tool/calculator.cpp
   tool/file_tools.cpp
-  tool/arxiv.cpp)
+  tool/arxiv.cpp
+  tool/hybrid_selector.cpp)
 
 target_include_directories(cppchain_tool PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
@@ -118,12 +119,14 @@ target_link_libraries(cppchain_graph PUBLIC
 
 target_compile_options(cppchain_graph PRIVATE -Wall -Wextra -Wpedantic)
 
-# ---- M7: cppchain_agent（Agent 循环 + middleware + M8 的 subagent-as-tool）----
+# ---- M7/M9: cppchain_agent（Agent 循环 + middleware + subagent + tokens/artifact）----
 add_library(cppchain_agent STATIC
   agent/agent.cpp
   agent/journal.cpp
   agent/stale.cpp
-  agent/subagent.cpp)
+  agent/subagent.cpp
+  agent/tokens.cpp
+  agent/artifact.cpp)
 
 target_include_directories(cppchain_agent PUBLIC
   ${PROJECT_SOURCE_DIR}/include)

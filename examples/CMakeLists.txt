@@ -16,7 +16,7 @@ set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream structured_output)
 set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo
 set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
-                         tools_frontline tools_files tools_arxiv)
+                         tools_frontline tools_files tools_arxiv m9_hybrid)
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
@@ -26,12 +26,15 @@ set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools histo
 # M8 子代理 demo：额外依赖 graph 库（as_agent_node / StateGraph）
 set(SUBAGENT_EXAMPLE_TARGETS subagent_ask_expert subagent_workers subagent_handoff)
 list(APPEND AGENT_EXAMPLE_TARGETS ${SUBAGENT_EXAMPLE_TARGETS})
-# 离线（用 FakeTransport）但需要 agent 库的 demo
-set(OFFLINE_AGENT_EXAMPLES side_effect_guard tools_approval)
+# M9 真机量化 demo
+list(APPEND AGENT_EXAMPLE_TARGETS m9_budget)
+# 离线（用 FakeTransport/无网络）但需要 agent 库的 demo
+set(OFFLINE_AGENT_EXAMPLES side_effect_guard tools_approval m9_approval m9_artifact)
 set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop context_budget stale_state)  # 需要真网络（embedding 端点）
 
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard
-                            tools_frontline tools_files tools_arxiv tools_approval)
+                            tools_frontline tools_files tools_arxiv tools_approval
+                            m9_hybrid m9_approval m9_artifact)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)
@@ -44,6 +47,7 @@ if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS subagent_ask_expert)
   list(APPEND EXAMPLE_TARGETS subagent_workers)
   list(APPEND EXAMPLE_TARGETS subagent_handoff)
+  list(APPEND EXAMPLE_TARGETS m9_budget)
 endif()
 
 if(CPPCHAIN_BUILD_HTTP)

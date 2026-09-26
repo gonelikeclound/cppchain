@@ -53,6 +53,10 @@ KNOWN_DEMOS=(
   "subagent_ask_expert:M8 ask_expert——子代理整体委派 + 主上下文干净 + 副作用透传（需 LLM 端点）"
   "subagent_workers:M8 orchestrator-worker 串行版——supervisor 拆任务 + 条件路由 + finalize 汇总（需 LLM 端点）"
   "subagent_handoff:M8 handoff 简化——worker 上交回主管 + redispatch 上限兜底（需 LLM 端点）"
+  "m9_approval:M9 审批记忆化——同参数只审一次 + 只读免审（离线）"
+  "m9_artifact:M9 超长结果落盘——prompt 只放引用行（离线）"
+  "m9_hybrid:M9 混合召回对照——keyword / vector / hybrid 三路（离线）"
+  "m9_budget:M9 压缩成本量化——token 阈值触发 + 摘要真实 usage（需 LLM 端点）"
 )
 
 describe() {
