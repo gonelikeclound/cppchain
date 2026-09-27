@@ -116,6 +116,36 @@ TEST(WfGenerator, clarify_dispatch) {
   EXPECT_FALSE(r.clarify->session_id.empty());
 }
 
+TEST(WfGenerator, clarify_options_roundtrip) {
+  tool::ToolRegistry reg = make_registry();
+
+  // 带 options 的澄清 → 读回；按选项文本作答 → 续跑至生成
+  ScriptedChatModel model;
+  model.replies = {R"({"questions":[{"id":"t","text":"几点？",
+        "options":["早 8 点","晚 8 点","其他"]}]})",
+                   kPlanJson, kIrJson};
+  WorkflowGenerator gen(model, reg);
+  auto r1 = gen.run("早上提醒我");
+  ASSERT_EQ(r1.kind, WorkflowGenerationResult::Kind::Clarify);
+  ASSERT_EQ(r1.clarify->questions.size(), 1u);
+  ClarifyQuestion const& q = r1.clarify->questions[0];
+  ASSERT_EQ(q.options.size(), 3u);
+  EXPECT_EQ(q.options[0], "早 8 点");
+  EXPECT_EQ(q.options[1], "晚 8 点");
+
+  auto r2 = gen.submit_answers(r1.clarify->session_id, {{q.id, q.options[1]}});
+  ASSERT_TRUE(r2.has_value());
+  ASSERT_EQ(r2->kind, WorkflowGenerationResult::Kind::Generated);
+
+  // 兼容旧回复：缺 options → 空向量（自由文本问答）
+  ScriptedChatModel model2;
+  model2.replies = {R"({"questions":[{"id":"q","text":"几点？"}]})"};
+  WorkflowGenerator gen2(model2, reg);
+  auto rc = gen2.run("x");
+  ASSERT_EQ(rc.kind, WorkflowGenerationResult::Kind::Clarify);
+  EXPECT_TRUE(rc.clarify->questions[0].options.empty());
+}
+
 TEST(WfGenerator, reject_dispatch) {
   ScriptedChatModel model;
   model.replies = {R"({"reject":{"reason":"被事件唤醒的触发语义，当前只有 time 触发"}})"};

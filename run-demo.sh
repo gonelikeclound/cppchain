@@ -58,6 +58,7 @@ KNOWN_DEMOS=(
   "m9_hybrid:M9 混合召回对照——keyword / vector / hybrid 三路（离线）"
   "m9_budget:M9 压缩成本量化——token 阈值触发 + 摘要真实 usage（需 LLM 端点）"
   "wf_eval:主动智能 Workflow 生成验收——12 例矩阵 + 调度模拟（需 LLM 端点）"
+  "proactive:主动智能演示——ask_user 菜单澄清 → 易读 IR；--intent/--cases 批量自动作答（需 LLM 端点）"
 )
 
 describe() {
@@ -198,10 +199,13 @@ printf '运行 %d 个 demo（工作目录=%s，.env=%s）\n' "${#to_run[@]}" "$S
 for name in "${to_run[@]}"; do
   printf '\n──────── %s —— %s ────────\n' "$name" "$(describe "$name")"
   start_ms=$(date +%s%3N)
-  # agent_cli 缺省输入源是交互 REPL（会占住终端）——run-all 时给非交互参数，
-  # 用样例文件批量跑 react 模式做冒烟。
+  # agent_cli / proactive 缺省输入源是交互 REPL（会占住终端）——run-all 时给非交互参数冒烟：
+  #   · agent_cli 用样例文件批量跑 react 模式；
+  #   · proactive 用单条稳定意图直接生成（--cases 全量矩阵留给人手动跑）。
   if [[ "$name" == "agent_cli" ]]; then
     "./$DEMO_DIR/$name" -m react -f examples/agent_cli/inputs/sample.txt --json >/dev/null
+  elif [[ "$name" == "proactive" ]]; then
+    "./$DEMO_DIR/$name" --intent "每天早上 8 点提醒我喝水" --question-answer "几点" 1 >/dev/null
   else
     "./$DEMO_DIR/$name"
   fi

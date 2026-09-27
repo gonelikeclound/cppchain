@@ -22,7 +22,7 @@ set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics)
 # 主动智能 workflow 生成端到端验收（真机 LLM）
-set(WF_EXAMPLE_TARGETS wf_eval)
+set(WF_EXAMPLE_TARGETS wf_eval proactive)
 # 需要 agent 库（真机）的 demo
 set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools history_agent research_chat agent_cli)
 # M8 子代理 demo：额外依赖 graph 库（as_agent_node / StateGraph）

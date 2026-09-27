@@ -37,6 +37,7 @@ using Json = nlohmann::json;
 struct ClarifyQuestion {
   std::string id;
   std::string text;
+  std::vector<std::string> options;  // 可选：2–4 项供用户按数字选择；空 = 自由文本问答
 };
 
 struct Clarification {

@@ -65,7 +65,11 @@ inline const std::vector<std::string> kSessionNs = {"wf", "session"};
 
 Json questions_to_json(std::vector<ClarifyQuestion> const& qs) {
   Json arr = Json::array();
-  for (ClarifyQuestion const& q : qs) arr.push_back(Json{{"id", q.id}, {"text", q.text}});
+  for (ClarifyQuestion const& q : qs) {
+    Json j{{"id", q.id}, {"text", q.text}};
+    if (!q.options.empty()) j["options"] = q.options;
+    arr.push_back(std::move(j));
+  }
   return arr;
 }
 
@@ -76,7 +80,11 @@ std::vector<ClarifyQuestion> questions_from_json(Json const& arr) {
     ClarifyQuestion q;
     q.id = e.value("id", "");
     q.text = e.value("text", e.value("ask", ""));
-    if (!q.id.empty()) out.push_back(std::move(q));
+    if (!q.id.empty()) {
+      for (Json const& o : e.value("options", Json::array()))
+        if (o.is_string()) q.options.push_back(o.get<std::string>());
+      out.push_back(std::move(q));
+    }
   }
   return out;
 }
@@ -166,7 +174,9 @@ struct WorkflowGenerator::Impl {
         tool_catalog(*registry) +
         "\n一次调用只输出一个 JSON 对象，三态只选一：\n"
         "  计划就绪   {\"plan\": {\"trigger\": {...}, \"steps\": [...], \"assumptions\": [...]}}\n"
-        "  需澄清     {\"questions\": [{\"id\": \"q1\", \"text\": \"几点？\"}, ...]}（可多项）\n"
+        "  需澄清     {\"questions\": [{\"id\": \"q1\", \"text\": \"几点？\", "
+        "\"options\": [\"早 8 点\", \"晚 8 点\", \"其他\"]}, ...]}（可多项；问题可给 "
+        "2–4 个选项供用户按数字选择，无 options 视为自由文本问答）\n"
         "  表达不了   {\"reject\": {\"reason\": \"说明缺什么能力\"}}";
   }
 
