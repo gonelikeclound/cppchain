@@ -141,3 +141,28 @@ target_link_libraries(cppchain_agent PUBLIC
   nlohmann_json::nlohmann_json)
 
 target_compile_options(cppchain_agent PRIVATE -Wall -Wextra -Wpedantic)
+
+# ---- 主动智能 workflow：IR → 图编译/执行/生成（leaf over graph/tool/model/state）----
+# D1 触发仅为元数据（不调度）；生成端收敛到 ChatModel&（可 stub 离线测）。
+add_library(cppchain_workflow STATIC
+  workflow/ir.cpp
+  workflow/refs.cpp
+  workflow/expr.cpp
+  workflow/validator.cpp
+  workflow/compiler.cpp
+  workflow/generator.cpp)
+
+target_include_directories(cppchain_workflow PUBLIC
+  ${PROJECT_SOURCE_DIR}/include)
+
+target_include_directories(cppchain_workflow SYSTEM BEFORE PUBLIC
+  ${nlohmann_json_SOURCE_DIR}/include)
+
+target_link_libraries(cppchain_workflow PUBLIC
+  cppchain_graph
+  cppchain_tool
+  cppchain_model
+  cppchain_state
+  nlohmann_json::nlohmann_json)
+
+target_compile_options(cppchain_workflow PRIVATE -Wall -Wextra -Wpedantic)

@@ -1,0 +1,55 @@
+# 生成过程与当前实现
+
+## 1. 生成过程
+
+1. **识别 trigger** —— 从意图提取触发源与调度约束；业务条件下沉到节点，不装进 trigger。
+2. **制定计划** —— 把意图编排为有序步骤：锚定工具、声明降级路径与条件分支。
+3. **一次性生成 IR** —— 按计划一次性输出整段 IR JSON（trigger + 全部节点），随后过结构 / 计划覆盖校验。
+
+---
+
+## 2. 当前实现
+
+> 提示词版本：plan `wf-plan-v1-20260927-d`；IR 一次性 `wf-v2-f0-20260926-b`。
+
+### 2.1 识别 trigger（plan 段）
+
+- 触发源只接受 `time`；`schedule` 必须是可解析的 5 段 cron（`0 8,20 * * *`）。
+- 能编进调度的约束编进调度（如"避开深夜"直接编进 cron），不为它开分支。
+
+### 2.2 制定计划（plan 段）
+
+一次 LLM 调用输出**单个 JSON 对象，三态只选一**：
+
+| 态 | 形状 |
+|---|---|
+| 计划就绪 | `{"plan": {"trigger": {"source":"time","schedule":"<cron>"}, "steps":[{"id","action","tool?","fallback":[],"has_branch"}], "assumptions":[...]}}` |
+| 需澄清 | `{"questions":[{"id","ask","options","default"}]}`（非空） |
+| 表达不了 | `{"reject":"说明缺什么能力"}` |
+
+- 步骤 `id` 即 IR 节点 id（`[A-Za-z][A-Za-z0-9_]*`、不以 `_` 开头、不用 `result`、互相唯一）；工具名必须来自目录；`has_branch=true` 表示该步需条件分支；不锚定工具只给 `action`。
+- **解析失败 → 回喂重试，最多 3 次（`MAX_PLAN_ATTEMPTS`）**；仍失败 → 显式拒绝而非静默。
+- **澄清可多轮（最多 3 轮，`MAX_ASK_ROUNDS`）**：会话（PlanSession）挂起落盘，用户带 answers 续跑；无 answers 一律重开；答案只接受"提出过的问题"。
+- 拒绝 / 降级判据：**降级允许"少做"，不允许"换语义"**——
+  - 缺**执行能力**（动作无法自动化）→ 降级出 plan（「有货自动下单」→「有货时通知用户确认」；文案不得冒充已下单）。
+  - 缺**语义表达能力**（触发核心是"被事件唤醒"、"集合非空"是核心条件）→ **必须显式拒绝**，理由说明缺口。
+- 每次调用都计用量（plan 段单独记账，章节 §2.4 合并）。
+
+### 2.3 一次性生成 IR（IR 段）
+
+- **预算 = 最多 3 次 LLM 调用**（1 次首出 + 2 次 `MAX_V10_FIX_ROUNDS` 修复）。
+- 注入完整提示词：已确认 plan（trigger + 每 step 落为**同名** IR 节点、降级写进该节点 `on_error.fallback`、`has_branch` 落成 `expr` 分支）+ 完整 IR 示例；要求**一次性输出**顶层 `{id, trigger, nodes}`，不包围栏、不调工具、不分步。
+- 三道失败档，逐档回喂且**整篇重写**（不改个别节点）：
+  1. **解析失败**（非合法 JSON）→ 提示重出单个合法顶层 JSON 对象；
+  2. **结构非法**（非 `{id,trigger,nodes}`）→ 提示整篇重写为完整 IR JSON；
+  3. **校验未过**——结构校验（V1–V9）或 V10 计划覆盖（trigger 等价、每 step 有同名节点、锚定工具同名）→ 回喂问题摘要（规则/位置/提示），整篇重写一次改对。
+- **预算耗尽仍不过 → fail-closed 显式拒绝**（不静默产坏 IR）；`repair_rounds = 调用次数 − 1`。
+- IR 段每次调用也计用量。
+
+### 2.4 对外响应（三态）
+
+| 状态 | 字段 |
+|---|---|
+| `clarify` | `questions`；会话挂起待续跑 |
+| `rejected` | `reason`（缺口说明，或预算耗尽的 fail-closed） |
+| `generated` | `ir` · `validated` · `repair_rounds` · `total_tool_calls`（=IR 段 LLM 调用次数）· `issues` · `v10_issues` · `usage`（含 `plan_usage`，plan 与 IR 两段可拆分） |

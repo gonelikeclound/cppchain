@@ -57,6 +57,7 @@ KNOWN_DEMOS=(
   "m9_artifact:M9 超长结果落盘——prompt 只放引用行（离线）"
   "m9_hybrid:M9 混合召回对照——keyword / vector / hybrid 三路（离线）"
   "m9_budget:M9 压缩成本量化——token 阈值触发 + 摘要真实 usage（需 LLM 端点）"
+  "wf_eval:主动智能 Workflow 生成验收——12 例矩阵 + 调度模拟（需 LLM 端点）"
 )
 
 describe() {

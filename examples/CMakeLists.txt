@@ -21,6 +21,8 @@ set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics)
+# 主动智能 workflow 生成端到端验收（真机 LLM）
+set(WF_EXAMPLE_TARGETS wf_eval)
 # 需要 agent 库（真机）的 demo
 set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools history_agent research_chat agent_cli)
 # M8 子代理 demo：额外依赖 graph 库（as_agent_node / StateGraph）
@@ -53,6 +55,7 @@ endif()
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS chat_live)
   list(APPEND EXAMPLE_TARGETS structured_output)
+  list(APPEND EXAMPLE_TARGETS ${WF_EXAMPLE_TARGETS})
 endif()
 
 foreach(t IN LISTS EXAMPLE_TARGETS)
@@ -76,6 +79,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_graph)
   elseif(t IN_LIST STATE_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_state)
+  elseif(t IN_LIST WF_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_workflow cppchain_http_curl)
   elseif(t IN_LIST HTTP_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_http_curl)
   elseif(t IN_LIST MODEL_EXAMPLE_TARGETS)

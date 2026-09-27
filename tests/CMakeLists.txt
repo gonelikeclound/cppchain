@@ -101,3 +101,25 @@ target_link_libraries(agent_tests PRIVATE
 
 target_compile_options(agent_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(agent_tests)
+
+# ---- 主动智能 workflow：IR/引用/表达式/校验/编译/生成/特征 ----
+# （feaked 工具离线确定性；生成器用 ScriptedChatModel 全离线驱动）
+# 特征谓词 + 12 例固件在 examples/support/features.hpp（仅 demo/评测用，不进库）：
+# 这里是纯 header，加 examples/ 头路径直接引用同一份。
+add_executable(workflow_tests
+  wf/expr_test.cpp
+  wf/refs_test.cpp
+  wf/ir_validator_test.cpp
+  wf/compiler_test.cpp
+  wf/generator_test.cpp
+  wf/features_test.cpp)
+
+target_include_directories(workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)
+
+target_link_libraries(workflow_tests PRIVATE
+  cppchain_workflow
+  GTest::gtest_main
+  Threads::Threads)
+
+target_compile_options(workflow_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(workflow_tests)
