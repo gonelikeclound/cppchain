@@ -16,7 +16,9 @@ demo 以 **ask_user 机制**打编号菜单（`<问题>` + `1. 选项1 / 2. 选�
 | `src/workflow/generator.cpp` | 澄清 JSON round-trip 支持 options；提示词引导 LLM 给 2–4 个选项 |
 | `examples/proactive/ask.hpp` | **ask_user 通用提问器**：交互读 stdin（编号菜单）/ 批量查 `--question-answer` 规则 |
 | `examples/proactive/main.cpp` | 交互 REPL / `--intent` 单发 / `--cases` 批量矩阵；易读 IR 打印 |
+| `examples/support/richtools.hpp` | 丰富 fake 工具库（system_settings/sms/email/reminder ×11）+ **tool_search 能力检索**（groups+keywords 各 1–3） |
 | `tests/wf/generator_test.cpp` | options round-trip 与新答案续跑用例 |
+| `tests/wf/richtools_test.cpp` | tool_search 分组/keywords AND/1–3 上限离线用例 |
 
 ## 3. 关键决策
 
@@ -27,6 +29,13 @@ demo 以 **ask_user 机制**打编号菜单（`<问题>` + `1. 选项1 / 2. 选�
   流程不中断（无人值守友好）。
 - **`--cases` 语义**：expect=Clarify 的首轮澄清按 `must_ask` 关键词即判（不再追问）；
   golden/boundary 的 Clarify 走规则自动续跑，Generated 判特征 + 编译（不 fire，保持生成端聚焦）。
+- **丰富目录 + tool_search**：生成目录 = 基础 10 工具 + 11 个分组 fake 工具
+  （system_settings/sms/email/reminder）+ `tool_search`（仅生成端演示，不接真实设备）。
+  `tool_search(groups, keywords)` 按分组（并集）+ 关键词（全部命中）检索整库，
+  返回 {name, group, description, params}；groups/keywords 各限 1–3（超出报错），
+  handler 捕获注册表 shared_ptr 避免悬垂。tool_search 的测试覆盖分组过滤、
+  关键词 AND、跨 baseline 命中与上限约束。交互/单条用丰富目录；`--cases` 用基准目录
+  （12 例固件按基础目录设计，避免生成行为漂移导致既有期望回归）。
 - **易读 IR**：库内无现成打印器（NodeIR 字段全 public），demo 自写逐节点链式输出 +
   `to_json().dump(2)` 规范形兜底。
 

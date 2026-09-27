@@ -28,12 +28,14 @@
 #include "support/dotenv.hpp"
 #include "support/fakes.hpp"
 #include "support/features.hpp"
+#include "support/richtools.hpp"
 
 using namespace cppchain;
 using namespace cppchain::model;
 using namespace cppchain::workflow;
 using namespace demo::fakes;
 using namespace demo::feature;
+using namespace demo::richtools;
 using namespace proactive;
 
 namespace {
@@ -326,15 +328,23 @@ int main(int argc, char** argv) {
   }
   auto model = make_model(env);
   FakeToolSinks sinks;
-  tool::ToolRegistry registry = make_fake_tools(sinks);
-  WorkflowGenerator gen(*model, registry);
+  RichSinks rsinks;
+  // 生成目录 = 基础 10 工具 + 丰富分组工具（system/sms/email/reminder）+ tool_search
+  auto registry = make_rich_registry(sinks, rsinks);
+  WorkflowGenerator gen(*model, *registry);
 
   AnswerRouter router;
   router.interactive = !(cli->batch || cli->cases || !cli->qa.empty());
   for (auto const& [re, val] : cli->qa)
     router.rules.emplace_back(std::regex(re), val);
 
-  if (cli->cases) return run_cases(*model, registry, router);
+  if (cli->cases) {
+    // 12 例评测固件按基础目录（10 工具）设计——用基准注册表跑矩阵，
+    // 避免丰富目录改变生成行为导致既有期望回归。
+    FakeToolSinks eval_sinks;
+    tool::ToolRegistry eval_registry = make_fake_tools(eval_sinks);
+    return run_cases(*model, eval_registry, router);
+  }
   if (!cli->intent.empty()) {
     report_single(gen, cli->intent, router);
     return 0;
