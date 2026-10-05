@@ -73,7 +73,9 @@ Message ai_invalid_tool_call(std::string const& name) {
   return m;
 }
 
-// 一个最小的 ReAct 循环 IR（5 个节点；无 history，C 阶段刻意先不接）
+// 规范 §4「M12：agent 循环的规范写法」的**逐字形态**（5 个节点；无 history，C 阶段刻意先不接）。
+// 刻意用文档里的写法（goto 靠键判别、不带 kind），使"规范里的示例真能编译"被测试锁住 ——
+// 上一版规范就吃过与实现脱节的亏（$result vs $_.result）。
 Json react_ir() {
   return Json{
       {"id", "wf_react"},
@@ -94,7 +96,7 @@ Json react_ir() {
                                          {"text", "_turn_end"}}},
                           {"default", "_fail"}},
                      Json{{"id", "act"}, {"kind", "run_tools"}, {"next", "loop"}},
-                     Json{{"id", "loop"}, {"kind", "goto"}, {"goto", "L"}, {"max", 4}}})}};
+                     Json{{"id", "loop"}, {"goto", "L"}, {"max", 4}}})}};
 }
 
 struct Fixture {
@@ -242,4 +244,24 @@ TEST(WfAgentLoop, validator_rejects_unknown_outcome_key) {
   auto r = validate_json(ir_json, ValidatorOptions{&reg});
   ASSERT_FALSE(r.ok());
   EXPECT_NE(r.describe().find("VN10"), std::string::npos) << r.describe();
+}
+
+// 规范 §3：kind 是通用判别键，历史写法（靠键判别）继续支持 —— 两者必须等价。
+// （这条是回归：我一度只给新 kind 加显式判别，导致 {"kind":"goto"} 反被拒。）
+TEST(WfAgentLoop, kind_key_and_legacy_discrimination_agree) {
+  auto k = [](Json const& node) { return WorkflowIR::classify(node); };
+
+  EXPECT_EQ(*k(Json{{"id", "x"}, {"goto", "L"}, {"max", 1}}), NodeKind::Goto);
+  EXPECT_EQ(*k(Json{{"id", "x"}, {"kind", "goto"}, {"goto", "L"}, {"max", 1}}), NodeKind::Goto);
+  EXPECT_EQ(*k(Json{{"id", "x"}, {"kind", "label"}}), NodeKind::Label);
+  EXPECT_EQ(*k(Json{{"id", "x"}, {"kind", "model"}, {"model", "m"}, {"next", "y"}}),
+            NodeKind::Model);
+
+  // 未知 kind 值 → 拒绝
+  EXPECT_FALSE(k(Json{{"id", "x"}, {"kind", "编造的"}}).has_value());
+  // 与声明**冲突**的键 → 拒绝（fail-closed）
+  EXPECT_FALSE(k(Json{{"id", "x"}, {"kind", "tool"}, {"expr", "true"}}).has_value());
+  // 与声明**一致**的冗余键 → 允许
+  EXPECT_TRUE(k(Json{{"id", "x"}, {"kind", "tool"}, {"tool", "echo"},
+                     {"next", "_turn_end"}}).has_value());
 }

@@ -391,7 +391,7 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
 |---|---|---|---|
 | **A** ✅ | 落盘续跑验证（跨进程读回） | 无 | 已完成 |
 | **B** ✅ | 本文（形状与取舍） | A | — |
-| **C** | `model`/`route`(match)/`run_tools` 三节点 + 循环 + `_fail` 保留名（ReAct 打通，**先不接 history**） | B | IR 扩张；需同步 IR 语法文档 |
+| **C** ✅ | `model`/`route`(match)/`run_tools` 三节点 + 循环 + `_fail` 保留名（ReAct 打通，**未接 history**）；IR 语法文档已同步 | B | IR 扩张 |
 | **D** | `load_history`/`save_history` + CLI（`--workdir`/`--session`/`--show`/`--workflow`） | C | 小 |
 | **E** | 组件注册表完善（model/agent/memory）+ memory 落盘 | C | 小 |
 | **F** | 教生成器产出这些节点（Q4 放开） | C+D + 生成端评测方法 | 生成质量与 IR 表达力互相纠缠 |
@@ -415,7 +415,7 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
 - [ ] CLI：`--workdir`/`--session`/`--reset`/`--show`/`--workflow`
 - [ ] 离线单测：循环有界、route 词表、history 节点、跨 workdir 隔离
 - [ ] 真机：同一 workdir 两次独立进程，第二轮答出只有第一轮才知道的信息
-- [ ] IR 语法文档（`主动智能/11-ir-syntax.md`）同步；生成器提示词暂不动（Q4）
+- [x] IR 语法文档（`主动智能/11-ir-syntax.md`）同步：§3 判定规则（改为 fail-closed 的歧义即错，原文"第一个命中即定"与实现不符）、§4 三种新节点字段 + ReAct 循环规范写法、§7 链约束与 `_fail`；生成器提示词暂不动（Q4）
 
 ---
 

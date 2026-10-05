@@ -263,16 +263,31 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 
 ## 3. 节点类型
 
-`nodes` 数组里每个元素是一个节点对象。节点类型按下述规则判定（第一个命中即定）：
+`nodes` 数组里每个元素是一个节点对象。
 
 | 类型 | 判定键 | 用途 |
 |---|---|---|
-| `tool` | 有 `tool` 键 | 调用一个目录内工具，产物进 `$_.result` |
-| `expr` | 有 `expr` 键 | 条件判定，二选一出口 |
-| `label` | `kind: "label"` | 循环/汇合目标（可被 goto 指向） |
-| `goto` | 有 `goto` 键 | 有界跳转回 label |
+| `tool` | `tool` 键（或 `kind:"tool"`） | 调用一个目录内工具，产物进 `results[<id>]` |
+| `expr` | `expr` 键（或 `kind:"expr"`） | 条件判定，二选一出口 |
+| `label` | `kind:"label"` | 循环/汇合目标（可被 goto 指向） |
+| `goto` | `goto` 键（或 `kind:"goto"`） | 有界跳转回 label |
+| `model` | `kind:"model"` | **一次** LLM 调用（M12） |
+| `route` | `kind:"route"` | match 分派：按判别式选下一跳（M12） |
+| `run_tools` | `kind:"run_tools"` | 执行最后一条 AI 消息的 tool_calls（M12） |
 
-入口是隐式的（无需写任何节点）；终止统一由目标 id `_turn_end` 表达（**只在 `next`/`then`/`else` 里写，不写出节点**）。判定优先级：显式 `kind` → `_turn_end` → `goto` → `expr` → `tool`。
+**判定规则（fail-closed，不是"第一个命中即定"）**：
+
+- `kind` 是**通用**判别键，上表七种都可用它显式声明；`kind` 的值不在表内 → **编译期拒绝**。
+- 也支持历史写法：靠 `goto` / `expr` / `tool` 键判别（不带 `kind`）。
+- **歧义即错**：与 `kind` **冲突**的键、或多个判别键并存 → 拒绝。
+  （与声明**一致**的冗余键不算冲突，如 `{"kind":"tool","tool":...}` 合法。）
+
+入口是隐式的（无需写任何节点）；终止由两个**保留目标名**表达（**只在 `next`/`then`/`else`/`cases`/`default` 里写，不写出节点**）：
+
+| 保留名 | 语义 |
+|---|---|
+| `_turn_end` | 正常终止本次触发 |
+| `_fail` | **以错误终止**本次触发（fail-closed；错误信息带 IR id + 节点 id，细节见 `state.messages`） |
 
 ## 4. 各类型节点的字段
 
@@ -313,6 +328,73 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 
 - `goto` 必须指向一个 **label** 节点的 id；`max` 必须是正整数（循环有界）。
 
+**model 节点（M12）**
+
+```jsonc
+{
+  "id": "think",
+  "kind": "model",
+  "model": "main",              // 必填：**模型组件名**（宿主注册，不是端点模型 id）
+  "tools": "research_toolset",  // 可选：**工具集组件名**（宿主注册；空 = 不带工具）
+  "system_prompt": "…",         // 可选：本节点追加的 system 提示
+  "next": "route"               // 必填
+}
+```
+
+- **只调用一次模型**。多轮往返由 `route` + `run_tools` + 回边构成，**不在本节点内循环** ——
+  这样每一步都在图上可见、都由引擎落快照（可观测、可恢复）。
+- 回复以"新增消息"形式追加进 `messages` 通道（`add_messages` reducer）。
+- `model` / `tools` 组件名必须在宿主注册表里，否则**校验期**拒绝（VN10，与 §8 对工具名的做法一致）。
+
+**route 节点（M12）**
+
+```jsonc
+{
+  "id": "route", "kind": "route",
+  "on": "last_ai_outcome",         // 判别式：封闭词表，当前只有这一个
+  "cases": {
+    "tool_calls":         "act",     // 最后一条 AI 消息有**合法** tool_calls
+    "invalid_tool_calls": "_fail",   // 有**非法** tool_calls（参数解析失败 / 缺 name）
+    "text":               "_turn_end"// 纯文本回复
+  },
+  "default": "_fail"               // 未命中目标；**必填**（见下）
+}
+```
+
+- `on` 与 `cases` 的键都是**封闭词表**（outcome 只有 `tool_calls` / `invalid_tool_calls` / `text`），
+  未知值编译期拒绝。
+- **`cases` 必须覆盖全部 outcome，或显式给出 `default`** —— 不允许"漏一档就静默走某分支"。
+- 状态里没有 AI 消息时 outcome 为空串，必然落到 `default`（fail-closed 兜底）。
+- **判别式用 cppchain 归一化过的 outcome，不用端点给的 `finish_reason` 字符串** ——
+  后者取值随端点而异（实测差异大），拿它做路由会把端点差异漏进工作流。
+
+**run_tools 节点（M12）**
+
+```jsonc
+{ "id": "act", "kind": "run_tools", "next": "loop" }
+```
+
+- 取**最后一条 AI 消息**的 `tool_calls` 执行，产出的 `ToolMessage` 追加进 `messages`（协议闭环）。
+- 若最后一条 AI 消息没有 `tool_calls`，运行期报错（被编排到这条路径本身就是错）。
+
+**M12：agent 循环的规范写法（ReAct）**
+
+```jsonc
+{ "nodes": [
+  { "id": "L",     "kind": "label" },
+  { "id": "think", "kind": "model", "model": "main", "tools": "ts", "next": "route" },
+  { "id": "route", "kind": "route", "on": "last_ai_outcome",
+    "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "_turn_end" },
+    "default": "_fail" },
+  { "id": "act",   "kind": "run_tools", "next": "loop" },
+  { "id": "loop",  "kind": "goto", "goto": "L", "max": 8 }
+]}
+```
+
+`think → route → act → loop →（回 L）think` 就是**循环本身**；`max` 是循环上界
+（等价于 langgraph 的 `recursion_limit`，但写在 IR 里）。注意 `act` 的 `next` 指向
+`loop`（goto）而非直接指回 `L` —— 见 §7 的链约束。
+
 ## 5. 数据流与参数引用
 
 - `$_.result.<字段>` —— 取 **最近一步**节点的输出。`$_` 是"最近节点"的占位，**不是节点 id**：它以 `_` 开头，不可能与任何合法节点 id 撞名（§7 节点 id 不得以 `_` 开头），因此绝不会被误读成点名帧。用 `$_` 而非 `$result`，是因为 `result` 本身就是保留名（§7），`$result` 的写法会被当成 `$<节点id>.result` 的一路。
@@ -333,9 +415,14 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 ## 7. 名称规则与链约束
 
 - id：`[A-Za-z][A-Za-z0-9_]*`；**不以 `_` 开头**；不得叫 `result`；全图唯一（含 label/goto）。
-- 保留名：`_turn_start`、`_turn_end`。
-- 每个 tool 必须有 `next`；每个 expr 必须有 `then` 和 `else`。每个指针指向**紧接着要写的那一个**节点，链尾到 `_turn_end`；全部节点要连成单链，无死节点。
-- 循环只能用 `label + goto` 表达，禁止用 `expr` 自环或绕路。
+- 保留名：`_turn_start`、`_turn_end`、`_fail`。
+- 每个 tool/model/run_tools 必须有 `next`；每个 expr 必须有 `then` 和 `else`；
+  route 必须有 `cases`（覆盖全部 outcome）或 `default`。每个指针指向**紧接着要写的那一个**节点，
+  链尾到 `_turn_end`；全部节点要连成单链，无死节点。
+- 循环只能用 `label + goto` 表达，禁止用 `expr` 自环或绕路。**前向边（`next`/`then`/`else`/
+  `cases`/`default`，label 解析之后）不得成环** —— 所以回边必须经由 `goto` 节点：
+  在 M12 的 ReAct 写法里，`run_tools` 的 `next` 指向 **goto 节点**，而不是直接指回循环头的 label，
+  否则会被判为前向环而拒绝。
 - 通知文案只描述**实际发生**的事：没有 "下单/购买" 工具时不得写"已自动下单"，这类意图应写"提醒用户确认"。
 
 ## 8. 可用工具（tool 节点能引用的名字，必须与目录完全同名）
