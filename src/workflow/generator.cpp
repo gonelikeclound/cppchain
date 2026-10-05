@@ -362,9 +362,11 @@ struct WorkflowGenerator::Impl {
       msgs.push_back(human_message("IR 校验未过，请整体重写并按提示改对：\n" + last_error));
     }
 
+    // 这里是 Impl 内部（fill_fail_result 定义在其后，故直接赋值）。
+    // 语义同 fill_fail_result：IR 生成失败是 Failed，不是模型拒绝。
     WorkflowGenerationResult out;
-    out.kind = WorkflowGenerationResult::Kind::Rejected;
-    out.rejected = Rejection{"IR 生成失败（fail-closed）：" + last_error};
+    out.kind = WorkflowGenerationResult::Kind::Failed;
+    out.failed = Failure{"IR 生成失败（fail-closed）：" + last_error};
     return out;
   }
 
@@ -420,11 +422,25 @@ void fill_reject_result(WorkflowGenerationResult& out, std::string reason) {
   out.rejected = Rejection{std::move(reason)};
   out.clarify.reset();
   out.generated.reset();
+  out.failed.reset();
+}
+
+// 失败（模型调用失败 / 预算耗尽 / 重试耗尽）—— 刻意与 Rejected 分开，
+// 否则验收矩阵分辨不出"模型拒绝"与"环境/预算出问题"。
+void fill_fail_result(WorkflowGenerationResult& out, std::string reason) {
+  out.kind = WorkflowGenerationResult::Kind::Failed;
+  out.failed = Failure{std::move(reason)};
+  out.clarify.reset();
+  out.generated.reset();
+  out.rejected.reset();
 }
 
 }  // namespace
 
 WorkflowGenerationResult WorkflowGenerator::run(std::string const& intent) {
+  // 预算按**一次生成**计，而不是对象生命周期：否则复用同一个 generator 跑多轮时
+  // （wf_eval 的 12 例矩阵就是），前几例把预算吃光，后面全部莫名"预算耗尽"。
+  impl_->calls = 0;
   auto po = impl_->plan_once(intent, {});
   switch (po.k) {
     case Impl::PlanOutcome::K::Plan: {
@@ -437,27 +453,34 @@ WorkflowGenerationResult WorkflowGenerator::run(std::string const& intent) {
       fill_clarify_result(r, std::move(po.clarify));
       return r;
     }
-    case Impl::PlanOutcome::K::Reject:
-    case Impl::PlanOutcome::K::Fail: {
+    case Impl::PlanOutcome::K::Reject: {
       WorkflowGenerationResult r;
       fill_reject_result(r, po.reason);
       return r;
     }
+    case Impl::PlanOutcome::K::Fail: {
+      WorkflowGenerationResult r;
+      fill_fail_result(r, po.reason);  // 模型调用失败/重试耗尽 ≠ 模型拒绝
+      return r;
+    }
   }
   WorkflowGenerationResult r;  // 不可达
-  fill_reject_result(r, "计划生成内部错误");
+  fill_fail_result(r, "计划生成内部错误");
   return r;
 }
 
 WorkflowGenerationResult WorkflowGenerator::run_with_qa(
     std::string const& intent, std::vector<std::pair<std::string, std::string>> const& qa) {
+  impl_->calls = 0;  // 同上：每次生成重新计预算
   auto po = impl_->plan_once(intent, qa);
   if (po.k == Impl::PlanOutcome::K::Plan) return impl_->ir_stage(intent, qa, po.plan);
   WorkflowGenerationResult r;
   if (po.k == Impl::PlanOutcome::K::Clarify) {
     fill_clarify_result(r, std::move(po.clarify));
-  } else {
+  } else if (po.k == Impl::PlanOutcome::K::Reject) {
     fill_reject_result(r, po.reason);
+  } else {
+    fill_fail_result(r, po.reason);  // Fail ≠ Reject
   }
   return r;
 }

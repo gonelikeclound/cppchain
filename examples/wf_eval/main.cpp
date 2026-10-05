@@ -92,6 +92,12 @@ int main() {
         pass = (expect == "Reject") && r.rejected && !r.rejected->reason.empty();
         detail = r.rejected ? r.rejected->reason : "";
         break;
+      case WorkflowGenerationResult::Kind::Failed:
+        // 生成**失败**（模型调用失败 / 预算耗尽 / 重试耗尽）不是"模型拒绝"：
+        // 无论期望是什么都不算通过 —— 否则环境故障会被记成合法的 Reject。
+        got = "Failed";
+        detail = r.failed ? r.failed->reason : "";
+        break;
       case WorkflowGenerationResult::Kind::Clarify:
         got = "Clarify";
         if (r.clarify) {
@@ -176,4 +182,15 @@ int main() {
       }
     }
   }
+
+  // 验收矩阵：有任何一条不符合期望就以非 0 退出，好让 run-demo.sh / CI 判定。
+  // （原先 main 直接走到结尾 → 恒返回 0：0/7 全灭也报"通过 1 / 失败 0"。）
+  if (golden_ok != golden_total || boundary_ok != boundary_total) {
+    std::println("\n未达标：黄金 {}/{}、边界 {}/{} → 退出码 1", golden_ok, golden_total,
+                 boundary_ok, boundary_total);
+    return 1;
+  }
+  std::println("\n达标：黄金 {}/{}、边界 {}/{}", golden_ok, golden_total, boundary_ok,
+               boundary_total);
+  return 0;
 }

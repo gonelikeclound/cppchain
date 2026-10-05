@@ -50,6 +50,14 @@ struct Rejection {
   std::string reason;
 };
 
+// 生成**失败**：模型调用失败 / 预算耗尽 / 重试耗尽 —— 与 Rejection 严格分开。
+// 前者是"模型明确拒绝了这个意图"（一个有效结论），后者是"根本没拿到可用结果"。
+// 混在一起会让验收矩阵把环境故障记成合法的 Reject：实测全 TLS 失败的一轮里，
+// 4 个"期望 Reject"的边界用例照样打了 ✓。
+struct Failure {
+  std::string reason;
+};
+
 struct GeneratedWorkflow {
   WorkflowIR ir;
   Json raw;  // 模型原始输出（含 trigger 原样，供审计/落盘）
@@ -66,18 +74,20 @@ struct UsageReport {
 };
 
 struct WorkflowGenerationResult {
-  enum class Kind { Clarify, Rejected, Generated };
+  enum class Kind { Clarify, Rejected, Generated, Failed };
   Kind kind = Kind::Rejected;
   std::optional<Clarification> clarify;
   std::optional<Rejection> rejected;
   std::optional<GeneratedWorkflow> generated;
+  std::optional<Failure> failed;  // Kind::Failed 时的原因（含模型调用错误原文）
 };
 
 struct GeneratorOptions {
   int plan_max_retries = 3;    // PlanStage 回喂重试上限
   int ir_max_retries = 2;      // IRStage 修复轮数（1 首出 + 2 修）
   int clarify_max_rounds = 3;  // 澄清轮数上限
-  int model_calls_budget = 12; // 总调用预算；耗尽 → fail-closed 拒绝
+  int model_calls_budget = 12; // **单次生成**的调用预算（每次 run/run_with_qa 重置）；
+                               // 耗尽 → fail-closed 拒绝
   std::string system_prompt;   // 空 → 内置默认模板（含工具目录/诚实规则/IR 语法要点）
 
   // 宿主运行时**将会提供**的 config 键（B3）。非空时：

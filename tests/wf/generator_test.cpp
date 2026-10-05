@@ -189,8 +189,9 @@ TEST(WfGenerator, plan_retries_exhausted) {
   WorkflowGenerator gen(model, reg);
 
   auto r = gen.run("任意意图");
-  ASSERT_EQ(r.kind, WorkflowGenerationResult::Kind::Rejected);
-  EXPECT_NE(r.rejected->reason.find("plan"), std::string::npos);
+  // 重试耗尽属于 Failed（没拿到可用结果），不是 Rejected（模型明确拒绝）
+  ASSERT_EQ(r.kind, WorkflowGenerationResult::Kind::Failed);
+  EXPECT_NE(r.failed->reason.find("plan"), std::string::npos);
 }
 
 TEST(WfGenerator, ir_repair_once) {
@@ -221,8 +222,9 @@ TEST(WfGenerator, budget_fail_closed) {
   WorkflowGenerator gen(model, reg, nullptr, opts);
 
   auto r = gen.run("任意意图");
-  ASSERT_EQ(r.kind, WorkflowGenerationResult::Kind::Rejected);
-  EXPECT_NE(r.rejected->reason.find("预算"), std::string::npos);
+  // 预算耗尽同样属于 Failed：验收矩阵不能把它当作"模型拒绝"
+  ASSERT_EQ(r.kind, WorkflowGenerationResult::Kind::Failed);
+  EXPECT_NE(r.failed->reason.find("预算"), std::string::npos);
 }
 // 回归：plan 段的三态分派必须 fail-closed。
 // 原先 questions 为空、questions 项缺 id（会被过滤光）、plan 非对象，都会被当成
@@ -296,5 +298,52 @@ TEST(WfGenerator, config_contract_reaches_prompt_and_validator) {
     WorkflowGenerator gen(model, reg);
     auto r = gen.run("每天 8 点查价格，低于 800 通知我");
     EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Generated);
+  }
+}
+
+// C2 回归：**模型明确拒绝**（一个有效结论）与**生成失败**（没拿到可用结果）必须可分辨。
+// 混在一起会让验收矩阵把环境故障/预算耗尽记成合法的 Reject —— 实测全 TLS 失败的一轮里，
+// 4 个"期望 Reject"的边界用例照样打了 ✓，整轮报"通过 1 / 失败 0"。
+TEST(WfGenerator, reject_and_failure_are_distinguishable) {
+  tool::ToolRegistry reg = make_registry();
+
+  {  // 模型明确拒绝 → Rejected，且带理由
+    ScriptedChatModel model;
+    model.replies = {R"({"reject":{"reason":"只有 time 触发"}})"};
+    WorkflowGenerator gen(model, reg);
+    auto r = gen.run("收到淘宝推送时提醒我");
+    EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Rejected);
+    EXPECT_TRUE(r.rejected.has_value());
+    EXPECT_FALSE(r.failed.has_value());
+  }
+
+  {  // 模型调用失败 → Failed，且 rejected 必须为空（不能被当成拒绝）
+    ScriptedChatModel model;  // replies 为空 → invoke 直接返回错误
+    WorkflowGenerator gen(model, reg);
+    auto r = gen.run("每天提醒我喝水");
+    EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Failed);
+    EXPECT_TRUE(r.failed.has_value());
+    EXPECT_FALSE(r.rejected.has_value()) << "失败不得伪装成拒绝";
+  }
+}
+
+// C3 回归：调用预算是"一次生成"的预算，不是 generator 对象的生命周期预算。
+// 原先 calls 只增不减，复用同一个 generator 跑多例时，前几例把预算吃光、
+// 后面全部莫名"预算耗尽"（wf_eval 的 12 例矩阵正是如此，前 5 例就耗尽）。
+TEST(WfGenerator, model_budget_is_per_generation_not_per_object) {
+  ScriptedChatModel model;
+  for (int i = 0; i < 4; ++i) {
+    model.replies.push_back(kPlanJson);
+    model.replies.push_back(kIrJson);
+  }
+  tool::ToolRegistry reg = make_registry();
+  GeneratorOptions opts;
+  opts.model_calls_budget = 2;  // 每次生成恰好够用（1 次 plan + 1 次 IR）
+  WorkflowGenerator gen(model, reg, nullptr, opts);
+
+  for (int i = 0; i < 4; ++i) {
+    auto r = gen.run("每天 8 点查价格，低于 800 通知我");
+    EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Generated)
+        << "第 " << (i + 1) << " 次生成不该因上一轮用掉的预算而失败";
   }
 }

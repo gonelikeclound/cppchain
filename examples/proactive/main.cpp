@@ -143,6 +143,10 @@ void report_single(WorkflowGenerator& gen, std::string const& intent,
     case WorkflowGenerationResult::Kind::Rejected:
       std::println("明确拒绝：{}", r.rejected ? r.rejected->reason : "未说明原因");
       break;
+    case WorkflowGenerationResult::Kind::Failed:
+      std::println("生成失败（非模型拒绝，多为端点/预算问题）：{}",
+                   r.failed ? r.failed->reason : "未说明原因");
+      break;
     case WorkflowGenerationResult::Kind::Generated:
       if (r.generated) print_readable_ir(r.generated->ir);
       break;
@@ -190,6 +194,11 @@ int run_cases(openai::OpenAIChatModel& model, tool::ToolRegistry const& registry
             got = "Rejected";
             pass = (c.expect == "Reject") && r.rejected && !r.rejected->reason.empty();
             detail = r.rejected ? r.rejected->reason : "";
+            break;
+          case WorkflowGenerationResult::Kind::Failed:
+            // 生成失败 ≠ 模型拒绝：任何期望都不算通过（否则环境故障记成 ✓）
+            got = "Failed";
+            detail = r.failed ? r.failed->reason : "";
             break;
           case WorkflowGenerationResult::Kind::Clarify:
             got = "Clarify";  // 澄清轮数超限
