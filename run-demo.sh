@@ -46,6 +46,7 @@ KNOWN_DEMOS=(
   "live_tools:M3 真网络工具 get_weather/web_search（需 .env：LLM + 搜索端点）"
   "history_agent:M7 会话历史——同一 thread 多轮记忆/无状态对照/thread 隔离（需 LLM 端点）"
   "session_resume:落盘历史——跨**命令**连续对话：同一工作路径、两次独立进程续跑（需 LLM 端点；--show 可离线看历史）"
+  "workflow_cli:命令行 agent（M12）——跑 workflow：load_history→model→route→run_tools→save_history；--workflow 指 IR，--show 离线看历史"
   "research_chat:M7 意图二分连续聊天——casual(不带工具)/research(联网取数)+ 零外源兜底保证（需 .env：LLM + 搜索端点）"
   "agent_cli:M7 命令行 single/react agent——--mode 四策略对比(direct/react/react-trim/react-approve)+ REPL/单条/文件批量（需 .env）"
   "context_budget:M7 token 成本量化（需 LLM 端点）"

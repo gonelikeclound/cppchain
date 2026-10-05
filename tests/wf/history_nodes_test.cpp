@@ -261,11 +261,21 @@ TEST(WfHistoryFile, round_trip_and_fail_closed) {
   // 原子写：不留临时文件
   EXPECT_FALSE(std::filesystem::exists(p + ".tmp"));
 
+  // 会话目录自带 .gitignore（内容 * + !.gitignore）→ 历史不会被误提交
+  auto const gi = tmp.dir / ".cppchain" / ".gitignore";
+  ASSERT_TRUE(std::filesystem::exists(gi));
+  {
+    std::ifstream in(gi);
+    std::string const body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_NE(body.find("*"), std::string::npos);
+    EXPECT_NE(body.find("!.gitignore"), std::string::npos);
+  }
+
   // 损坏 → 默认抛（fail-closed，不静默丢历史）
   {
     std::ofstream out(p, std::ios::trunc);
     out << "{ 这不是合法 JSON";
   }
-  EXPECT_THROW(load_history_file(p), std::runtime_error);
+  EXPECT_THROW((void)load_history_file(p), std::runtime_error);  // (void) 显式吞掉 nodiscard
   EXPECT_TRUE(load_history_file(p, /*start_empty_on_corrupt=*/true).empty());
 }

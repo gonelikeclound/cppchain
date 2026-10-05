@@ -42,6 +42,22 @@ std::vector<message::Message> load_history_file(std::string const& path,
   return out;
 }
 
+namespace {
+
+// 让会话目录不会被误提交：在 .cppchain/ 里放一个 .gitignore（`*` + `!.gitignore`）。
+// 只在**缺失时**写，不覆盖用户自己的规则。写不了就算了 —— 这只是便利，
+// 不该因为它让"保存历史"这件正事失败。
+void ensure_dir_ignored(std::filesystem::path const& dir) {
+  auto const gi = dir / ".gitignore";
+  std::error_code ec;
+  if (std::filesystem::exists(gi, ec)) return;
+  std::ofstream out(gi, std::ios::trunc);
+  if (!out) return;
+  out << "*\n!.gitignore\n";
+}
+
+}  // namespace
+
 void save_history_file(std::string const& path, std::span<message::Message const> msgs,
                        std::string const& session) {
   nlohmann::json arr = nlohmann::json::array();
@@ -53,6 +69,7 @@ void save_history_file(std::string const& path, std::span<message::Message const
     std::filesystem::create_directories(parent, ec);
     if (ec)
       throw std::runtime_error("history: 无法创建目录 " + parent.string() + ": " + ec.message());
+    ensure_dir_ignored(parent);
   }
 
   // 原子写：临时文件 → rename（同目录 rename 在 POSIX 上原子）

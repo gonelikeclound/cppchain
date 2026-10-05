@@ -42,6 +42,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `stale_state` | **状态时效性**（真机 A/B）：无守卫用旧值作答 vs 守卫促使重新取数 | 观测时间戳 + TTL 失效标注 |
 | `live_tools` | **真网络工具**（真机）：`get_weather`（Open-Meteo，实时天气+预报）与 `web_search`（火山方舟 Responses · 豆包搜索）；LLM 密钥缺失时退化为工具直连自检 | 真实 provider 工具端到端 |
 | `history_agent` | **会话历史**（真机）：同一 thread 多轮续跑历史累积 / 不带 checkpointer 的无状态对照 / 不同 thread 的隔离；探针中间件打印"发往模型的 messages 条数"作机械证明 | `thread_id` + Checkpointer 续跑 |
+| `workflow_cli` | **命令行 agent（M12，真机）**：跑**完整 workflow** 的 agent —— `load_history → [model → route → run_tools → goto] → save_history`；agent 循环是**图上的回边**、history 是**普通节点**。`--workdir`/`--session`/`--reset`/`--show`/`--workflow`；示例 IR 见 `examples/workflow_cli/wf.json` | 组件按名引用 + 工作路径即会话 |
 | `session_resume` | **落盘历史（真机）**：`FileCheckpointer` 把快照链落到 `<workdir>/.cppchain/history.json`，**两次独立进程调用**续上同一段对话；`--show` 不起模型即可查看已存历史、`--reset` 清空；换工作路径即隔离 | 持久化 Checkpointer、workdir 即会话 |
 | `research_chat` | **意图二分连续聊天**（真机）：路由器只分 casual（不带工具）/ research（资料查询，挂全部外部数据源工具 = web_search / get_weather / arxiv_search / fetch_url）；**research 轮必须有一次成功的外部取数** —— 任一外源工具成功均可，整轮零外源才由 harness 兜底强制 web_search；判定遍历注册表整表，加新工具不分类；同 thread 多轮记忆 | Router + Skill、Single-Agent、联网取数兜底 |
 | `agent_cli` | **命令行 single/react agent**（真机）：`--mode direct/react/react-trim/react-approve` 同一可执行体切四种策略，同一输入对比效果；`-i` 交互 REPL（同 thread 多轮记忆）/ `-p` 单条 / `-f` 文件批量（`---` 分块、`#` 注释）；每轮可读轨迹 + stats（工具往返/拒绝/压缩/token），`--json` 结构化输出供 jq/diff 脚本对比 | `create_agent` + middleware 组合策略、ReAct |

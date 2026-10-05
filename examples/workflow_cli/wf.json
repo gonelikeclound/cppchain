@@ -1,0 +1,20 @@
+{
+  "id": "wf_cli_react",
+  "trigger": { "source": "time", "timing": { "kind": "schedule", "schedule": "0 8 * * *" } },
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "L" },
+    { "id": "L", "kind": "label" },
+    { "id": "think", "kind": "model",
+      "model": "main", "tools": "all",
+      "system_prompt": "你是命令行助手，回答简短直接；记住用户此前说过的事。",
+      "next": "route" },
+    { "id": "route", "kind": "route", "on": "last_ai_outcome",
+      "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "persist" },
+      "default": "_fail" },
+    { "id": "act", "kind": "run_tools", "next": "loop" },
+    { "id": "loop", "goto": "L", "max": 4 },
+    { "id": "persist", "kind": "save_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "_turn_end" }
+  ]
+}
