@@ -19,6 +19,7 @@
 #include "cppchain/tool/registry.hpp"
 #include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
+#include "cppchain/workflow/refs.hpp"
 
 namespace cppchain::workflow {
 
@@ -61,6 +62,21 @@ struct NodeType {
     std::string error;
   };
   std::function<void(NodeIR const&, CompileContext&)> compile;
+
+  // **出边** —— 通用图规则（VG1/VG2/VG7/VG8）唯一需要知道的东西。
+  // 有了它，那几条规则就不必再按 kind 各写一遍（原先 28 处 if 链的来源）。
+  struct Edge {
+    std::string target;          // 原始目标名（label 名 / 节点 id / _turn_end / _fail）
+    std::string label;           // 出边字段名，仅用于报错（"next" / "cases.text" / "on_error.fallback"…）
+    bool forward = true;         // false = 回边（只有 goto 是）
+  };
+  std::function<std::vector<Edge>(NodeIR const&)> edges;
+
+  // 本节点里**可能含引用**的文本片段（path/expr/parameters 里的字符串…）。
+  // VR1 的语法检查与 VR 段的引用收集**共用这一个钩子** —— 原先两处各自按 kind 走，
+  // 都只覆盖 Tool/Expr，于是 history 节点的 path/session 里的引用**两边都漏**
+  // （拼错的 @config 键能一路通过校验，运行期 resolve 成 "null" 当目录用）。
+  std::function<std::vector<std::string>(NodeIR const&)> ref_texts;
 };
 
 // 内置节点类型表（9 种）。静态、不可变、生命周期贯穿进程。

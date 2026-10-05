@@ -265,3 +265,35 @@ TEST(WfAgentLoop, kind_key_and_legacy_discrimination_agree) {
   EXPECT_TRUE(k(Json{{"id", "x"}, {"kind", "tool"}, {"tool", "echo"},
                      {"next", "_turn_end"}}).has_value());
 }
+
+// ② 的**有意语义变化**：`on_error.fallback` 现在算一条**前向边**（统一进 edges()）。
+// 于是"fallback 指回上游"形成的环会被 VG2 检出并拒绝。
+// 改动前 fallback 不在前向边集合里（VG2 只按 kind 收 next/then/else/cases），
+// 这类环逃过检查 —— 而它正是无限循环的来源。
+// 依据是 M11 既有纪律："循环只能通过 label + goto 表达"。
+TEST(WfAgentLoop, backward_fallback_cycle_is_now_rejected) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry const reg = make_fake_tools(sinks);
+
+  Json const ir_json = Json{
+      {"id", "wf_fb_cycle"},
+      {"trigger", Json{{"source", "time"},
+                       {"timing", Json{{"kind", "schedule"}, {"schedule", "0 8 * * *"}}}}},
+      {"nodes",
+       Json::array(
+           {Json{{"id", "a"},
+                 {"tool", "fetch_price"},
+                 {"parameters", Json{{"item_id", "@config.product_id"}}},
+                 {"output_schema", Json{{"price", "number"}}},
+                 {"next", "b"}},
+            Json{{"id", "b"},
+                 {"tool", "fetch_price"},
+                 {"parameters", Json{{"item_id", "@config.product_id"}}},
+                 {"output_schema", Json{{"price", "number"}}},
+                 {"next", "_turn_end"},
+                 {"on_error", Json{{"fallback", "a"}}}}})}};
+
+  auto const r = validate_json(ir_json, ValidatorOptions{&reg});
+  ASSERT_FALSE(r.ok()) << "fallback 回指上游构成的环必须被拒（否则运行期无限循环）";
+  EXPECT_NE(r.describe().find("VG2"), std::string::npos) << r.describe();
+}

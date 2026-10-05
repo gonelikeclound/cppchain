@@ -218,6 +218,56 @@ std::string last_ai_outcome(Json const& state) {
 
 std::string as_string(Json const& v) { return v.is_string() ? v.get<std::string>() : v.dump(); }
 
+// ---- 出边（通用图规则的唯一输入）----
+
+std::vector<NodeType::Edge> e_tool(NodeIR const& n) {
+  std::vector<NodeType::Edge> out{{n.next, "next", true}};
+  // on_error.fallback 也是一条**前向边**：它必须是存在的节点，且算一条可达路径。
+  // 把它渲染成边之后，VG7 的可达性判定就与节点类型完全无关了（原先要特判 tool）。
+  if (n.on_error && n.on_error->fallback)
+    out.push_back({*n.on_error->fallback, "on_error.fallback", true});
+  return out;
+}
+std::vector<NodeType::Edge> e_expr(NodeIR const& n) {
+  return {{n.then, "then", true}, {n.else_, "else", true}};
+}
+std::vector<NodeType::Edge> e_label(NodeIR const&) { return {}; }
+std::vector<NodeType::Edge> e_goto(NodeIR const& n) {
+  return {{n.goto_target, "goto", /*forward=*/false}};  // ← 回边，是循环的来源
+}
+std::vector<NodeType::Edge> e_next(NodeIR const& n) { return {{n.next, "next", true}}; }
+std::vector<NodeType::Edge> e_route(NodeIR const& n) {
+  std::vector<NodeType::Edge> out;
+  for (auto const& [k, v] : n.cases) out.push_back({v, "cases." + k, true});
+  if (!n.default_.empty()) out.push_back({n.default_, "default", true});
+  return out;
+}
+
+// ---- 引用文本片段（VR1 语法检查 + VR 段引用收集共用）----
+
+std::vector<std::string> t_none(NodeIR const&) { return {}; }
+
+std::vector<std::string> t_tool(NodeIR const& n) {
+  std::vector<std::string> out;
+  std::function<void(Json const&)> walk = [&](Json const& v) {
+    if (v.is_string()) {
+      out.push_back(v.get<std::string>());
+    } else if (v.is_object()) {
+      for (auto it = v.begin(); it != v.end(); ++it) walk(it.value());
+    } else if (v.is_array()) {
+      for (Json const& e : v) walk(e);
+    }
+  };
+  walk(n.parameters);
+  return out;
+}
+std::vector<std::string> t_expr(NodeIR const& n) { return {n.expr}; }
+std::vector<std::string> t_history(NodeIR const& n) {
+  std::vector<std::string> out{n.path};
+  if (!n.session.empty()) out.push_back(n.session);
+  return out;
+}
+
 // ---- 编译：把节点变成图节点 ----
 
 void c_tool(NodeIR const& n, NodeType::CompileContext& ctx) {
@@ -433,7 +483,7 @@ std::vector<NodeType> const& builtin_node_types() {
            if (n.on_error->fallback) onerr += " fallback=" + *n.on_error->fallback;
          }
          return "tool " + n.tool + " (" + params + ") → " + n.next + onerr;
-       }, v_tool, c_tool},
+       }, v_tool, c_tool, e_tool, t_tool},
 
       // ---------------- expr ----------------
       {NodeKind::Expr, "expr",
@@ -450,14 +500,14 @@ std::vector<NodeType> const& builtin_node_types() {
        },
        [](NodeIR const& n) {
          return "expr \"" + n.expr + "\" → then=" + n.then + " else=" + n.else_;
-       }, v_expr, c_expr},
+       }, v_expr, c_expr, e_expr, t_expr},
 
       // ---------------- label ----------------
       {NodeKind::Label, "label",
        [](Json const& n) { return kind_is(n, "label"); },
        [](NodeIR&, Json const&) {},  // 只有 id/kind
        [](Json& node, NodeIR const&) { node["kind"] = "label"; },
-       [](NodeIR const&) { return std::string("label"); }, v_label, c_label},
+       [](NodeIR const&) { return std::string("label"); }, v_label, c_label, e_label, t_none},
 
       // ---------------- goto ----------------
       {NodeKind::Goto, "goto",
@@ -473,7 +523,7 @@ std::vector<NodeType> const& builtin_node_types() {
        },
        [](NodeIR const& n) {
          return "goto " + n.goto_target + " (max " + std::to_string(n.max) + ")";
-       }, v_goto, c_goto},
+       }, v_goto, c_goto, e_goto, t_none},
 
       // ---------------- model（M12）----------------
       {NodeKind::Model, "model",
@@ -494,7 +544,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "model " + n.model + " (tools=" + (n.toolset.empty() ? "-" : n.toolset) + ") → " +
                 n.next;
-       }, v_model, c_model},
+       }, v_model, c_model, e_next, t_none},
 
       // ---------------- route（M12）----------------
       {NodeKind::Route, "route",
@@ -518,7 +568,7 @@ std::vector<NodeType> const& builtin_node_types() {
          std::string cs;
          for (auto const& [k, v] : n.cases) cs += (cs.empty() ? "" : " ") + k + "→" + v;
          return "route on=" + n.on + " {" + cs + "} default=" + n.default_;
-       }, v_route, c_route},
+       }, v_route, c_route, e_route, t_none},
 
       // ---------------- run_tools（M12）----------------
       {NodeKind::RunTools, "run_tools",
@@ -528,7 +578,7 @@ std::vector<NodeType> const& builtin_node_types() {
          node["kind"] = "run_tools";
          node["next"] = n.next;
        },
-       [](NodeIR const& n) { return "run_tools → " + n.next; }, v_run_tools, c_run_tools},
+       [](NodeIR const& n) { return "run_tools → " + n.next; }, v_run_tools, c_run_tools, e_next, t_none},
 
       // ---------------- load_history / save_history（M12）----------------
       {NodeKind::LoadHistory, "load_history",
@@ -547,7 +597,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "load_history path=" + n.path +
                 " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
-       }, v_history, c_load_history},
+       }, v_history, c_load_history, e_next, t_history},
 
       {NodeKind::SaveHistory, "save_history",
        [](Json const& n) { return kind_is(n, "save_history"); },
@@ -565,7 +615,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "save_history path=" + n.path +
                 " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
-       }, v_history, c_save_history},
+       }, v_history, c_save_history, e_next, t_history},
   };
   return types;
 }

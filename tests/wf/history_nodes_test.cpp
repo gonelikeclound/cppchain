@@ -279,3 +279,20 @@ TEST(WfHistoryFile, round_trip_and_fail_closed) {
   EXPECT_THROW((void)load_history_file(p), std::runtime_error);  // (void) 显式吞掉 nodiscard
   EXPECT_TRUE(load_history_file(p, /*start_empty_on_corrupt=*/true).empty());
 }
+
+// 回归：**load_history/save_history 的 path/session 也是引用字段**，必须被 VR 段收集，
+// 否则 B2 的 config 契约（VR4）看不到它们 —— 写错键名会一路通过校验，
+// 运行期 resolve 成 null、as_string 得到字符串 "null"，于是跑在一个叫 null 的目录上。
+TEST(WfHistoryNodes, config_keys_inside_history_fields_are_validated) {
+  auto ir_json = history_react_ir();
+  ir_json["nodes"][0]["path"] = "@config.wrokspace";  // 故意拼错
+
+  FakeToolSinks sinks;
+  tool::ToolRegistry const reg = make_fake_tools(sinks);
+  ValidatorOptions o{&reg};
+  o.config_keys = std::vector<std::string>{"workspace", "session"};  // 契约里没有 wrokspace
+
+  auto r = validate_json(ir_json, o);
+  ASSERT_FALSE(r.ok()) << "history 节点里的引用没被收集 → 契约形同虚设";
+  EXPECT_NE(r.describe().find("VR4"), std::string::npos) << r.describe();
+}

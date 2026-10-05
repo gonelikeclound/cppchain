@@ -202,24 +202,13 @@ std::string resolve_target(Ctx const& c, std::string const& t) {
 }
 
 void find_refs_in_node(std::vector<std::pair<std::string, Ref>>& out, NodeIR const& n) {
-  if (n.kind == NodeKind::Tool) {
-    // 参数值里的引用（整值或模板）
-    std::function<void(Json const&)> walk = [&](Json const& v) {
-      if (v.is_string()) {
-        for (RefScan const& sc : scan_refs(v.get_ref<std::string const&>()))
-          if (sc.ok) out.emplace_back(n.id, sc.ref);
-      } else if (v.is_object()) {
-        for (auto it = v.begin(); it != v.end(); ++it) walk(it.value());
-      } else if (v.is_array()) {
-        for (Json const& e : v) walk(e);
-      }
-    };
-    walk(n.parameters);
-  } else if (n.kind == NodeKind::Expr) {
-    auto parsed = Expr::parse(n.expr);
-    if (parsed)
-      for (Ref const& r : parsed->refs()) out.emplace_back(n.id, r);
-  }
+  // 引用收集与 VR1 的语法检查走**同一个钩子**（NodeType::ref_texts）——
+  // 原先两处各自按 kind 走、都只覆盖 Tool/Expr，history 节点的 path/session 两边都漏。
+  NodeType const* t = node_type_of(n.kind);
+  if (t == nullptr || !t->ref_texts) return;
+  for (std::string const& text : t->ref_texts(n))
+    for (RefScan const& sc : scan_refs(text))
+      if (sc.ok) out.emplace_back(n.id, sc.ref);
 }
 
 bool schema_declares(Json const& schema, std::string const& field) {
@@ -355,69 +344,45 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   // ---- VG：指针、label 消解、环、可达性 ----
   resolve_labels(c);
 
+  // 以下四条通用图规则**全部由 NodeType::edges() 驱动** —— 加一种节点不必再改这里。
+  // （见 02-arch-design/12 §4.2：原先它们按 kind 各写一遍，是 28 处 if 链的来源。）
+
+  // VG1：每条边的目标必须存在（或为保留名）
   for (NodeIR const& n : ir.nodes) {
-    auto target_ok = [&](std::string const& key, std::string const& t) {
-      if (t == "_turn_start")
-        c.err("VG1", "节点 '" + n.id + "' 的 " + key + " 指向保留名 _turn_start（不允许）");
-      else if (t != kTurnEnd && t != kFailName && c.index.find(t) == c.index.end())
-        c.err("VG1", "节点 '" + n.id + "' 的 " + key + " 指向不存在的节点 '" + t + "'");
-    };
-    switch (n.kind) {
-      case NodeKind::Tool:
-        target_ok("next", n.next);
-        break;
-      case NodeKind::Expr:
-        target_ok("then", n.then);
-        target_ok("else", n.else_);
-        break;
-      case NodeKind::Goto: {
-        auto it = c.kind.find(n.goto_target);
-        if (it == c.kind.end())
-          c.err("VG1", "goto 节点 '" + n.id + "' 指向不存在的 label '" + n.goto_target + "'");
-        else if (it->second != NodeKind::Label)
-          c.err("VG1", "goto 节点 '" + n.id + "' 必须指向 label 节点，但 '" + n.goto_target +
-                           "' 不是 label");
-        break;
+    NodeType const* t = node_type_of(n.kind);
+    if (t == nullptr || !t->edges) continue;
+    for (NodeType::Edge const& e : t->edges(n)) {
+      if (e.target.empty()) continue;  // 缺字段由各类型的 validate 报（VN*）
+      if (e.target == "_turn_start") {
+        c.err("VG1", "节点 '" + n.id + "' 的 " + e.label + " 指向保留名 _turn_start（不允许）");
+      } else if (e.target != kTurnEnd && e.target != kFailName &&
+                 c.index.find(e.target) == c.index.end()) {
+        c.err("VG1", "节点 '" + n.id + "' 的 " + e.label + " 指向不存在的节点 '" + e.target + "'");
       }
-      case NodeKind::Model:
-      case NodeKind::RunTools:
-      case NodeKind::LoadHistory:
-      case NodeKind::SaveHistory:
-        target_ok("next", n.next);
-        break;
-      case NodeKind::Route:
-        for (auto const& [k, v] : n.cases) target_ok("cases." + k, v);
-        if (!n.default_.empty()) target_ok("default", n.default_);
-        break;
-      case NodeKind::Label:
-        break;
+    }
+    // goto 的边必须落在 label 上 —— **结构性约束**，非"可插拔节点类型"范畴，故留在此处
+    if (n.kind == NodeKind::Goto) {
+      auto const it = c.kind.find(n.goto_target);
+      if (it == c.kind.end())
+        c.err("VG1", "goto 节点 '" + n.id + "' 指向不存在的 label '" + n.goto_target + "'");
+      else if (it->second != NodeKind::Label)
+        c.err("VG1", "goto 节点 '" + n.id + "' 必须指向 label 节点，但 '" + n.goto_target +
+                         "' 不是 label");
     }
   }
 
-  // VG8：label 必须被引用
-  for (NodeIR const& n : ir.nodes)
-    if (n.kind == NodeKind::Label) {
-      bool referenced = false;
-      for (NodeIR const& m : ir.nodes) {
-        if (m.kind == NodeKind::Tool && m.next == n.id)
-          referenced = true;
-        else if (m.kind == NodeKind::Expr && (m.then == n.id || m.else_ == n.id))
-          referenced = true;
-        else if (m.kind == NodeKind::Goto && m.goto_target == n.id)
-          referenced = true;
-        else if ((m.kind == NodeKind::Model || m.kind == NodeKind::RunTools ||
-                  m.kind == NodeKind::LoadHistory || m.kind == NodeKind::SaveHistory) &&
-                 m.next == n.id)
-          referenced = true;
-        else if (m.kind == NodeKind::Route &&
-                 (m.default_ == n.id ||
-                  std::any_of(m.cases.begin(), m.cases.end(),
-                              [&](auto const& kv) { return kv.second == n.id; })))
-          referenced = true;
-      }
-      if (!referenced)
-        c.err("VG8", "label '" + n.id + "' 没有被任何 goto / next / then / else 指向（死 label）");
+  // VG8：label 必须被引用（**任何边的目标**都算，不再按 kind 分支）
+  {
+    std::unordered_map<std::string, bool> targeted;
+    for (NodeIR const& m : ir.nodes) {
+      NodeType const* t = node_type_of(m.kind);
+      if (t == nullptr || !t->edges) continue;
+      for (NodeType::Edge const& e : t->edges(m)) targeted[e.target] = true;
     }
+    for (NodeIR const& n : ir.nodes)
+      if (n.kind == NodeKind::Label && targeted.find(n.id) == targeted.end())
+        c.err("VG8", "label '" + n.id + "' 没有被任何边指向（死 label）");
+  }
 
   // ---- VG9：load_history 必须在消费 messages 的节点之前 ----
   // 顺序用**数组下标**判定（与 VR2 的"上游/更早"同一套约定）。读了没人用就是编排错误，
@@ -440,25 +405,12 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   {
     std::unordered_map<std::string, std::vector<std::string>> adj;
     for (NodeIR const& n : ir.nodes) {
-      if (n.kind == NodeKind::Tool) {
-        std::string t = resolve_target(c, n.next);
-        if (t != kEndId) adj[n.id].push_back(t);
-      } else if (n.kind == NodeKind::Expr) {
-        for (std::string const& t_ : {resolve_target(c, n.then), resolve_target(c, n.else_)})
-          if (t_ != kEndId) adj[n.id].push_back(t_);
-      } else if (n.kind == NodeKind::Model || n.kind == NodeKind::RunTools ||
-                 n.kind == NodeKind::LoadHistory || n.kind == NodeKind::SaveHistory) {
-        std::string const t_ = resolve_target(c, n.next);
-        if (t_ != kEndId) adj[n.id].push_back(t_);
-      } else if (n.kind == NodeKind::Route) {
-        for (auto const& [k, v] : n.cases) {
-          std::string const t_ = resolve_target(c, v);
-          if (t_ != kEndId) adj[n.id].push_back(t_);
-        }
-        if (!n.default_.empty()) {
-          std::string const t_ = resolve_target(c, n.default_);
-          if (t_ != kEndId) adj[n.id].push_back(t_);
-        }
+      NodeType const* t = node_type_of(n.kind);
+      if (t == nullptr || !t->edges) continue;
+      for (NodeType::Edge const& e : t->edges(n)) {
+        if (!e.forward) continue;  // 回边（goto）不参与前向环判定
+        std::string const to = resolve_target(c, e.target);
+        if (to != kEndId) adj[n.id].push_back(to);
       }
     }
     // DFS 三色：0 未访问 / 1 在栈 / 2 完成
@@ -520,20 +472,11 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       auto it = c.kind.find(v);
       if (it == c.kind.end() || it->second == NodeKind::Label) continue;
       NodeIR const& node = ir.nodes[c.index.at(v)];
-      if (it->second == NodeKind::Tool) {
-        push(resolve_target(c, node.next));
-        // 失败路径也是一条可达路径：目标要解析，且它自己的后继要接着展开
-        if (node.on_error && node.on_error->fallback)
-          push(resolve_target(c, *node.on_error->fallback));
-      } else if (it->second == NodeKind::Expr) {
-        push(resolve_target(c, node.then));
-        push(resolve_target(c, node.else_));
-      } else if (it->second == NodeKind::Model || it->second == NodeKind::RunTools ||
-                 it->second == NodeKind::LoadHistory || it->second == NodeKind::SaveHistory) {
-        push(resolve_target(c, node.next));
-      } else if (it->second == NodeKind::Route) {
-        for (auto const& [k, v] : node.cases) push(resolve_target(c, v));
-        if (!node.default_.empty()) push(resolve_target(c, node.default_));
+      NodeType const* t = node_type_of(node.kind);
+      if (t == nullptr || !t->edges) continue;
+      for (NodeType::Edge const& e : t->edges(node)) {
+        if (!e.forward) continue;  // 回边不参与"从入口可达"的展开
+        push(resolve_target(c, e.target));
       }
     }
     // 死节点检查
@@ -543,24 +486,14 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   }
 
   // ---- VR：引用 ----
+  // VR1：本节点所有"可能含引用"的文本片段里，$/@config 片段必须语法合法。
+  // 走 NodeType::ref_texts —— 与下面的引用收集**同一个钩子**，不会再出现某类节点漏检。
   for (NodeIR const& n : ir.nodes) {
-    // VR1：所有字符串参数 / expr 源里的 $/@config 片段必须语法合法
-    if (n.kind == NodeKind::Tool) {
-      std::function<void(Json const&)> walk = [&](Json const& v) {
-        if (v.is_string()) {
-          if (auto p = ref_syntax_problem(v.get_ref<std::string const&>()))
-            c.err("VR1", "节点 '" + n.id + "' 的参数有引用语法错误：" + *p);
-        } else if (v.is_object()) {
-          for (auto it = v.begin(); it != v.end(); ++it) walk(it.value());
-        } else if (v.is_array()) {
-          for (Json const& e : v) walk(e);
-        }
-      };
-      walk(n.parameters);
-    } else if (n.kind == NodeKind::Expr) {
-      if (auto p = ref_syntax_problem(n.expr))
-        c.err("VR1", "节点 '" + n.id + "' 的表达式有引用语法错误：" + *p);
-    }
+    NodeType const* t = node_type_of(n.kind);
+    if (t == nullptr || !t->ref_texts) continue;
+    for (std::string const& text : t->ref_texts(n))
+      if (auto p = ref_syntax_problem(text))
+        c.err("VR1", "节点 '" + n.id + "' 的引用语法错误：" + *p);
   }
   for (NodeIR const& n : ir.nodes) {
     std::vector<std::pair<std::string, Ref>> refs;
