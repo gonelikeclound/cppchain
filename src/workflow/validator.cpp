@@ -46,6 +46,7 @@
 #include <utility>
 
 #include "cppchain/workflow/expr.hpp"
+#include "cppchain/workflow/node_type.hpp"
 
 namespace cppchain::workflow {
 
@@ -69,12 +70,6 @@ bool is_ident(std::string_view s) {
   return true;
 }
 
-bool is_ident_chars(std::string_view s) {
-  if (s.empty()) return false;
-  for (char c : s)
-    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
-  return true;
-}
 
 bool is_internal_key(std::string_view id) {
   return id == kResultsKey || id == kLastExecKey || id == kLoopCountsKey || id == kConfigKey;
@@ -305,131 +300,14 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     if (n.id == "_turn_start" || n.id == "_turn_end")
       c.err("VN2", "节点 id 不得用保留名 '" + n.id + "'");
 
-    switch (n.kind) {
-      case NodeKind::Label:
-        // VN5：label 只允许 id/kind
-        {
-          Json const& raw = n.raw;
-          if (raw.is_object())
-            for (auto it = raw.begin(); it != raw.end(); ++it)
-              if (it.key() != "id" && it.key() != "kind")
-                c.err("VN5", "label '" + n.id + "' 不得带字段 '" + it.key() + "'");
-        }
-        break;
-
-      case NodeKind::Tool: {
-        if (n.tool.empty()) c.err("VN6", "tool 节点 '" + n.id + "' 缺少 tool 名");
-        if (!n.parameters.is_object())
-          c.err("VN6", "tool 节点 '" + n.id + "' 的 parameters 必须是对象");
-        if (n.next.empty()) c.err("VN6", "tool 节点 '" + n.id + "' 缺少 next（成功出口）");
-        if (opts.registry != nullptr) {
-          tool::ToolSpec const* spec = opts.registry->find(n.tool);
-          if (spec == nullptr)
-            c.err("VN6", "tool 节点 '" + n.id + "' 引用了目录里不存在的工具 '" + n.tool +
-                             "'（可用工具见目录注册表）");
-          else if (n.parameters.is_object()) {
-            // VN7：参数键 ⊆ 规格 properties；必填项必须出现
-            Json const& props = spec->parameters.value("properties", Json::object());
-            for (auto it = n.parameters.begin(); it != n.parameters.end(); ++it)
-              if (!props.contains(it.key()))
-                c.err("VN7", "tool 节点 '" + n.id + "' 的参数 '" + it.key() +
-                                 "' 不在工具 '" + n.tool + "' 的 input schema 里");
-            if (spec->parameters.contains("required") &&
-                spec->parameters["required"].is_array())
-              for (Json const& r : spec->parameters["required"]) {
-                std::string const key = r.get<std::string>();
-                if (!n.parameters.contains(key))
-                  c.err("VN7", "tool 节点 '" + n.id + "' 缺少工具 '" + n.tool +
-                                   "' 的必填参数 '" + key + "'");
-              }
-          }
-        }
-        // VN8：output_schema
-        if (!n.output_schema.is_object())
-          c.err("VN8", "tool 节点 '" + n.id + "' 的 output_schema 必须是对象");
-        else
-          for (auto it = n.output_schema.begin(); it != n.output_schema.end(); ++it) {
-            bool const ok_type =
-                it.value().is_string() &&
-                (it.value() == "number" || it.value() == "string" || it.value() == "boolean" ||
-                 it.value() == "*");
-            if (!is_ident_chars(it.key()))
-              c.err("VN8", "tool 节点 '" + n.id + "' 的 output_schema 字段名 '" + it.key() +
-                               "' 非法");
-            if (!ok_type)
-              c.err("VN8", "tool 节点 '" + n.id + "' 的 output_schema 字段 '" + it.key() +
-                               "' 的类型必须是 number/string/boolean/*");
-          }
-        break;
-      }
-
-      case NodeKind::Expr: {
-        auto parsed = Expr::parse(n.expr);
-        if (!parsed)
-          c.err("VN9", "expr 节点 '" + n.id + "' 的表达式不合法：" + parsed.error());
-        if (n.then.empty()) c.err("VN9", "expr 节点 '" + n.id + "' 缺少 then");
-        if (n.else_.empty()) c.err("VN9", "expr 节点 '" + n.id + "' 缺少 else");
-        break;
-      }
-
-      case NodeKind::Goto:
-        if (n.max <= 0)
-          c.err("VN9", "goto 节点 '" + n.id + "' 的 max 必须是正整数（循环有界），收到 " +
-                           std::to_string(n.max));
-        break;
-
-      case NodeKind::Model: {
-        if (n.model.empty())
-          c.err("VN10", "model 节点 '" + n.id + "' 缺少 model（组件名）");
-        else if (opts.components != nullptr && opts.components->model(n.model) == nullptr)
-          c.err("VN10", "model 节点 '" + n.id + "' 引用的组件 '" + n.model +
-                            "' 不在注册表里（对标 VN6 对工具名的做法）");
-        if (n.next.empty()) c.err("VN10", "model 节点 '" + n.id + "' 缺少 next");
-        if (!n.toolset.empty()) {
-          if (opts.components == nullptr || opts.components->toolset(n.toolset) == nullptr) {
-            c.err("VN10", "model 节点 '" + n.id + "' 引用的工具集 '" + n.toolset + "' 不在注册表里");
-          } else {
-            for (std::string const& t : *opts.components->toolset(n.toolset))
-              if (opts.registry != nullptr && opts.registry->find(t) == nullptr)
-                c.err("VN10", "工具集 '" + n.toolset + "' 里的工具 '" + t + "' 不在工具注册表里");
-          }
-        }
-        break;
-      }
-
-      case NodeKind::Route: {
-        if (!is_known_discriminant(n.on))
-          c.err("VN10", "route 节点 '" + n.id + "' 的 on='" + n.on +
-                            "' 不在封闭词表里（可用：last_ai_outcome）");
-        for (auto const& [k, v] : n.cases) {
-          if (!is_known_outcome(k))
-            c.err("VN10", "route 节点 '" + n.id + "' 的 cases 键 '" + k +
-                              "' 不在 outcome 词表里（可用：tool_calls / invalid_tool_calls / text）");
-          (void)v;
-        }
-        if (n.default_.empty()) {
-          std::size_t covered = 0;
-          for (char const* o : {kOutcomeToolCalls, kOutcomeInvalidToolCalls, kOutcomeText})
-            if (n.cases.count(o) > 0) ++covered;
-          if (covered < 3)
-            c.err("VN10", "route 节点 '" + n.id +
-                              "' 既没有覆盖全部 outcome 也没有 default（漏档会静默走错分支）");
-        }
-        break;
-      }
-
-      case NodeKind::RunTools:
-        if (n.next.empty()) c.err("VN10", "run_tools 节点 '" + n.id + "' 缺少 next");
-        break;
-
-      case NodeKind::LoadHistory:
-      case NodeKind::SaveHistory: {
-        std::string const what =
-            (n.kind == NodeKind::LoadHistory) ? "load_history" : "save_history";
-        if (n.path.empty()) c.err("VN11", what + " 节点 '" + n.id + "' 缺少 path（工作路径）");
-        if (n.next.empty()) c.err("VN11", what + " 节点 '" + n.id + "' 缺少 next");
-        break;
-      }
+    // 类型专属校验走注册表（VN5–VN11）。通用图规则不在这里 —— 见下方 VG 段（② 会收敛到 edges()）。
+    NodeType const* type = node_type_of(n.kind);
+    if (type != nullptr && type->validate) {
+      NodeType::ValidateContext const vctx{opts.registry, opts.components};
+      NodeType::ErrorSink const sink = [&c](std::string rule, std::string message) {
+        c.err(std::move(rule), std::move(message));
+      };
+      type->validate(n, vctx, sink);
     }
   }
 

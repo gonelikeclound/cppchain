@@ -15,6 +15,8 @@
 #include <string_view>
 #include <vector>
 
+#include "cppchain/tool/registry.hpp"
+#include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
 
 namespace cppchain::workflow {
@@ -35,9 +37,16 @@ struct NodeType {
   // 一行易读描述（demo 展示用；把展示也纳入类型，免得再加一种节点还要改 demo 的 switch）
   std::function<std::string(NodeIR const&)> describe;
 
-  // ---- 以下在 ①b / ①c 接上 ----
-  // std::function<void(NodeIR const&, ValidationResult&)> validate;
-  // std::function<void(NodeIR const&, CompileContext&)> compile;
+  // 校验期上下文：节点只看到它需要的（不把整个 ValidatorOptions 灌进来）
+  struct ValidateContext {
+    tool::ToolRegistry const* registry = nullptr;
+    ComponentRegistry const* components = nullptr;
+  };
+  using ErrorSink = std::function<void(std::string rule, std::string message)>;
+
+  // 类型专属校验（VN5–VN11 那一类）。**通用图规则**（目标存在/无环/可达/死 label）
+  // 不在这里——它们由框架按 edges() 统一做（②）。
+  std::function<void(NodeIR const&, ValidateContext const&, ErrorSink const&)> validate;
 };
 
 // 内置节点类型表（9 种）。静态、不可变、生命周期贯穿进程。

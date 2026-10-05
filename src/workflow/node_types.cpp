@@ -4,9 +4,13 @@
 // 集中到一处后，加一种节点只需在这里加一个 NodeType。
 #include "cppchain/workflow/node_type.hpp"
 
+#include <cctype>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
+
+#include "cppchain/workflow/expr.hpp"
 
 namespace cppchain::workflow {
 
@@ -46,6 +50,128 @@ bool kind_is(Json const& node, std::string_view name) {
 // 历史写法：靠决定性键判别（不带 kind 时）
 bool has(Json const& node, char const* key) { return node.contains(key); }
 
+// output_schema 字段名只能是标识符字符（自 validator 搬来，原只被 VN8 使用）
+bool is_ident_chars(std::string_view s) {
+  if (s.empty()) return false;
+  for (char c : s)
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
+  return true;
+}
+
+// ---- 类型专属校验（VN5–VN11）----
+// 通用图规则（目标存在/无环/可达/死 label）**不在这里**，由框架按 edges() 统一做（②）。
+
+void v_label(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  if (n.raw.is_object())
+    for (auto it = n.raw.begin(); it != n.raw.end(); ++it)
+      if (it.key() != "id" && it.key() != "kind")
+        err("VN5", "label '" + n.id + "' 不得带字段 '" + it.key() + "'");
+}
+
+void v_tool(NodeIR const& n, NodeType::ValidateContext const& ctx,
+            NodeType::ErrorSink const& err) {
+  if (n.tool.empty()) err("VN6", "tool 节点 '" + n.id + "' 缺少 tool 名");
+  if (!n.parameters.is_object())
+    err("VN6", "tool 节点 '" + n.id + "' 的 parameters 必须是对象");
+  if (n.next.empty()) err("VN6", "tool 节点 '" + n.id + "' 缺少 next（成功出口）");
+  if (ctx.registry != nullptr) {
+    tool::ToolSpec const* spec = ctx.registry->find(n.tool);
+    if (spec == nullptr)
+      err("VN6", "tool 节点 '" + n.id + "' 引用了目录里不存在的工具 '" + n.tool +
+                     "'（可用工具见目录注册表）");
+    else if (n.parameters.is_object()) {
+      Json const& props = spec->parameters.value("properties", Json::object());
+      for (auto it = n.parameters.begin(); it != n.parameters.end(); ++it)
+        if (!props.contains(it.key()))
+          err("VN7", "tool 节点 '" + n.id + "' 的参数 '" + it.key() + "' 不在工具 '" + n.tool +
+                         "' 的 input schema 里");
+      if (spec->parameters.contains("required") && spec->parameters["required"].is_array())
+        for (Json const& r : spec->parameters["required"]) {
+          std::string const key = r.get<std::string>();
+          if (!n.parameters.contains(key))
+            err("VN7", "tool 节点 '" + n.id + "' 缺少工具 '" + n.tool + "' 的必填参数 '" + key +
+                           "'");
+        }
+    }
+  }
+  if (!n.output_schema.is_object())
+    err("VN8", "tool 节点 '" + n.id + "' 的 output_schema 必须是对象");
+  else
+    for (auto it = n.output_schema.begin(); it != n.output_schema.end(); ++it) {
+      bool const ok_type = it.value().is_string() &&
+                           (it.value() == "number" || it.value() == "string" ||
+                            it.value() == "boolean" || it.value() == "*");
+      if (!is_ident_chars(it.key()))
+        err("VN8", "tool 节点 '" + n.id + "' 的 output_schema 字段名 '" + it.key() + "' 非法");
+      if (!ok_type)
+        err("VN8", "tool 节点 '" + n.id + "' 的 output_schema 字段 '" + it.key() +
+                       "' 的类型必须是 number/string/boolean/*");
+    }
+}
+
+void v_expr(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  auto parsed = Expr::parse(n.expr);
+  if (!parsed) err("VN9", "expr 节点 '" + n.id + "' 的表达式不合法：" + parsed.error());
+  if (n.then.empty()) err("VN9", "expr 节点 '" + n.id + "' 缺少 then");
+  if (n.else_.empty()) err("VN9", "expr 节点 '" + n.id + "' 缺少 else");
+}
+
+void v_goto(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  if (n.max <= 0)
+    err("VN9", "goto 节点 '" + n.id + "' 的 max 必须是正整数（循环有界），收到 " +
+                   std::to_string(n.max));
+}
+
+void v_model(NodeIR const& n, NodeType::ValidateContext const& ctx,
+             NodeType::ErrorSink const& err) {
+  if (n.model.empty())
+    err("VN10", "model 节点 '" + n.id + "' 缺少 model（组件名）");
+  else if (ctx.components != nullptr && ctx.components->model(n.model) == nullptr)
+    err("VN10", "model 节点 '" + n.id + "' 引用的组件 '" + n.model +
+                    "' 不在注册表里（对标 VN6 对工具名的做法）");
+  if (n.next.empty()) err("VN10", "model 节点 '" + n.id + "' 缺少 next");
+  if (!n.toolset.empty()) {
+    if (ctx.components == nullptr || ctx.components->toolset(n.toolset) == nullptr) {
+      err("VN10", "model 节点 '" + n.id + "' 引用的工具集 '" + n.toolset + "' 不在注册表里");
+    } else {
+      for (std::string const& t : *ctx.components->toolset(n.toolset))
+        if (ctx.registry != nullptr && ctx.registry->find(t) == nullptr)
+          err("VN10", "工具集 '" + n.toolset + "' 里的工具 '" + t + "' 不在工具注册表里");
+    }
+  }
+}
+
+void v_route(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  if (!is_known_discriminant(n.on))
+    err("VN10", "route 节点 '" + n.id + "' 的 on='" + n.on +
+                    "' 不在封闭词表里（可用：last_ai_outcome）");
+  for (auto const& [k, v] : n.cases) {
+    if (!is_known_outcome(k))
+      err("VN10", "route 节点 '" + n.id + "' 的 cases 键 '" + k +
+                      "' 不在 outcome 词表里（可用：tool_calls / invalid_tool_calls / text）");
+    (void)v;
+  }
+  if (n.default_.empty()) {
+    std::size_t covered = 0;
+    for (char const* o : {kOutcomeToolCalls, kOutcomeInvalidToolCalls, kOutcomeText})
+      if (n.cases.count(o) > 0) ++covered;
+    if (covered < 3)
+      err("VN10", "route 节点 '" + n.id +
+                      "' 既没有覆盖全部 outcome 也没有 default（漏档会静默走错分支）");
+  }
+}
+
+void v_run_tools(NodeIR const& n, NodeType::ValidateContext const&,
+                 NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN10", "run_tools 节点 '" + n.id + "' 缺少 next");
+}
+
+void v_history(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  std::string const what = (n.kind == NodeKind::LoadHistory) ? "load_history" : "save_history";
+  if (n.path.empty()) err("VN11", what + " 节点 '" + n.id + "' 缺少 path（工作路径）");
+  if (n.next.empty()) err("VN11", what + " 节点 '" + n.id + "' 缺少 next");
+}
+
 }  // namespace
 
 std::vector<NodeType> const& builtin_node_types() {
@@ -80,7 +206,7 @@ std::vector<NodeType> const& builtin_node_types() {
            if (n.on_error->fallback) onerr += " fallback=" + *n.on_error->fallback;
          }
          return "tool " + n.tool + " (" + params + ") → " + n.next + onerr;
-       }},
+       }, v_tool},
 
       // ---------------- expr ----------------
       {NodeKind::Expr, "expr",
@@ -97,14 +223,14 @@ std::vector<NodeType> const& builtin_node_types() {
        },
        [](NodeIR const& n) {
          return "expr \"" + n.expr + "\" → then=" + n.then + " else=" + n.else_;
-       }},
+       }, v_expr},
 
       // ---------------- label ----------------
       {NodeKind::Label, "label",
        [](Json const& n) { return kind_is(n, "label"); },
        [](NodeIR&, Json const&) {},  // 只有 id/kind
        [](Json& node, NodeIR const&) { node["kind"] = "label"; },
-       [](NodeIR const&) { return std::string("label"); }},
+       [](NodeIR const&) { return std::string("label"); }, v_label},
 
       // ---------------- goto ----------------
       {NodeKind::Goto, "goto",
@@ -120,7 +246,7 @@ std::vector<NodeType> const& builtin_node_types() {
        },
        [](NodeIR const& n) {
          return "goto " + n.goto_target + " (max " + std::to_string(n.max) + ")";
-       }},
+       }, v_goto},
 
       // ---------------- model（M12）----------------
       {NodeKind::Model, "model",
@@ -141,7 +267,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "model " + n.model + " (tools=" + (n.toolset.empty() ? "-" : n.toolset) + ") → " +
                 n.next;
-       }},
+       }, v_model},
 
       // ---------------- route（M12）----------------
       {NodeKind::Route, "route",
@@ -165,7 +291,7 @@ std::vector<NodeType> const& builtin_node_types() {
          std::string cs;
          for (auto const& [k, v] : n.cases) cs += (cs.empty() ? "" : " ") + k + "→" + v;
          return "route on=" + n.on + " {" + cs + "} default=" + n.default_;
-       }},
+       }, v_route},
 
       // ---------------- run_tools（M12）----------------
       {NodeKind::RunTools, "run_tools",
@@ -175,7 +301,7 @@ std::vector<NodeType> const& builtin_node_types() {
          node["kind"] = "run_tools";
          node["next"] = n.next;
        },
-       [](NodeIR const& n) { return "run_tools → " + n.next; }},
+       [](NodeIR const& n) { return "run_tools → " + n.next; }, v_run_tools},
 
       // ---------------- load_history / save_history（M12）----------------
       {NodeKind::LoadHistory, "load_history",
@@ -194,7 +320,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "load_history path=" + n.path +
                 " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
-       }},
+       }, v_history},
 
       {NodeKind::SaveHistory, "save_history",
        [](Json const& n) { return kind_is(n, "save_history"); },
@@ -212,7 +338,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "save_history path=" + n.path +
                 " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
-       }},
+       }, v_history},
   };
   return types;
 }
