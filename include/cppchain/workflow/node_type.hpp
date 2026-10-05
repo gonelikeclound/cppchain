@@ -15,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "cppchain/graph/graph.hpp"
 #include "cppchain/tool/registry.hpp"
 #include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
@@ -47,6 +48,19 @@ struct NodeType {
   // 类型专属校验（VN5–VN11 那一类）。**通用图规则**（目标存在/无环/可达/死 label）
   // 不在这里——它们由框架按 edges() 统一做（②）。
   std::function<void(NodeIR const&, ValidateContext const&, ErrorSink const&)> validate;
+
+  // 编译期上下文：节点把自己变成图节点所需的一切。
+  // 用引用成员（graph 不可拷贝）；error 非空表示编译失败，调用方就此中止。
+  struct CompileContext {
+    graph::StateGraph& graph;
+    tool::ToolRegistry const* registry = nullptr;
+    ComponentRegistry const* components = nullptr;
+    // label / _turn_end / _fail → 图上的目标名（由 compiler 提供）
+    std::function<std::string(std::string const&)> resolve;
+    std::size_t registered = 0;  // 成功注册的图节点数（供 registered_nodes()）
+    std::string error;
+  };
+  std::function<void(NodeIR const&, CompileContext&)> compile;
 };
 
 // 内置节点类型表（9 种）。静态、不可变、生命周期贯穿进程。

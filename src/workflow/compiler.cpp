@@ -14,6 +14,7 @@
 #include "cppchain/tool/tool.hpp"
 #include "cppchain/tool/tool_node.hpp"  // M12: run_tools 复用 M3 的 ToolNode
 #include "cppchain/workflow/expr.hpp"
+#include "cppchain/workflow/node_type.hpp"
 #include "cppchain/workflow/history_file.hpp"
 #include "cppchain/workflow/refs.hpp"
 #include "cppchain/workflow/validator.hpp"
@@ -35,58 +36,9 @@ Json merge_slots(Json const& left, Json const& right) {
   return out;
 }
 
-// 把 tool 节点 parameters 里的每个值解析为运行时的 JSON 参数（引用/模板替换）。
-Json resolve_args(Json const& params, Json const& state) {
-  Json out = Json::object();
-  for (auto it = params.begin(); it != params.end(); ++it)
-    out[it.key()] = resolve_parameter(it.value(), state);
-  return out;
-}
-
-// ---- M12：对话通道（state.messages）----
-// 状态里的 messages 是**规范 JSON**（Message 的序列化契约），这里与 Message 互转。
-std::vector<message::Message> messages_from_state(Json const& state) {
-  std::vector<message::Message> out;
-  auto const it = state.find(kMessagesKey);
-  if (it == state.end() || !it->is_array()) return out;
-  out.reserve(it->size());
-  for (Json const& raw : *it) {
-    try {
-      out.push_back(raw.get<message::Message>());
-    } catch (std::exception const&) {
-      // 坏消息不静默吞：交由调用方语义处理（此处跳过，validator 上游已保证形状）
-    }
-  }
-  return out;
-}
-
-// 最后一条 AI 消息的**归一化 outcome**（封闭词表，见 ir.hpp）。
-// 没有 AI 消息时返回空串（不匹配任何 case）→ 强制走 route 的 default 分支，
-// 而不是被当成正常文本回复。
-std::string last_ai_outcome(Json const& state) {
-  auto const msgs = messages_from_state(state);
-  for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
-    if (it->type != message::Role::Ai) continue;
-    if (!it->tool_calls.empty()) return kOutcomeToolCalls;
-    if (!it->invalid_tool_calls.empty()) return kOutcomeInvalidToolCalls;
-    return kOutcomeText;
-  }
-  return {};
-}
-
-// 参数取字符串（引用解析后可能是任意 JSON；非字符串按 dump 取，便于把路径写进模板）
-std::string as_string(Json const& v) { return v.is_string() ? v.get<std::string>() : v.dump(); }
-
-// _fail 的落地：一个"一定会抛"的节点（见 ir.hpp 的 kFailName）
+// `_fail` 的落地节点名（见 ir.hpp 的 kFailName）。
+// 各节点类型的"编译"已迁到 node_types.cpp；本文件只剩图装配与 schema。
 constexpr char kFailTarget[] = "__fail__";
-
-// 命令构造器：带更新 + 跳转（fallback / goto 用）
-Command jump_update(Json update, std::vector<std::string> goto_nodes) {
-  Command c;
-  c.update = std::move(update);
-  c.goto_nodes = std::move(goto_nodes);
-  return c;
-}
 
 }  // namespace
 
@@ -140,210 +92,15 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   schema.set_reducer(std::string(kMessagesKey), state::add_messages);
 
   graph::StateGraph g(std::move(schema));
-  std::size_t registered = 0;
 
+  // 3) 逐节点编译：走**注册表**（加一种节点不必再改这里）
+  NodeType::CompileContext cctx{g, &registry, opts.components, resolve, 0, {}};
   for (NodeIR const& n : ir.nodes) {
-    switch (n.kind) {
-      case NodeKind::Tool: {
-        std::string const node_id = n.id;
-        std::string const tool = n.tool;
-        Json const parameters = n.parameters;
-        int const retry = n.on_error ? n.on_error->retry : 0;
-        // fallback 与 next/then/else 走**同一条**解析：label → 它的续接节点、_turn_end → kEnd。
-        // 原先直接把原始 id 塞进 Command.goto，而 label 并不注册为图节点
-        // → 能过校验、能编译，一跑就是 "unknown node"（fail-closed 承诺失效）。
-        std::optional<std::string> const fallback =
-            (n.on_error && n.on_error->fallback)
-                ? std::optional<std::string>(resolve(*n.on_error->fallback))
-                : std::nullopt;
-        tool::ToolRegistry const* reg = &registry;
-
-        g.add_node(
-            n.id, [node_id, tool, parameters, retry, fallback, reg](Json const& state, NodeContext&) {
-              tool::ToolSpec const* spec = reg->find(tool);
-              if (spec == nullptr)
-                throw tool::ToolException("tool '" + tool + "' not in registry (node '" +
-                                          node_id + "')");
-
-              Json const args = resolve_args(parameters, state);
-              tool::ToolContext tctx;
-              tctx.tool_call_id = node_id;  // 幂等/审计兜底：节点 id 即本次调用的标识
-
-              std::string last_err;
-              for (int a = 0; a <= retry; ++a) {
-                // handler **抛异常**与返回 unexpected 同等对待：都算本次尝试失败，
-                // 交给 retry / fallback 处置。比照 ToolNode::execute_one 的纪律
-                // （那里也是把异常转成错误、不让它穿透）—— 否则 on_error 在最常见的
-                // 失败形态（工具抛错）下完全不生效：IR 明明声明了 fallback，照样直接崩。
-                std::expected<nlohmann::json, tool::ToolError> r =
-                    std::unexpected(tool::ToolError{"(handler 未产生结果)"});
-                try {
-                  r = spec->handler(args, tctx);
-                } catch (std::exception const& e) {
-                  r = std::unexpected(tool::ToolError{std::string("handler threw: ") + e.what()});
-                } catch (...) {
-                  r = std::unexpected(tool::ToolError{"handler threw: (非 std 异常)"});
-                }
-
-                if (r) {
-                  Json update = Json{{kResultsKey, Json{{node_id, *r}}},
-                                     {kLastExecKey, node_id}};
-                  return Command::with_update(std::move(update));
-                }
-                last_err = r.error().message;
-              }
-              // 失败耗尽；无 fallback → 抛给引擎（→ WorkflowError::Runtime）
-              if (fallback) return Command{{}, {*fallback}};
-              // 带上最后一次的具体原因：只说"failed after N attempts"没法排查
-              throw tool::ToolException("tool '" + tool + "' failed after " +
-                                        std::to_string(retry + 1) + " attempts (node '" +
-                                        node_id + "'): " + last_err);
-            });
-        // 成功出口：静态边（next 目标已由 resolve 替换 label/_turn_end）
-        g.add_edge(n.id, resolve(n.next));
-        ++registered;
-        break;
-      }
-
-      case NodeKind::Expr: {
-        std::string const then_t = resolve(n.then);
-        std::string const else_t = resolve(n.else_);
-        auto parsed = Expr::parse(n.expr);
-        if (!parsed)
-          return invalid("expr 节点 '" + n.id + "' 语法错误：" + parsed.error());
-        auto expr_ptr = std::make_shared<Expr>(std::move(*parsed));
-
-        // expr 节点 fn：no-op（它不产出输出，不动 _last_exec）；
-        // 路由交给条件边 router（引擎在 fn 之后、apply 之后运行 router）。
-        g.add_node(n.id, [](Json const&, NodeContext&) { return Command{}; });
-        g.add_conditional_edges(
-            n.id, [expr_ptr, then_t, else_t](Json const& state) {
-              return std::vector<std::string>{expr_ptr->eval(state) ? then_t : else_t};
-            });
-        ++registered;
-        break;
-      }
-
-      case NodeKind::Goto: {
-        std::string const label = n.goto_target;
-        std::string const target = label.empty() ? graph::kEnd : resolve(label);
-        int const max = n.max;
-        g.add_node(
-            n.id, [n_ = n.id, target, max](Json const& state, NodeContext&) {
-              long cur = 0;
-              if (state.contains(kLoopCountsKey))
-                if (auto const& lc = state.at(kLoopCountsKey);
-                    lc.contains(n_) && lc[n_].is_number())
-                  cur = lc[n_].get<long>();
-              long const next = cur + 1;
-              Json update = Json{{kLoopCountsKey, Json{{n_, next}}}};
-              if (next >= max) return jump_update(update, {graph::kEnd});
-              return jump_update(std::move(update), {target});
-            });
-        ++registered;
-        break;
-      }
-
-      case NodeKind::Model: {
-        model::ChatModel* m =
-            (opts.components != nullptr) ? opts.components->model(n.model) : nullptr;
-        if (m == nullptr)
-          return invalid("model 节点 '" + n.id + "' 引用的组件 '" + n.model + "' 不可用");
-        Json tools_json = Json::array();
-        if (!n.toolset.empty() && opts.components != nullptr)
-          if (auto const* ts = opts.components->toolset(n.toolset); ts != nullptr)
-            for (std::string const& tname : *ts)
-              if (auto const* sp = registry.find(tname); sp != nullptr)
-                tools_json.push_back(sp->to_openai());
-        std::string const sys = n.system_prompt;
-
-        g.add_node(n.id, [m, tools_json, sys](Json const& state, NodeContext&) {
-          std::vector<message::Message> msgs = messages_from_state(state);
-          if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
-          model::CallOptions co;
-          co.tools = tools_json;
-          auto r = m->invoke(msgs, co);
-          if (!r) throw tool::ToolException("model 节点调用失败：" + r.error().message);
-          // **只发一次**：把回复追加进 messages，循环由 route + 回边负责
-          return Command::with_update(Json{{kMessagesKey, Json::array({*r})}});
-        });
-        g.add_edge(n.id, resolve(n.next));
-        ++registered;
-        break;
-      }
-
-      case NodeKind::Route: {
-        // cases/default 在编译期就解析成目标名（label → 续接、_turn_end → kEnd、_fail → 失败节点）
-        std::map<std::string, std::string> targets;
-        for (auto const& [k, v] : n.cases) targets[k] = resolve(v);
-        std::string const dflt = resolve(n.default_);
-
-        g.add_node(n.id, [](Json const&, NodeContext&) { return Command{}; });  // no-op
-        g.add_conditional_edges(n.id, [targets, dflt](Json const& state) {
-          std::string const outcome = last_ai_outcome(state);
-          auto const it = targets.find(outcome);
-          return std::vector<std::string>{it != targets.end() ? it->second : dflt};
-        });
-        ++registered;
-        break;
-      }
-
-      case NodeKind::RunTools: {
-        tool::ToolNode tn(&registry);  // 复用 M3 的实现（并行、顺序对齐、错误回喂）
-        g.add_node(n.id, [tn](Json const& state, NodeContext&) {
-          std::vector<message::ToolCall> calls;
-          auto const msgs = messages_from_state(state);
-          for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
-            if (it->type == message::Role::Ai) {
-              calls = it->tool_calls;
-              break;
-            }
-          if (calls.empty())
-            throw tool::ToolException("run_tools 节点：最后一条 AI 消息没有 tool_calls");
-          Json arr = Json::array();
-          for (message::Message& m : tn.run(calls)) arr.push_back(m);
-          return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
-        });
-        g.add_edge(n.id, resolve(n.next));
-        ++registered;
-        break;
-      }
-
-      case NodeKind::LoadHistory: {
-        // path/session 是**运行期取值**（如 @config.workspace），与该层其它参数同一套解析
-        Json const path_expr = Json(n.path);
-        Json const sess_expr = Json(n.session);
-        g.add_node(n.id, [path_expr, sess_expr](Json const& state, NodeContext&) {
-          std::string const ws = as_string(resolve_parameter(path_expr, state));
-          std::string const sess = as_string(resolve_parameter(sess_expr, state));
-          auto const hist = load_history_file(session_path(ws, sess));
-          Json arr = Json::array();
-          for (message::Message const& m : hist) arr.push_back(m);
-          // 走 messages 通道 → add_messages 与本次输入合并（同 id 覆盖、无 id 追加）
-          return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
-        });
-        g.add_edge(n.id, resolve(n.next));
-        ++registered;
-        break;
-      }
-
-      case NodeKind::SaveHistory: {
-        Json const path_expr = Json(n.path);
-        Json const sess_expr = Json(n.session);
-        g.add_node(n.id, [path_expr, sess_expr](Json const& state, NodeContext&) {
-          std::string const ws = as_string(resolve_parameter(path_expr, state));
-          std::string const sess = as_string(resolve_parameter(sess_expr, state));
-          save_history_file(session_path(ws, sess), messages_from_state(state), sess);
-          return Command{};  // 不产出状态更新（它是"出口动作"，不是数据流节点）
-        });
-        g.add_edge(n.id, resolve(n.next));
-        ++registered;
-        break;
-      }
-
-      case NodeKind::Label:
-        break;  // 不注册（指针已替换）
-    }
+    NodeType const* type = node_type_of(n.kind);
+    if (type == nullptr || !type->compile)
+      return invalid("internal: 该节点类型没有注册 compile（node '" + n.id + "'）");
+    type->compile(n, cctx);
+    if (!cctx.error.empty()) return invalid(cctx.error);
   }
 
   // 3.5) _fail 的落地节点：只有真的被引用才注册（不污染 registered_nodes 计数）。
@@ -368,7 +125,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   if (!compiled)
     return std::unexpected(WorkflowError{WorkflowError::Kind::Compile, compiled.error().message});
 
-  CompiledWorkflow out{std::move(*compiled), ir.id, ir.trigger, registered};
+  CompiledWorkflow out{std::move(*compiled), ir.id, ir.trigger, cctx.registered};
   return out;
 }
 
