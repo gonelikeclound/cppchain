@@ -35,6 +35,7 @@ namespace demo::fakes {
 
 // 导入库名（using-decl 指向库内*同一实体*，consumer 同时 using 两个命名空间也不歧义）
 using cppchain::message::Message;
+using cppchain::tool::arg;
 using cppchain::tool::make_tool;
 using cppchain::tool::SchemaBuilder;
 using cppchain::tool::ToolContext;
@@ -90,8 +91,12 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
           .prop("body", "string", "通知正文（可选）", false)
           .build(),
       [&notifs = sinks.notifications](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        std::string title = args.value("title", "");
-        std::string body = args.value("body", "");
+        auto title_arg = arg<std::string>(args, "title");
+        if (!title_arg) return std::unexpected(title_arg.error());
+        auto body_arg = arg<std::string>(args, "body", /*required=*/false);
+        if (!body_arg) return std::unexpected(body_arg.error());
+        std::string const& title = *title_arg;
+        std::string const& body = *body_arg;
         notifs.push_back(body.empty() ? title : title + "：" + body);
         return detail::t_ok(Json{{"ok", true}});
       },
@@ -103,7 +108,9 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
       "查询某商品当前价格与库存（可定时轮询的价格源）",
       SchemaBuilder().prop("item_id", "string", "商品 id", true).build(),
       [&sinks](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        std::string id = args.value("item_id", "");
+        auto id_arg = arg<std::string>(args, "item_id");
+        if (!id_arg) return std::unexpected(id_arg.error());
+        std::string const& id = *id_arg;
         if (sinks.price_lookup) return detail::t_ok(sinks.price_lookup(id));
         return detail::t_ok(Json{{"price", 799}, {"in_stock", true}, {"currency", "CNY"}});
       }));
@@ -114,7 +121,9 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
       "互联网关键词搜索，返回命中的原始网页文档列表（供 LLM 提炼）",
       SchemaBuilder().prop("query", "string", "搜索关键词", true).build(),
       [&sinks](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        std::string q = args.value("query", "");
+        auto q_arg = arg<std::string>(args, "query");
+        if (!q_arg) return std::unexpected(q_arg.error());
+        std::string const& q = *q_arg;
         if (sinks.web_search_fn) return detail::t_ok(sinks.web_search_fn(q));
         return detail::t_ok(Json{{"query", q},
                                  {"total", 1},
@@ -132,8 +141,12 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
           .prop("text", "string", "待提取的原文", true)
           .build(),
       [&sinks](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        std::string prompt = args.value("prompt", "");
-        std::string text = args.value("text", "");
+        auto prompt_arg = arg<std::string>(args, "prompt");
+        if (!prompt_arg) return std::unexpected(prompt_arg.error());
+        auto text_arg = arg<std::string>(args, "text");
+        if (!text_arg) return std::unexpected(text_arg.error());
+        std::string const& prompt = *prompt_arg;
+        std::string const& text = *text_arg;
         if (sinks.chat != nullptr) {
           auto r = sinks.chat->invoke(
               std::span<Message const>{
@@ -156,7 +169,9 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
           .prop("max_tokens", "integer", "最大 token 数（可选）", false)
           .build(),
       [&sinks](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        std::string prompt = args.value("prompt", "");
+        auto prompt_arg = arg<std::string>(args, "prompt");
+        if (!prompt_arg) return std::unexpected(prompt_arg.error());
+        std::string const& prompt = *prompt_arg;
         if (sinks.chat != nullptr) {
           auto r = sinks.chat->invoke(
               std::span<Message const>{cppchain::message::human_message(prompt)}, {});
@@ -176,7 +191,9 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
           .prop("timeout_ms", "integer", "超时（可选）", false)
           .build(),
       [&sinks](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        std::string url = args.value("url", "");
+        auto url_arg = arg<std::string>(args, "url");
+        if (!url_arg) return std::unexpected(url_arg.error());
+        std::string const& url = *url_arg;
         if (sinks.http_get_fn) {
           auto [status, body] = sinks.http_get_fn(url);
           return detail::t_ok(Json{{"status", status}, {"body", body}});
@@ -191,8 +208,12 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
       "两个数字求和",
       SchemaBuilder().prop("a", "number", "加数", true).prop("b", "number", "加数", true).build(),
       [](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        double const a = args.value("a", 0.0);
-        double const b = args.value("b", 0.0);
+        auto a_arg = arg<double>(args, "a");
+        if (!a_arg) return std::unexpected(a_arg.error());
+        auto b_arg = arg<double>(args, "b");
+        if (!b_arg) return std::unexpected(b_arg.error());
+        double const a = *a_arg;
+        double const b = *b_arg;
         return detail::t_ok(Json{{"value", a + b}});
       }));
 
@@ -219,7 +240,9 @@ inline ToolRegistry make_fake_tools(FakeToolSinks& sinks) {
       "读取一个本地文件并返回摘要（离线 stub：不碰文件系统）",
       SchemaBuilder().prop("path", "string", "文件路径", true).build(),
       [](Json const& args, ToolContext&) -> std::expected<Json, ToolError> {
-        std::string const path = args.value("path", "");
+        auto path_arg = arg<std::string>(args, "path");
+        if (!path_arg) return std::unexpected(path_arg.error());
+        std::string const& path = *path_arg;
         return detail::t_ok(Json{{"summary", "（离线 stub）" + path}});
       }));
 
