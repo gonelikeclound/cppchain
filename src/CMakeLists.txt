@@ -170,6 +170,7 @@ add_library(cppchain_workflow STATIC
   workflow/validator.cpp
   workflow/compiler.cpp
   workflow/history_file.cpp
+  workflow/node_types.cpp
   workflow/generator.cpp)
 
 target_include_directories(cppchain_workflow PUBLIC

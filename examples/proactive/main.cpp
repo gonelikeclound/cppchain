@@ -12,6 +12,7 @@
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/generator.hpp>
 #include <cppchain/workflow/ir.hpp>
+#include <cppchain/workflow/node_type.hpp>
 
 #include <cstdio>
 #include <fstream>
@@ -66,52 +67,9 @@ void print_readable_ir(WorkflowIR const& ir) {
   std::println("Workflow IR: {}", ir.id);
   std::println("  trigger: time + schedule \"{}\"", ir.trigger.schedule);
   for (NodeIR const& n : ir.nodes) {
-    switch (n.kind) {
-      case NodeKind::Tool: {
-        std::string params;
-        if (n.parameters.is_object())
-          for (auto it = n.parameters.begin(); it != n.parameters.end(); ++it)
-            params += (params.empty() ? "" : ", ") + it.key();
-        std::string onerr;
-        if (n.on_error) {
-          if (n.on_error->retry > 0)
-            onerr += " (retry " + std::to_string(n.on_error->retry) + ")";
-          if (n.on_error->fallback) onerr += " fallback=" + *n.on_error->fallback;
-        }
-        std::println("  [{}] tool {} ({}) → {}{}", n.id, n.tool, params, n.next, onerr);
-        break;
-      }
-      case NodeKind::Expr:
-        std::println("  [{}] expr \"{}\" → then={} else={}", n.id, n.expr, n.then, n.else_);
-        break;
-      case NodeKind::Label:
-        std::println("  [{}] label", n.id);
-        break;
-      case NodeKind::Goto:
-        std::println("  [{}] goto {} (max {})", n.id, n.goto_target, n.max);
-        break;
-      case NodeKind::Model:
-        std::println("  [{}] model {} (tools={}) → {}", n.id, n.model,
-                     n.toolset.empty() ? "-" : n.toolset, n.next);
-        break;
-      case NodeKind::Route: {
-        std::string cs;
-        for (auto const& [k, v] : n.cases) cs += (cs.empty() ? "" : " ") + k + "→" + v;
-        std::println("  [{}] route on={} {{{}}} default={}", n.id, n.on, cs, n.default_);
-        break;
-      }
-      case NodeKind::RunTools:
-        std::println("  [{}] run_tools → {}", n.id, n.next);
-        break;
-      case NodeKind::LoadHistory:
-        std::println("  [{}] load_history path={} session={} → {}", n.id, n.path,
-                     n.session.empty() ? "-" : n.session, n.next);
-        break;
-      case NodeKind::SaveHistory:
-        std::println("  [{}] save_history path={} session={} → {}", n.id, n.path,
-                     n.session.empty() ? "-" : n.session, n.next);
-        break;
-    }
+    // 展示也走注册表：加一种节点不必再改 demo 的 switch（见 02-arch-design/12）
+    NodeType const* type = node_type_of(n.kind);
+    std::println("  [{}] {}", n.id, type != nullptr ? type->describe(n) : "(未知节点类型)");
   }
   std::println("  ---- JSON 规范形 ----");
   std::println("{}", ir.to_json().dump(2));
