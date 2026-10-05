@@ -13,8 +13,8 @@
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/tool/tool_node.hpp"
 #include "cppchain/workflow/expr.hpp"
-#include "cppchain/workflow/history_file.hpp"
 #include "cppchain/workflow/refs.hpp"
+#include "cppchain/workflow/session_log.hpp"
 
 namespace cppchain::workflow {
 
@@ -173,10 +173,10 @@ void v_run_tools(NodeIR const& n, NodeType::ValidateContext const&,
   if (n.next.empty()) err("VN10", "run_tools 节点 '" + n.id + "' 缺少 next");
 }
 
-void v_history(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
-  std::string const what = (n.kind == NodeKind::LoadHistory) ? "load_history" : "save_history";
-  if (n.path.empty()) err("VN11", what + " 节点 '" + n.id + "' 缺少 path（工作路径）");
-  if (n.next.empty()) err("VN11", what + " 节点 '" + n.id + "' 缺少 next");
+void v_load_history(NodeIR const& n, NodeType::ValidateContext const&,
+                    NodeType::ErrorSink const& err) {
+  if (n.path.empty()) err("VN11", "load_history 节点 '" + n.id + "' 缺少 path（工作路径）");
+  if (n.next.empty()) err("VN11", "load_history 节点 '" + n.id + "' 缺少 next");
 }
 
 // ---- 编译期助手（自 compiler.cpp 搬来）----
@@ -372,8 +372,11 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
         if (auto const* sp = ctx.registry->find(tname); sp != nullptr)
           tools_json.push_back(sp->to_openai());
   std::string const sys = n.system_prompt;
+  std::string const model_name = n.model;
+  auto sink_p = ctx.sink;  // 触发期注入的 NodeLog（docs/12 §6.4：source=node 的诊断日志）
 
-  ctx.graph.add_node(n.id, [m, tools_json, sys](Json const& state, NodeContext&) {
+  ctx.graph.add_node(n.id, [m, tools_json, sys, model_name, sink_p](Json const& state,
+                                                                    NodeContext&) {
     std::vector<message::Message> msgs = messages_from_state(state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
     model::CallOptions co;
@@ -381,6 +384,9 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     auto r = m->invoke(msgs, co);
     if (!r) throw tool::ToolException("model 节点调用失败：" + r.error().message);
     // **只发一次**：回复追加进 messages，循环由 route + 回边负责
+    if (NodeLog* l = sink_p->nlog())
+      l->log("info", "model '" + model_name + "' 完成一次调用",
+             Json{{"in_msg", msgs.size()}, {"tool_calls", !r->tool_calls.empty()}});
     return Command::with_update(Json{{kMessagesKey, Json::array({*r})}});
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
@@ -423,27 +429,21 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
 void c_load_history(NodeIR const& n, NodeType::CompileContext& ctx) {
   Json const path_expr = Json(n.path);
   Json const sess_expr = Json(n.session);
-  ctx.graph.add_node(n.id, [path_expr, sess_expr](Json const& state, NodeContext&) {
+  auto sink_p = ctx.sink;
+  // ④：history = 日志的投影 —— 读本会话日志 → replay → 取 messages（docs/12 §7）。
+  // 与 D 阶段的"读 history 文件"差别：文件是 append-only 日志，宿主不再单独 save；
+  // 本轮输入也已由 fire_once 写成 input 事件排在日志里，replay 天然含它。
+  ctx.graph.add_node(n.id, [path_expr, sess_expr, sink_p](Json const& state, NodeContext&) {
     std::string const ws = as_string(resolve_parameter(path_expr, state));
     std::string const sess = as_string(resolve_parameter(sess_expr, state));
-    auto const hist = load_history_file(session_path(ws, sess));
+    auto const hist = replay_session_messages(session_path(ws, sess));
+    if (NodeLog* l = sink_p->nlog())
+      l->log("info", "load_history: replay " + std::to_string(hist.size()) + " messages",
+             Json{{"workspace", ws}, {"session", sess}});
     Json arr = Json::array();
     for (message::Message const& m : hist) arr.push_back(m);
     // 走 messages 通道 → add_messages 与本次输入合并（同 id 覆盖、无 id 追加）
     return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
-  });
-  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
-  ++ctx.registered;
-}
-
-void c_save_history(NodeIR const& n, NodeType::CompileContext& ctx) {
-  Json const path_expr = Json(n.path);
-  Json const sess_expr = Json(n.session);
-  ctx.graph.add_node(n.id, [path_expr, sess_expr](Json const& state, NodeContext&) {
-    std::string const ws = as_string(resolve_parameter(path_expr, state));
-    std::string const sess = as_string(resolve_parameter(sess_expr, state));
-    save_history_file(session_path(ws, sess), messages_from_state(state), sess);
-    return Command{};  // 出口动作，不产出状态更新
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
   ++ctx.registered;
@@ -580,7 +580,8 @@ std::vector<NodeType> const& builtin_node_types() {
        },
        [](NodeIR const& n) { return "run_tools → " + n.next; }, v_run_tools, c_run_tools, e_next, t_none},
 
-      // ---------------- load_history / save_history（M12）----------------
+      // ---------------- load_history（M12 / ④）----------------
+      // history = 日志的投影（docs/12 §7）：不再有 save_history 节点。
       {NodeKind::LoadHistory, "load_history",
        [](Json const& n) { return kind_is(n, "load_history"); },
        [](NodeIR& out, Json const& node) {
@@ -597,25 +598,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "load_history path=" + n.path +
                 " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
-       }, v_history, c_load_history, e_next, t_history},
-
-      {NodeKind::SaveHistory, "save_history",
-       [](Json const& n) { return kind_is(n, "save_history"); },
-       [](NodeIR& out, Json const& node) {
-         get_str(out, node, "path", out.path);
-         get_str(out, node, "session", out.session);
-         get_str(out, node, "next", out.next);
-       },
-       [](Json& node, NodeIR const& n) {
-         node["kind"] = "save_history";
-         node["path"] = n.path;
-         if (!n.session.empty()) node["session"] = n.session;
-         node["next"] = n.next;
-       },
-       [](NodeIR const& n) {
-         return "save_history path=" + n.path +
-                " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
-       }, v_history, c_save_history, e_next, t_history},
+       }, v_load_history, c_load_history, e_next, t_history},
   };
   return types;
 }

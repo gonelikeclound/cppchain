@@ -86,8 +86,12 @@ workflow 用 **state 在节点间传参**；没有特殊节点，全部平级：
 
 ```
 [load_history] → [L: label] → [think: model] → [route] ─有 tool_calls→ [run_tools] → [goto L]
-                                                   └无 tool_calls→ [save_history] → END
+                                                   └无 tool_calls→ END
 ```
+
+> **④ 起（docs/12 §7）本节的输入/落盘方案已被取代**：`save_history` 取消，`load_history` 成为
+> 会话日志的 replay 投影，本轮输入由引擎写成 `__input__` 事件（不再"宿主先写历史文件"）。
+> 下面的 `load_history`/`save_history` 两段是 D 阶段的设计，保留作演进记录；现状以 12 §6/§7 为准。
 
 逐条：
 
@@ -98,8 +102,9 @@ workflow 用 **state 在节点间传参**；没有特殊节点，全部平级：
 - **`route`**：看最后一条 AI 消息有无 `tool_calls`，决定去 `run_tools` 还是收尾。
 - **`run_tools`**：执行那条消息里的 `tool_calls`，把 ToolMessage 追进 `messages`。
 - **回边**：回到 `model` 再发一轮。**这就是"循环"**——与 langgraph 的 `tools → agent` 等价。
-- **`save_history`**：把 `state.messages` 写回工作路径。位置自由：放 `model` 前就先存下用户
-  输入（中途崩了也不丢），放 `route` 后则存完整一轮。
+- **`save_history`**：(D 阶段设计；**④ 起已取消**，见 12 §7.2 —— 历史是日志的投影，不再单独落盘。
+  原语义：把 `state.messages` 写回工作路径。位置自由：放 `model` 前就先存下用户
+  输入（中途崩了也不丢），放 `route` 后则存完整一轮。)
 
 **关于"结果存 state.result"**：M11 已有的约定是按节点分槽 `state.results[<节点 id>]`。
 agent 轮的最终答复就在最后一条 AI 消息里，落盘与引用都走 `messages` 通道，不需要额外结果槽。

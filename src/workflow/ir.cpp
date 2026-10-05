@@ -55,7 +55,7 @@ std::expected<NodeKind, std::string> WorkflowIR::classify(Json const& node) {
                            "'（见 node_types.cpp 的注册表）");
   return std::unexpected(
       "unknown node: no decisive key (kind=label|goto|expr|tool|model|route|run_tools|"
-      "load_history|save_history, 或 goto/expr/tool 键)");
+      "load_history, 或 goto/expr/tool 键)");
 }
 
 std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {

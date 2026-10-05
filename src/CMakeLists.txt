@@ -169,7 +169,7 @@ add_library(cppchain_workflow STATIC
   workflow/expr.cpp
   workflow/validator.cpp
   workflow/compiler.cpp
-  workflow/history_file.cpp
+  workflow/session_log.cpp
   workflow/node_types.cpp
   workflow/generator.cpp)
 

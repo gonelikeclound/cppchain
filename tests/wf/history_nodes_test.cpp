@@ -1,12 +1,16 @@
-// M12 测试：history 两个节点（load_history / save_history）—— **走完整 workflow 的跨命令续跑**
+// M12 测试：history = 日志的投影（docs/02-arch-design/12 §7，③④ 落地）——
+// **走完整 workflow 的跨命令续跑**。
 //
 // 与 examples/session_resume（验证 A）的区别：A 直接用 agent::Agent + 落盘 Checkpointer；
-// 这里走的是 workflow —— history 是图上的**普通节点**，state 每次触发全新（M11 的 D1）。
+// 这里走的是 workflow —— history 是图上的**普通节点**（load_history），state 每次触发全新（D1）。
 //
-// 输入进 state 的路径（重要，见 02-arch-design/11 §5.5）：
-//   宿主（CLI）**先把本次用户输入写进会话文件**，再由 workflow 整体 load → 跑 → save。
-//   这样顺序天然正确（历史在前、本轮输入在后），且不用给引擎加"初始状态种子"——
-//   若改用种子，add_messages 会把种子放在 load 回来的历史**之前**，顺序就反了。
+// 输入进 state 的路径（④ 起改进了 02-arch-design/11 §5.5 的 D 阶段方案）：
+//   宿主把**本轮输入**经 FireOptions.input_messages 传给 fire_once，引擎在 run 开头写一条
+//   source=engine 的 input 事件；load_history 对该会话日志做 replay 投影，按 seq 重建 messages。
+//   顺序天然正确（历史在前、本轮在后），且没有 save_history —— 日志就是唯一事实来源。
+//
+// 附带验证（③）：引擎在节点边界写 enter/exit 结构事件；节点经注入的 NodeLog 写 source=node
+// 诊断（不参与 replay）；load_history 的 update 是"回声"，不重复落盘。
 #include <gtest/gtest.h>
 
 #include <deque>
@@ -22,8 +26,8 @@
 #include "cppchain/model/task.hpp"
 #include "cppchain/workflow/compiler.hpp"
 #include "cppchain/workflow/components.hpp"
-#include "cppchain/workflow/history_file.hpp"
 #include "cppchain/workflow/ir.hpp"
+#include "cppchain/workflow/session_log.hpp"
 #include "cppchain/workflow/validator.hpp"
 #include "support/fakes.hpp"
 
@@ -77,7 +81,8 @@ struct TempDir {
   [[nodiscard]] std::string str() const { return dir.string(); }
 };
 
-// D 阶段的完整形态：load_history → [label → model → route → run_tools → goto] → save_history
+// D 阶段的完整形态现在收敛为：load_history → [label → model → route → run_tools → goto]
+// （save_history 已随 ④ 删除；历史是日志的投影，无需持久化节点）。
 Json history_react_ir() {
   return Json{
       {"id", "wf_cli"},
@@ -100,15 +105,10 @@ Json history_react_ir() {
                           {"on", "last_ai_outcome"},
                           {"cases", Json{{"tool_calls", "act"},
                                          {"invalid_tool_calls", "_fail"},
-                                         {"text", "persist"}}},
+                                         {"text", "_turn_end"}}},
                           {"default", "_fail"}},
                      Json{{"id", "act"}, {"kind", "run_tools"}, {"next", "loop"}},
-                     Json{{"id", "loop"}, {"goto", "L"}, {"max", 4}},
-                     Json{{"id", "persist"},
-                          {"kind", "save_history"},
-                          {"path", "@config.workspace"},
-                          {"session", "@config.session"},
-                          {"next", "_turn_end"}}})}};
+                     Json{{"id", "loop"}, {"goto", "L"}, {"max", 4}}})}};
 }
 
 struct Fixture {
@@ -135,35 +135,66 @@ struct Fixture {
   }
 };
 
+// 去日志里取 source=engine && phase=exit && status=ok 的记录（与 replay 同判据，但保留 update 原文，
+// 用于断言引擎确实采集到了节点 update / load_history 回声不落）。
+std::vector<Json> engine_ok_exits(std::vector<Json> const& recs) {
+  std::vector<Json> out;
+  for (Json const& r : recs)
+    if (r.value("source", "") == "engine" && r.value("phase", "") == "exit" &&
+        r.value("status", "") == "ok")
+      out.push_back(r);
+  return out;
+}
+
 }  // namespace
 
-// 跨"两次命令"续跑：第一次留下历史，第二次（全新编译 + 全新进程语义）把它读回来。
+// 跨"两次命令"续跑：第一次在日志里留下结构事件（含 input 事件），第二次（全新编译 +
+// 全新进程语义）经 load_history replay 把它读回来。这是 ④ 的核心命题。
 TEST(WfHistoryNodes, second_run_sees_first_run_history) {
   TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
 
   // ---- 第一次"命令" ----
   {
     Fixture f;
     f.model.replies.push_back(cppchain::message::ai_message("记住了，你叫东俊"));
 
-    // 宿主先把本次输入写进会话文件（顺序：历史在前、本轮在后）
-    std::vector<Message> session{cppchain::message::human_message("我叫东俊")};
-    save_history_file(session_path(tmp.str(), "cli"), session, "cli");
-
+    SessionLog slog(path);
     auto wf = f.compile();
     ASSERT_TRUE(wf) << wf.error().message;
-    auto r = fire_once(*wf, f.config(tmp.str()));
+    FireOptions fo;
+    fo.log = &slog;
+    fo.input_messages = Json::array({cppchain::message::human_message("我叫东俊")});
+    auto r = fire_once(*wf, f.config(tmp.str()), std::move(fo));
     ASSERT_TRUE(r) << r.error().message;
 
     ASSERT_EQ(f.model.invoked, 1u);
     ASSERT_EQ(f.model.last_received.size(), 1u);  // 只看到本轮输入
     EXPECT_EQ(f.model.last_received[0].text(), "我叫东俊");
 
-    // save_history 落盘：应含 [human, ai]
-    auto saved = load_history_file(session_path(tmp.str(), "cli"));
-    ASSERT_EQ(saved.size(), 2u);
-    EXPECT_EQ(saved[0].text(), "我叫东俊");
-    EXPECT_EQ(saved[1].text(), "记住了，你叫东俊");
+    // 日志即历史：replay 应含 [human, ai]
+    auto const msgs = replay_session_messages(path);
+    ASSERT_EQ(msgs.size(), 2u);
+    EXPECT_EQ(msgs[0].text(), "我叫东俊");
+    EXPECT_EQ(msgs[1].text(), "记住了，你叫东俊");
+
+    // ---- ③ 的日志形状 ----
+    auto const recs = slog.records();
+    // 引擎写 input 事件（本轮输入进日志的机制，D 阶段"宿主先写文件"已废）
+    auto input_exit = std::find_if(recs.begin(), recs.end(), [](Json const& r) {
+      return r.value("node", "") == "__input__" && r.value("phase", "") == "exit";
+    });
+    ASSERT_NE(input_exit, recs.end());
+    EXPECT_EQ((*input_exit)["source"], "engine");
+    EXPECT_EQ((*input_exit)["update"]["messages"].size(), 1u);
+    // load_history 的 update 是回声 → 不落 update 键（否则 replay 重复追加整段消息）
+    for (Json const& e : engine_ok_exits(recs))
+      if (e.value("node_kind", "") == "load_history")
+        EXPECT_FALSE(e.contains("update")) << "load_history 的 update 不应落盘";
+    // 节点自报（source=node）：load_history 至少写了一条诊断
+    auto node_log = std::find_if(recs.begin(), recs.end(),
+                                 [](Json const& r) { return r.value("source", "") == "node"; });
+    EXPECT_NE(node_log, recs.end());
   }
 
   // ---- 第二次"命令"：全新 fixture（模拟新进程），只共享工作路径 ----
@@ -171,24 +202,23 @@ TEST(WfHistoryNodes, second_run_sees_first_run_history) {
     Fixture f;
     f.model.replies.push_back(cppchain::message::ai_message("你叫东俊"));
 
-    // 宿主把本轮输入追加进同一个会话文件
-    auto session = load_history_file(session_path(tmp.str(), "cli"));
-    session.push_back(cppchain::message::human_message("我叫什么？"));
-    save_history_file(session_path(tmp.str(), "cli"), session, "cli");
-
+    SessionLog slog(path);  // 跨进程续写：seq 应从上次继续，且不会丢上次的记录
     auto wf = f.compile();
     ASSERT_TRUE(wf) << wf.error().message;
-    auto r = fire_once(*wf, f.config(tmp.str()));
+    FireOptions fo;
+    fo.log = &slog;
+    fo.input_messages = Json::array({cppchain::message::human_message("我叫什么？")});
+    auto r = fire_once(*wf, f.config(tmp.str()), std::move(fo));
     ASSERT_TRUE(r) << r.error().message;
 
     // **核心断言**：模型这次看到的是 3 条 —— 上次的两条 + 本轮输入，且顺序正确
-    ASSERT_EQ(f.model.last_received.size(), 3u) << "load_history 没把上次的对话带回来";
+    ASSERT_EQ(f.model.last_received.size(), 3u) << "load_history 没把上次的对话 replay 回来";
     EXPECT_EQ(f.model.last_received[0].text(), "我叫东俊");
     EXPECT_EQ(f.model.last_received[1].text(), "记住了，你叫东俊");
     EXPECT_EQ(f.model.last_received[2].text(), "我叫什么？");
 
-    auto saved = load_history_file(session_path(tmp.str(), "cli"));
-    EXPECT_EQ(saved.size(), 4u);  // 又追加了一条 AI 回复
+    // 日志里又追加了一条 AI 回复
+    EXPECT_EQ(replay_session_messages(path).size(), 4u);
   }
 }
 
@@ -196,20 +226,31 @@ TEST(WfHistoryNodes, second_run_sees_first_run_history) {
 TEST(WfHistoryNodes, different_workspace_is_isolated) {
   TempDir a, b;
 
+  // a 里已有历史（模拟上次在 a 跑过：日志里留下一轮 input 事件）
+  {
+    SessionLog log_a(session_path(a.str(), "cli"));
+    log_a.engine_enter("r-1", "__input__", "input");
+    log_a.engine_exit("r-1", "__input__", "input", true, "ok", 0,
+                      Json{{"messages", Json::array({cppchain::message::human_message("A 的历史")})}});
+  }
+
+  // 这次跑在 b：log 也指向 b
   Fixture f;
   f.model.replies.push_back(cppchain::message::ai_message("ok"));
-  save_history_file(session_path(a.str(), "cli"),
-                    std::vector<Message>{cppchain::message::human_message("A 的历史")}, "cli");
-
+  SessionLog log_b(session_path(b.str(), "cli"));
   auto wf = f.compile();
   ASSERT_TRUE(wf) << wf.error().message;
-  auto r = fire_once(*wf, f.config(b.str()));  // 跑在 b
+  FireOptions fo;
+  fo.log = &log_b;
+  fo.input_messages = Json::array({cppchain::message::human_message("跑在 b")});
+  auto r = fire_once(*wf, f.config(b.str()), std::move(fo));
   ASSERT_TRUE(r) << r.error().message;
 
-  EXPECT_EQ(f.model.last_received.size(), 0u) << "b 里不该看到 a 的历史";
+  ASSERT_EQ(f.model.last_received.size(), 1u);
+  EXPECT_EQ(f.model.last_received[0].text(), "跑在 b") << "b 里不该看到 a 的历史";
 }
 
-// ---- 校验规则 ----
+// ---- 校验规则（与 D 阶段相同，仅随 save_history 删除收敛）----
 
 // VG9：load_history 出现在消费 messages 的节点之后 → 硬拒绝（读了没人用）
 TEST(WfHistoryNodes, validator_rejects_load_history_after_consumer) {
@@ -240,47 +281,7 @@ TEST(WfHistoryNodes, validator_requires_path) {
   EXPECT_NE(r.describe().find("VN11"), std::string::npos) << r.describe();
 }
 
-// ---- history_file 单元 ----
-
-TEST(WfHistoryFile, round_trip_and_fail_closed) {
-  TempDir tmp;
-  std::string const p = session_path(tmp.str(), "s1");
-  EXPECT_EQ(p, (tmp.dir / ".cppchain" / "session-s1.json").string());
-
-  // 文件不存在 → 空（首次使用是正常的）
-  EXPECT_TRUE(load_history_file(p).empty());
-
-  std::vector<Message> msgs{cppchain::message::human_message("你好"),
-                            cppchain::message::ai_message("你也好")};
-  save_history_file(p, msgs, "s1");
-  auto back = load_history_file(p);
-  ASSERT_EQ(back.size(), 2u);
-  EXPECT_EQ(back[0].text(), "你好");
-  EXPECT_EQ(back[1].text(), "你也好");
-
-  // 原子写：不留临时文件
-  EXPECT_FALSE(std::filesystem::exists(p + ".tmp"));
-
-  // 会话目录自带 .gitignore（内容 * + !.gitignore）→ 历史不会被误提交
-  auto const gi = tmp.dir / ".cppchain" / ".gitignore";
-  ASSERT_TRUE(std::filesystem::exists(gi));
-  {
-    std::ifstream in(gi);
-    std::string const body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    EXPECT_NE(body.find("*"), std::string::npos);
-    EXPECT_NE(body.find("!.gitignore"), std::string::npos);
-  }
-
-  // 损坏 → 默认抛（fail-closed，不静默丢历史）
-  {
-    std::ofstream out(p, std::ios::trunc);
-    out << "{ 这不是合法 JSON";
-  }
-  EXPECT_THROW((void)load_history_file(p), std::runtime_error);  // (void) 显式吞掉 nodiscard
-  EXPECT_TRUE(load_history_file(p, /*start_empty_on_corrupt=*/true).empty());
-}
-
-// 回归：**load_history/save_history 的 path/session 也是引用字段**，必须被 VR 段收集，
+// 回归：**load_history 的 path/session 也是引用字段**（④ 后仍成立）—— 必须被 VR 段收集，
 // 否则 B2 的 config 契约（VR4）看不到它们 —— 写错键名会一路通过校验，
 // 运行期 resolve 成 null、as_string 得到字符串 "null"，于是跑在一个叫 null 的目录上。
 TEST(WfHistoryNodes, config_keys_inside_history_fields_are_validated) {
@@ -295,4 +296,89 @@ TEST(WfHistoryNodes, config_keys_inside_history_fields_are_validated) {
   auto r = validate_json(ir_json, o);
   ASSERT_FALSE(r.ok()) << "history 节点里的引用没被收集 → 契约形同虚设";
   EXPECT_NE(r.describe().find("VR4"), std::string::npos) << r.describe();
+}
+
+// ---- session_log 单元（③）----
+
+TEST(WfSessionLog, append_seq_continues_across_reopen) {
+  TempDir tmp;
+  std::string const p = session_path(tmp.str(), "s1");
+  EXPECT_EQ(p, (tmp.dir / ".cppchain" / "session-s1.log.jsonl").string());
+  EXPECT_FALSE(std::filesystem::exists(p));  // 首次使用：文件还不存在
+
+  {
+    SessionLog slog(p);
+    slog.engine_enter("r-1", "think", "model");
+    slog.engine_exit("r-1", "think", "model", true, "ok", 3, Json{{"messages", Json::array()}});
+    slog.log("info", "诊断", Json{{"k", 1}});
+    auto recs = slog.records();
+    ASSERT_EQ(recs.size(), 3u);
+    EXPECT_EQ(recs[0]["seq"], 1);  // enter
+    EXPECT_EQ(recs[1]["seq"], 2);  // exit
+    EXPECT_EQ(recs[2]["seq"], 3);  // node 自报
+    EXPECT_EQ(recs[2]["source"], "node");
+    EXPECT_TRUE(recs[0]["ts"].is_string());
+  }
+
+  // 重新打开（模拟下一次命令）：seq 继续，不重复
+  {
+    SessionLog slog(p);
+    slog.engine_exit("r-2", "recall", "load_history", true, "ok", 0, Json::object());
+    auto recs = slog.records();
+    ASSERT_EQ(recs.size(), 4u);
+    EXPECT_EQ(recs[3]["seq"], 4);
+    EXPECT_EQ(recs[3]["run"], "r-2");
+  }
+}
+
+// 崩溃残迹：日志末尾是半行（非法 JSON）→ 打开时截断 + 计数，前面完好
+TEST(WfSessionLog, trims_trailing_partial_line) {
+  TempDir tmp;
+  std::string const p = session_path(tmp.str(), "s1");
+
+  {
+    SessionLog slog(p);
+    slog.engine_enter("r-1", "a", "model");
+    slog.engine_exit("r-1", "a", "model", true, "ok", 1, Json{{"messages", Json::array()}});
+  }
+  {  // 模拟崩溃：文件被截断成一个非法半行
+    std::ofstream out(p, std::ios::app);
+    out << "{\"seq\":3,\"source\":\"eng";  // 写到一半
+  }
+
+  {
+    SessionLog slog(p);
+    EXPECT_EQ(slog.truncated_lines(), 1u);
+    auto recs = slog.records();
+    ASSERT_EQ(recs.size(), 2u) << "半行应被清除，前面的记录完好";
+    EXPECT_EQ(recs[0]["seq"], 1);
+    EXPECT_EQ(recs[1]["seq"], 2);
+    // 续写 seq 从 3 继续（半行虽被丢弃，它声称的 seq 不占位）
+    slog.engine_exit("r-1", "b", "expr", true, "ok", 0, Json::object());
+    EXPECT_EQ(slog.records().back()["seq"], 3);
+  }
+}
+
+// replay 铁律（docs/12 §7.1）：只读 source=engine && phase=exit && status=ok；
+// 节点日志即使带了 update 字段也不进 replay；错误 exit 不携带 update。
+TEST(WfSessionLog, replay_ignores_non_engine_records) {
+  TempDir tmp;
+  std::string const p = session_path(tmp.str(), "s1");
+
+  {
+    SessionLog slog(p);
+    slog.engine_enter("r-1", "recall", "load_history");
+    slog.engine_exit("r-1", "recall", "load_history", true, "ok", 0,
+                     Json::object());  // load_history：回声，update 为空由调用方保证
+    slog.engine_exit("r-1", "think", "model", true, "ok", 0,
+                     Json{{"messages", Json::array({cppchain::message::ai_message("嗨")})}});
+    // 节点的"诊断日志"里塞了一个 messages 字段 —— 铁律要求它不进 replay
+    slog.log("info", "假的更新", Json{{"messages", Json::array({cppchain::message::ai_message("假")})}});
+    // 一条 error 退出：无 update，也不该重建任何东西
+    slog.engine_exit("r-1", "boom", "tool", false, "error", 5, Json::object());
+  }
+
+  auto const msgs = replay_session_messages(p);
+  ASSERT_EQ(msgs.size(), 1u);
+  EXPECT_EQ(msgs[0].text(), "嗨");  // 只有那条 status=ok 的 engine exit 进了 replay
 }

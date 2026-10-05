@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,6 +21,7 @@
 #include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
 #include "cppchain/workflow/refs.hpp"
+#include "cppchain/workflow/session_log.hpp"  // SessionSink
 
 namespace cppchain::workflow {
 
@@ -60,6 +62,10 @@ struct NodeType {
     std::function<std::string(std::string const&)> resolve;
     std::size_t registered = 0;  // 成功注册的图节点数（供 registered_nodes()）
     std::string error;
+    // 触发期注入的会话日志句柄（docs/12 §6.4 / §7）：节点 wrapper 捕获它，
+    // 运行期经 sink->nlog() 写 source=node 的诊断日志；引擎结构事件由 compiler 的
+    // LoggingStateGraph 统一埋点，节点不用管。可为空（不落日志的触发）。
+    std::shared_ptr<SessionSink> sink;
   };
   std::function<void(NodeIR const&, CompileContext&)> compile;
 

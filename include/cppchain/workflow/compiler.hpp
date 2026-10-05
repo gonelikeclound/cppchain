@@ -23,6 +23,7 @@
 #include "cppchain/tool/registry.hpp"
 #include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
+#include "cppchain/workflow/session_log.hpp"  // SessionLog / SessionSink
 
 namespace cppchain::workflow {
 
@@ -52,6 +53,9 @@ struct CompiledWorkflow {
   TriggerIR trigger;  // 元数据透传（非调度用）
   std::size_t graph_node_count_ = 0;  // 实际注册进图的节点数（label 不注册）
 
+  // 触发期注入的会话日志句柄（节点 wrapper 共享同一份；fire_once 写 log/run）。
+  std::shared_ptr<SessionSink> sink;
+
   [[nodiscard]] std::size_t registered_nodes() const { return graph_node_count_; }
 };
 
@@ -71,6 +75,23 @@ compile_workflow(WorkflowIR const& ir, tool::ToolRegistry const& registry,
 [[nodiscard]] std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf,
                                                            Json const& config,
                                                            std::string const& thread_id);
+
+// 触发期选项（docs/12 §6、§7）：每次触发可注入一个会话日志 + 本轮输入。
+struct FireOptions {
+  // 会话日志（宿主按工作路径开启，见 session_log.hpp）。null → 本次不落日志：
+  // 引擎不写结构事件、也不写 input 事件；节点经 sink->nlog() 拿到空 logger。
+  SessionLog* log = nullptr;
+  // 本轮输入消息（规范 JSON，Message 可序列化）。非空且 log 非空 → 引擎在 run 开头
+  // 写一条 node:"__input__" 的 exit 事件（source=engine），使顺序正确（历史在前、本轮在后）
+  // 且下个 run 的 replay 自动包含本轮输入 —— 不必像 D 阶段那样"宿主先写进会话文件"。
+  std::vector<Json> input_messages = {};
+  // 恢复续跑（与旧的 thread_id 重载等价的统一入口）。
+  std::string thread_id;
+};
+// 带 FireOptions 的触发：日志 + 输入 + （可选）线程恢复一次给齐。
+[[nodiscard]] std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf,
+                                                           Json const& config,
+                                                           FireOptions opts);
 
 // 连续触发多次（每次全新状态），返回每次的最终状态 —— 调度模拟 / 断言用。
 [[nodiscard]] std::vector<Json> simulate_fires(CompiledWorkflow& wf,

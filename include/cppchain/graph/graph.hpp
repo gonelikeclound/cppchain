@@ -68,7 +68,10 @@ class StateGraph {
  public:
   explicit StateGraph(state::StateSchema schema) : schema_(std::move(schema)) {}
 
-  StateGraph& add_node(std::string name, NodeFn fn);
+  // virtual 供 workflow 层包装节点（docs/12 §6.3：在"节点边界"统一写结构事件，
+  // 子类 LoggingStateGraph 只在 add_node 一处收口，9 个节点类型无需各自埋点）。
+  virtual ~StateGraph() = default;
+  virtual StateGraph& add_node(std::string name, NodeFn fn);
   StateGraph& add_edge(std::string from, std::string to);
   StateGraph& add_conditional_edges(std::string from, RouterFn router);
   StateGraph& set_entry_point(std::string name);

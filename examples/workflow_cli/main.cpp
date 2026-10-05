@@ -3,25 +3,26 @@
 //   ./workflow_cli --workflow wf.json "你的输入"
 //
 // 与 examples/session_resume 的区别：那个直接用 agent::Agent；这个走**完整 workflow** ——
-// history 是图上的普通节点（load_history → … → save_history），循环是图上的回边。
+// history 是图上的普通节点（load_history → …），agent 循环是图上的回边。
 //
-// 输入进 state 的路径（见 02-arch-design/11 §5.5）：**宿主先把本轮输入写进会话文件**，
-// workflow 再整体 load → 跑 → save。这样顺序天然正确（历史在前、本轮在后）；
-// 若改用"给引擎传初始状态"，add_messages 会把本轮输入放到历史**之前**，顺序就反了。
+// 输入进 state 的路径（docs/02-arch-design/12 §7，④ 起）：**本轮输入经 fire_once 写进会话日志**
+// （引擎在 run 开头写 input 事件，source=engine），load_history 对该日志做 replay 投影 ——
+// 顺序天然正确（历史在前、本轮在后），且不再单独 save_history（日志就是唯一事实来源）。
 //
-//   --workdir DIR   工作路径（决定会话落点；缺省 cwd）
+//   --workdir DIR   工作路径（决定会话日志落点；缺省 cwd）
 //   --session NAME  同路径下多段会话（缺省 "cli"）
 //   --workflow FILE 手写 IR（必填；生成端产出这些节点是 F 阶段的事）
 //   --show          不起模型，只打印已存历史
-//   --reset         清空该会话的历史
+//   --reset         清空该会话的日志
 //
 // 需要 .env：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL（企业代理见 LLM_CA_BUNDLE）
 #include <cppchain/http/curl_multi_transport.hpp>
+#include <cppchain/message/serializer.hpp>  // Message ↔ JSON（input_messages 需要）
 #include <cppchain/model/openai/openai_chat_model.hpp>
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/components.hpp>
-#include <cppchain/workflow/history_file.hpp>
 #include <cppchain/workflow/ir.hpp>
+#include <cppchain/workflow/session_log.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -71,8 +72,8 @@ std::string last_ai_text(Json const& state) {
 }
 
 void print_session(std::string const& path) {
-  auto const msgs = load_history_file(path);
-  std::println("会话文件: {}（{} 条消息）", path, msgs.size());
+  auto const msgs = replay_session_messages(path);  // 历史即日志的 replay 投影（④）
+  std::println("会话日志: {}（{} 条消息）", path, msgs.size());
   for (auto const& m : msgs)
     std::println("  [{}] {}", std::string(message::role_str(m.type)), clip(m.text(), 160));
 }
@@ -153,13 +154,6 @@ int main(int argc, char** argv) {
   comps.toolsets["all"] = all_tools;
   comps.toolsets["ts"] = all_tools;
 
-  // ---- 本轮输入先落进会话文件（顺序：历史在前、本轮在后）----
-  if (!input.empty()) {
-    auto msgs = load_history_file(path);
-    msgs.push_back(message::human_message(input));
-    save_history_file(path, msgs, session);
-  }
-
   // ---- 编译 + 触发 ----
   std::ifstream wf_in(workflow_file);
   Json ir_json;
@@ -183,12 +177,23 @@ int main(int argc, char** argv) {
     std::println("编译失败: {}", wf.error().message);
     return 2;
   }
-
   std::println("工作路径: {}", std::filesystem::absolute(workdir).string());
-  std::println("会话文件: {}", path);
-  std::println("本次启动已存消息: {} 条", load_history_file(path).size());
 
-  auto r = fire_once(*wf, Json{{"workspace", workdir}, {"session", session}});
+  // ---- 会话日志：宿主按工作路径开启（.cppchain/session-<name>.log.jsonl）----
+  // ④（docs/12 §7）：日志是历史的事实来源；本轮输入经 FireOptions 由引擎写成 input 事件，
+  // fire_once 之后不需要保存任何东西 —— 没有 save_history 了。
+  SessionLog slog(path);
+  std::println("会话日志: {}", path);
+  std::println("已有历史: {} 条消息", replay_session_messages(path).size());
+
+  FireOptions fo;
+  fo.log = &slog;
+  if (!input.empty()) {
+    Json inp = Json::array();
+    inp.push_back(message::human_message(input));
+    fo.input_messages = std::move(inp);
+  }
+  auto r = fire_once(*wf, Json{{"workspace", workdir}, {"session", session}}, std::move(fo));
   if (!r) {
     std::println("触发失败: {}", r.error().message);
     return 1;
@@ -196,6 +201,6 @@ int main(int argc, char** argv) {
 
   std::string const answer = last_ai_text(*r);
   std::println("\n回答: {}", answer.empty() ? "(无文本回复)" : clip(answer, 500));
-  std::println("会话已更新: {} 条消息", load_history_file(path).size());
+  std::println("会话已更新: {} 条消息", replay_session_messages(path).size());
   return 0;
 }

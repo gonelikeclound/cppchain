@@ -10,11 +10,9 @@
       "system_prompt": "你是命令行助手，回答简短直接；记住用户此前说过的事。",
       "next": "route" },
     { "id": "route", "kind": "route", "on": "last_ai_outcome",
-      "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "persist" },
+      "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "_turn_end" },
       "default": "_fail" },
     { "id": "act", "kind": "run_tools", "next": "loop" },
-    { "id": "loop", "goto": "L", "max": 4 },
-    { "id": "persist", "kind": "save_history",
-      "path": "@config.workspace", "session": "@config.session", "next": "_turn_end" }
+    { "id": "loop", "goto": "L", "max": 4 }
   ]
 }
