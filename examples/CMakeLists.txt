@@ -24,7 +24,7 @@ set(GRAPH_EXAMPLE_TARGETS graph_basics)
 # 主动智能 workflow 生成端到端验收（真机 LLM）
 set(WF_EXAMPLE_TARGETS wf_eval proactive)
 # 需要 agent 库（真机）的 demo
-set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools history_agent research_chat agent_cli)
+set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools history_agent research_chat agent_cli session_resume)
 # M8 子代理 demo：额外依赖 graph 库（as_agent_node / StateGraph）
 set(SUBAGENT_EXAMPLE_TARGETS subagent_ask_expert subagent_workers subagent_handoff)
 list(APPEND AGENT_EXAMPLE_TARGETS ${SUBAGENT_EXAMPLE_TARGETS})
@@ -44,6 +44,7 @@ if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS stale_state)
   list(APPEND EXAMPLE_TARGETS live_tools)
   list(APPEND EXAMPLE_TARGETS history_agent)
+  list(APPEND EXAMPLE_TARGETS session_resume)
   list(APPEND EXAMPLE_TARGETS research_chat)
   list(APPEND EXAMPLE_TARGETS agent_cli)
   list(APPEND EXAMPLE_TARGETS subagent_ask_expert)

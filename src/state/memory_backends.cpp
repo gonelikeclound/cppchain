@@ -92,6 +92,73 @@ std::vector<StateSnapshot> MemoryCheckpointer::list(std::string const& thread_id
   return out;
 }
 
+// ---- 持久化（供 FileCheckpointer 复用）----
+// 格式：内部两张表按**复合键原样**存取（key_of(thread,ns) 与 key + "|" + checkpoint_id）。
+// 不做键的解析/重组 —— 原样往返最不容易出错，且键里的 '|' 只造成歧义、不造成丢失。
+nlohmann::json MemoryCheckpointer::dump() const {
+  nlohmann::json snaps = nlohmann::json::object();
+  for (auto const& [key, vec] : snapshots_) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (StateSnapshot const& s : vec) {
+      // parent_checkpoint_id 必须**显式**写成 string 或 null：
+      // nlohmann 对 std::optional 没有内建支持，直接塞会走"数组构造路径"——
+      // nullopt 与 engaged 都变成 `[]`，回读时按 is_string() 守卫就全丢了
+      // （实测：跨文件往返后快照链的 parent 全部消失）。
+      arr.push_back(nlohmann::json{
+          {"values", s.values},
+          {"next", s.next},
+          {"config", s.config},
+          {"metadata", s.metadata},
+          {"parent_checkpoint_id",
+           s.parent_checkpoint_id ? nlohmann::json(*s.parent_checkpoint_id) : nlohmann::json(nullptr)}});
+    }
+    snaps[key] = std::move(arr);
+  }
+  nlohmann::json wr = nlohmann::json::object();
+  for (auto const& [key, vec] : writes_) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (WriteRecord const& w : vec)
+      arr.push_back(nlohmann::json{{"task_id", w.task_id},
+                                   {"channel", w.channel},
+                                   {"value", w.value}});
+    wr[key] = std::move(arr);
+  }
+  return nlohmann::json{{"version", 1}, {"counter", counter_}, {"snapshots", std::move(snaps)},
+                        {"writes", std::move(wr)}};
+}
+
+void MemoryCheckpointer::load(nlohmann::json const& j) {
+  snapshots_.clear();
+  writes_.clear();
+  counter_ = j.value("counter", 0L);
+  if (j.contains("snapshots") && j["snapshots"].is_object())
+    for (auto it = j["snapshots"].begin(); it != j["snapshots"].end(); ++it) {
+      std::vector<StateSnapshot> vec;
+      for (nlohmann::json const& e : it.value()) {
+        StateSnapshot s;
+        s.values = e.value("values", nlohmann::json::object());
+        if (e.contains("next") && e["next"].is_array())
+          for (nlohmann::json const& n : e["next"])
+            if (n.is_string()) s.next.push_back(n.get<std::string>());
+        s.config = e.value("config", nlohmann::json::object());
+        s.metadata = e.value("metadata", nlohmann::json::object());
+        if (auto const& p = e.find("parent_checkpoint_id");
+            p != e.end() && p->is_string())
+          s.parent_checkpoint_id = p->get<std::string>();
+        vec.push_back(std::move(s));
+      }
+      snapshots_[it.key()] = std::move(vec);
+    }
+  if (j.contains("writes") && j["writes"].is_object())
+    for (auto it = j["writes"].begin(); it != j["writes"].end(); ++it) {
+      std::vector<WriteRecord> vec;
+      for (nlohmann::json const& e : it.value())
+        vec.push_back(WriteRecord{e.value("task_id", ""), e.value("channel", ""),
+                                  e.value("value", nlohmann::json())});
+      writes_[it.key()] = std::move(vec);
+    }
+}
+
 void MemoryCheckpointer::delete_thread(std::string const& thread_id) {
   std::string const prefix = thread_id + "|";
   for (auto it = snapshots_.begin(); it != snapshots_.end();)

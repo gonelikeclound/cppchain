@@ -81,11 +81,60 @@ class MemoryCheckpointer final : public Checkpointer {
 
   [[nodiscard]] std::size_t thread_count() const { return snapshots_.size(); }
 
+  // 持久化（对标 agent::MemoryJournal 的同名方法）：FileCheckpointer 复用它们，
+  // 也可自行落盘 / 回读。
+  [[nodiscard]] nlohmann::json dump() const;
+  void load(nlohmann::json const& j);
+
  private:
   static std::string key_of(std::string const& thread_id, std::string const& ns);
   std::unordered_map<std::string, std::vector<StateSnapshot>> snapshots_;  // key → 按时间正序
   std::unordered_map<std::string, std::vector<WriteRecord>> writes_;       // key|checkpoint_id
   long counter_ = 0;
+};
+
+// ---- 落盘实现：把快照链按**工作路径**持久化 ----
+//
+// 为什么需要它：MemoryCheckpointer 一退出进程就没了，"跨命令连续对话"随之失效。
+// 形态与 agent::FileJournal 完全一致：内嵌一个 MemoryCheckpointer 承载数据结构，
+// 构造时载入、每次变更后**原子落盘**（写临时文件 → rename，同目录 rename 在 POSIX 上原子）。
+//
+// 安全默认 **fail-closed**：文件存在但损坏时抛异常，而不是"静默从空历史开始"——
+// 后者等于悄悄把用户的会话历史丢掉。
+class FileCheckpointer final : public Checkpointer {
+ public:
+  enum class OnCorrupt { Throw, StartEmpty };
+
+  explicit FileCheckpointer(std::string path, OnCorrupt on_corrupt = OnCorrupt::Throw);
+
+  std::string put(std::string const& thread_id, std::string const& checkpoint_ns,
+                  std::optional<std::string> parent_checkpoint_id, Json values,
+                  std::vector<std::string> next, Json metadata) override;
+
+  void put_writes(std::string const& thread_id, std::string const& checkpoint_ns,
+                  std::string const& checkpoint_id, std::vector<WriteRecord> writes) override;
+  std::vector<WriteRecord> get_writes(std::string const& thread_id, std::string const& checkpoint_ns,
+                                      std::string const& checkpoint_id) override;
+
+  std::optional<StateSnapshot> get_tuple(std::string const& thread_id,
+                                         std::string const& checkpoint_ns,
+                                         std::optional<std::string> checkpoint_id) override;
+
+  std::vector<StateSnapshot> list(std::string const& thread_id, std::string const& checkpoint_ns,
+                                  std::size_t limit) override;
+
+  void delete_thread(std::string const& thread_id) override;
+
+  [[nodiscard]] std::string const& path() const { return path_; }
+  [[nodiscard]] std::size_t saves() const { return saves_; }  // 落盘次数（便于观测）
+  [[nodiscard]] std::size_t thread_count() const { return inner_.thread_count(); }
+
+ private:
+  void persist();  // 原子写盘
+
+  std::string path_;
+  MemoryCheckpointer inner_;
+  std::size_t saves_ = 0;
 };
 
 }  // namespace cppchain::state

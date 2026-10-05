@@ -67,7 +67,8 @@ target_compile_options(cppchain_tool PRIVATE -Wall -Wextra -Wpedantic)
 # ---- M5: cppchain_state（状态 schema/reducer + Checkpointer + Store）----
 add_library(cppchain_state STATIC
   state/state.cpp
-  state/memory_backends.cpp)
+  state/memory_backends.cpp
+  state/file_checkpointer.cpp)
 
 target_include_directories(cppchain_state PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
