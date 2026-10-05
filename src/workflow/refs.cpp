@@ -106,7 +106,6 @@ std::vector<RefScan> scan_refs(std::string_view s) {
     }
 
     // "$<id>.result.f"
-    std::size_t const node_start = i;
     std::string_view id_part = take_ident(s, i);
     if (id_part.empty()) {
       malformed(begin, i, "'$' 后必须是 id 或 '_'");

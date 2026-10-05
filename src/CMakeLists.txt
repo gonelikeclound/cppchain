@@ -98,10 +98,8 @@ if(CPPCHAIN_BUILD_HTTP)
   target_compile_options(cppchain_http_curl PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# ---- 工具链冒烟（随首模块落地后会替换/保留） ----
-add_executable(smoke smoke/main.cpp)
-target_link_libraries(smoke PRIVATE cppchain_message)
-target_compile_options(smoke PRIVATE -Wall -Wextra -Wpedantic)
+# （M0 的工具链冒烟 src/smoke 已在 M1 落地后移除 —— 它的职责由 300+ 项测试取代，
+#   保留只会多一个无人依赖的 target。）
 # ---- M6: cppchain_graph（极简 Graph 引擎）----
 # 只含引擎本身：仅依赖 state。图引擎是最可独立复用的一层，不应被上层拖累。
 add_library(cppchain_graph STATIC

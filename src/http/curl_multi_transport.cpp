@@ -102,6 +102,10 @@ struct CurlMultiTransport::Impl {
     running.store(false);
     if (multi) curl_multi_wakeup(multi);
     if (io.joinable()) io.join();
+    // 尚未被事件循环取走的请求（send 之后、取出之前就析构了）：同样要释放，
+    // 否则它们的 easy/slist 句柄会泄漏。
+    for (auto& req : incoming) release_request(*req);
+    incoming.clear();
     for (auto& [handle, req] : active) {
       curl_multi_remove_handle(multi, handle);
       release_request(*req);
