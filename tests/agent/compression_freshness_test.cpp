@@ -56,6 +56,29 @@ TEST(TrimBoundary, moves_back_when_boundary_would_orphan_a_tool_message) {
   expect_protocol_valid(msgs);  // ← 修复前这里会是孤儿 ToolMessage
 }
 
+// 回归：max_messages=0（"不留历史"）会让 drop_count == msgs.size()，
+// 原先 safe_boundary 直接 msgs[b] 越界（本机 dev 配置带 _GLIBCXX_ASSERTIONS → abort；
+// 关掉断言则是静默越界读）。
+// 期望：不崩，语义为"全部折叠"——只留系统提示 + 一条摘要。
+TEST(TrimBoundary, zero_max_messages_folds_everything_without_out_of_bounds) {
+  std::vector<Message> msgs{message::system_message("sys"), human("q1")};
+  auto const [ai, tool] = tool_round("c1", "balance=100", false);
+  msgs.push_back(ai);
+  msgs.push_back(tool);
+
+  // 边界落在末尾（全部折叠）：不得越界，原样返回 size
+  EXPECT_EQ(TrimHistory::safe_boundary(msgs, /*keep_from=*/1, /*desired=*/msgs.size()),
+            msgs.size());
+
+  TrimHistory trim(0);
+  trim.before_model(msgs);  // 修复前：这里 abort / 越界读
+  expect_protocol_valid(msgs);
+  ASSERT_EQ(msgs.size(), 2u);  // 系统提示 + 摘要
+  EXPECT_EQ(msgs.front().type, Role::System);
+  EXPECT_NE(msgs.back().text().find("历史摘要"), std::string::npos);
+  EXPECT_EQ(trim.compressions(), 1u);
+}
+
 TEST(TrimBoundary, trimmed_history_still_satisfies_protocol_with_many_rounds) {
   std::vector<Message> msgs{message::system_message("sys")};
   for (int i = 0; i < 4; ++i) {

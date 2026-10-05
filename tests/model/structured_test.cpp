@@ -55,6 +55,28 @@ nlohmann::json weather_schema() {
                         {"required", nlohmann::json::array({"city", "temp_c"})}};
 }
 
+// 协议不变式（OpenAI wire 形态）：带 tool_calls 的 assistant 消息之后，必须紧跟覆盖其
+// 全部 id 的 tool 消息 —— 真实端点就是这么校验的，违反直接 400。
+// （对应 message::validate_sequence 的 wire 视角；FakeTransport 不做校验，所以要在这里查。）
+void expect_tool_call_groups_closed(nlohmann::json const& body) {
+  auto const& msgs = body["messages"];
+  for (std::size_t i = 0; i < msgs.size(); ++i) {
+    if (msgs[i].value("role", "") != "assistant") continue;
+    if (!msgs[i].contains("tool_calls") || msgs[i]["tool_calls"].empty()) continue;
+
+    std::vector<std::string> missing;
+    for (auto const& tc : msgs[i]["tool_calls"])
+      missing.push_back(tc.at("id").get<std::string>());
+
+    for (std::size_t j = i + 1; j < msgs.size() && !missing.empty(); ++j) {
+      if (msgs[j].value("role", "") != "tool") break;  // 中途换角色 = 撕裂
+      std::erase(missing, msgs[j].value("tool_call_id", std::string{}));
+    }
+    EXPECT_TRUE(missing.empty())
+        << "assistant(tool_calls) 未被紧随的 tool 消息闭合（真实端点会 400）";
+  }
+}
+
 struct Fixture {
   std::shared_ptr<http::FakeTransport> transport = std::make_shared<http::FakeTransport>();
   std::shared_ptr<openai::OpenAIChatModel> model;
@@ -173,6 +195,22 @@ TEST(StructuredOutput, retries_after_schema_violation_and_feeds_back_error) {
   auto second = nlohmann::json::parse(f.transport->requests()[1].body);
   EXPECT_NE(second["messages"].dump().find("不符合要求"), std::string::npos);
   EXPECT_NE(second["messages"].dump().find("temp_c"), std::string::npos);
+}
+
+// 回归：ToolCall 策略的重试回喂必须保持协议闭合。
+// 失败的那次 reply 带 tool_calls，直接追加会让 assistant(tool_calls) 成为孤儿 →
+// 真实端点 400。修复前本用例失败（第二条消息是 human 而非 tool）。
+TEST(StructuredOutput, retry_feed_back_closes_the_tool_call_protocol) {
+  Fixture f;
+  f.transport->push(tool_call_script(R"({"city":"SF","temp_c":"warm"})"));  // 类型错 → 触发重试
+  f.transport->push(tool_call_script(R"({"city":"SF","temp_c":18})"));
+
+  StructuredOutput so(*f.model, weather_schema());
+  auto r = so.invoke(f.ask(), CallOptions{});
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+
+  ASSERT_EQ(f.transport->requests().size(), 2u);
+  expect_tool_call_groups_closed(nlohmann::json::parse(f.transport->requests()[1].body));
 }
 
 TEST(StructuredOutput, retries_after_missing_tool_call) {

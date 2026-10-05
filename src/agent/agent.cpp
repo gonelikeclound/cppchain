@@ -98,6 +98,10 @@ std::size_t TrimHistory::safe_boundary(std::vector<Message> const& msgs, std::si
                                         std::size_t desired) {
   // 折叠边界必须落在"安全点"：保留区不能以孤儿 ToolMessage 开头，
   // 也不能出现"ToolMessage 在保留区、其 AI(tool_calls) 被折掉"的撕裂。
+  //
+  // 边界等于末尾（全部折叠，如 max_messages=0）时没有保留区，也就不存在撕裂 ——
+  // 直接返回；且 msgs[b] 会越界，必须先挡住。
+  if (desired >= msgs.size()) return msgs.size();
   std::size_t b = desired;
   while (b > keep_from) {
     if (msgs[b].type == Role::Tool) {  // 边界正好落在工具结果上 → 左移，把它的上下文也留下

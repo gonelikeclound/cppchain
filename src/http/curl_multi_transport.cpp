@@ -110,15 +110,15 @@ struct CurlMultiTransport::Impl {
     if (multi) curl_multi_cleanup(multi);
   }
 
-  Request* make_request(HttpRequest const& spec, HttpCallbacks cbs, core::CancelToken token) {
+  // easy 句柄由调用方（send）创建并传入：初始化失败时 cbs 还握在 send 手里，能按契约报错。
+  Request* make_request(HttpRequest const& spec, CURL* easy, HttpCallbacks cbs,
+                        core::CancelToken token) {
     auto req = std::make_unique<Request>();
     req->cbs = std::move(cbs);
     req->token = std::move(token);
     req->url = spec.url;
     req->body = spec.body;
-
-    req->easy = curl_easy_init();
-    if (!req->easy) return nullptr;
+    req->easy = easy;
 
     for (auto const& h : spec.headers) req->headers = curl_slist_append(req->headers, h.c_str());
 
@@ -209,11 +209,14 @@ CurlMultiTransport::CurlMultiTransport() : impl_(std::make_unique<Impl>()) {}
 CurlMultiTransport::~CurlMultiTransport() = default;
 
 void CurlMultiTransport::send(HttpRequest const& req, HttpCallbacks cbs, core::CancelToken token) {
-  Request* raw = impl_->make_request(req, std::move(cbs), std::move(token));
-  if (!raw) {
-    // easy 初始化失败：立刻报错（不进入事件循环）
+  // easy 句柄先建：失败时 cbs 尚在本函数手里，可按契约回调 on_error。
+  // 若在此静默 return，上层（OpenAIChatModel::invoke 等待"恰好一次"回调）会永久阻塞。
+  CURL* easy = curl_easy_init();
+  if (easy == nullptr) {
+    if (cbs.on_error) cbs.on_error(HttpError{"curl_easy_init failed", false});
     return;
   }
+  Request* raw = impl_->make_request(req, easy, std::move(cbs), std::move(token));
   {
     std::lock_guard g(impl_->mutex);
     impl_->incoming.emplace_back(raw);

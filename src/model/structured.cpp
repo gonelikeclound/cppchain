@@ -130,6 +130,12 @@ std::expected<nlohmann::json, ModelError> StructuredOutput::invoke(
 
     // 失败回喂：保留模型自己的输出 + 一条带违规说明的纠正指令
     convo.push_back(*reply);
+    // 协议不变式（message.hpp validate_sequence）：带 tool_calls 的 AI 消息之后，必须紧跟
+    // 覆盖其全部 id 的 ToolMessage，否则真实端点直接 400。ToolCall 策略下失败的那次 reply
+    // 恰恰带 tool_calls（args 不合规），必须逐个补齐回执，纠正文案才发得出去。
+    for (auto const& call : reply->tool_calls) {
+      convo.push_back(message::tool_message("error: " + last_violation, call.id, "error"));
+    }
     convo.push_back(message::human_message(
         "你上一次的输出不符合要求：" + last_violation +
         "\n请重新输出：只给出满足 JSON Schema 的 JSON。"));
