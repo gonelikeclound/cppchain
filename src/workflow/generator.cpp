@@ -246,24 +246,57 @@ struct WorkflowGenerator::Impl {
         msgs.push_back(human_message("输出不是合法 JSON。只输出一个 JSON 对象（不包围栏、不解释）。"));
         continue;
       }
-      if (obj->contains("plan")) {
-        PlanOutcome o;
-        o.k = PlanOutcome::K::Plan;
-        o.plan = (*obj)["plan"];
-        return o;
+      // 三态分派。纪律与 IR 的节点分类一致：**歧义即错**（同时给多个决定性键不按
+      // "第一个命中"定），且每一态的形状都要真的成立 —— 否则宁可重试，
+      // 不能把坏输出当成功返回（原先 questions 为空 / plan 非对象都会被当成成功）。
+      Json const& o = *obj;
+      int const hits = (o.contains("plan") ? 1 : 0) + (o.contains("questions") ? 1 : 0) +
+                       (o.contains("reject") ? 1 : 0);
+      if (hits > 1) {
+        msgs.push_back(human_message(
+            "三态必须**只选一个**（plan / questions / reject），你给了多个。请重出。"));
+        continue;
       }
-      if (obj->contains("questions") && (*obj)["questions"].is_array()) {
-        PlanOutcome o;
-        o.k = PlanOutcome::K::Clarify;
-        o.clarify.questions = questions_from_json((*obj)["questions"]);
-        o.clarify.round = 1;
-        return o;
+      if (o.contains("plan")) {
+        if (!o["plan"].is_object()) {
+          msgs.push_back(human_message("\"plan\" 必须是对象。请重出。"));
+          continue;
+        }
+        PlanOutcome po;
+        po.k = PlanOutcome::K::Plan;
+        po.plan = o["plan"];
+        return po;
       }
-      if (obj->contains("reject") && (*obj)["reject"].is_object()) {
-        PlanOutcome o;
-        o.k = PlanOutcome::K::Reject;
-        o.reason = (*obj)["reject"].value("reason", "未说明原因");
-        return o;
+      if (o.contains("questions")) {
+        std::vector<ClarifyQuestion> qs =
+            o["questions"].is_array() ? questions_from_json(o["questions"])
+                                      : std::vector<ClarifyQuestion>{};
+        // 空集（含"每项都缺 id 被过滤光"）一律视为不合法：否则会话会落盘一份
+        // 用户无法回答的空问卷，只能拿空 answers 续跑。
+        if (qs.empty()) {
+          msgs.push_back(human_message(
+              "\"questions\" 必须是非空数组，且每项含非空 id（text 可选）。请重出。"));
+          continue;
+        }
+        PlanOutcome po;
+        po.k = PlanOutcome::K::Clarify;
+        po.clarify.questions = std::move(qs);
+        po.clarify.round = 1;
+        return po;
+      }
+      if (o.contains("reject")) {
+        if (!o["reject"].is_object()) {
+          msgs.push_back(human_message("\"reject\" 必须是对象。请重出。"));
+          continue;
+        }
+        PlanOutcome po;
+        po.k = PlanOutcome::K::Reject;
+        // reason 也来自模型：非字符串就退回默认，别让 value() 抛类型错穿出去
+        if (auto it = o["reject"].find("reason"); it != o["reject"].end() && it->is_string())
+          po.reason = it->get<std::string>();
+        else
+          po.reason = "未说明原因";
+        return po;
       }
       msgs.push_back(human_message(
           "输出不合法：必须三态之一（{\"plan\":...} | {\"questions\":[...]} | {\"reject\":...}）。请重出。"));

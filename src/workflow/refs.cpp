@@ -175,6 +175,20 @@ namespace {
 }  // namespace
 
 Json resolve_parameter(Json const& value, Json const& state) {
+  // 容器必须**递归**：validator 的 VR1/VR2 是递归走进数组/对象的（它认这些嵌套引用合法），
+  // 解析端若只看顶层，嵌套引用就会以字面量 "$src.result.price" 原样丢给工具 ——
+  // 校验通过的引用静默失效，传错数据还不报错。
+  if (value.is_array()) {
+    Json out = Json::array();
+    for (Json const& e : value) out.push_back(resolve_parameter(e, state));
+    return out;
+  }
+  if (value.is_object()) {
+    Json out = Json::object();
+    for (auto it = value.begin(); it != value.end(); ++it)
+      out[it.key()] = resolve_parameter(it.value(), state);
+    return out;
+  }
   if (!value.is_string()) return value;
 
   std::string const s = value.get<std::string>();

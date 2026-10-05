@@ -59,7 +59,8 @@ struct RefScan {
 [[nodiscard]] Json resolve_ref(Ref const& r, Json const& state);
 
 // 解析一个参数值：完整引用 → 直接取 JSON 值；含引用的模板串 → 文本替换；
-// 其余（数字/布尔/对象/数组/无引用文本）原样返回。
+// **数组/对象递归下去**（与校验器的递归 walk 对齐，否则嵌套引用会静默失效）；
+// 其余（数字/布尔/无引用文本）原样返回。
 [[nodiscard]] Json resolve_parameter(Json const& value, Json const& state);
 
 // 校验用：字符串里是否有语法损坏的 $/@config 片段；有 → 说明此问题。

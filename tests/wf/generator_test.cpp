@@ -222,3 +222,35 @@ TEST(WfGenerator, budget_fail_closed) {
   ASSERT_EQ(r.kind, WorkflowGenerationResult::Kind::Rejected);
   EXPECT_NE(r.rejected->reason.find("预算"), std::string::npos);
 }
+// 回归：plan 段的三态分派必须 fail-closed。
+// 原先 questions 为空、questions 项缺 id（会被过滤光）、plan 非对象，都会被当成
+// "成功"返回 —— 坏输出被当结果用（如落盘一份用户无法回答的空问卷）。
+// 纪律与 IR 的节点分类一致：**歧义即错**，不按"第一个命中"定。
+TEST(WfGenerator, plan_stage_rejects_malformed_tri_state) {
+  tool::ToolRegistry reg = make_registry();
+
+  for (char const* bad : {R"({"questions":[]})",
+                          R"({"questions":[{"text":"几点？"}]})",  // 缺 id → 过滤光
+                          R"({"plan":42})",                       // plan 非对象
+                          R"({"plan":{"steps":[]},"reject":{"reason":"x"}})"}) {  // 歧义
+    ScriptedChatModel model;
+    model.replies = {bad, kPlanJson, kIrJson};
+    WorkflowGenerator gen(model, reg);
+    auto r = gen.run("每天 8 点查价格，低于 800 通知我");
+    EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Generated) << "坏输出被放行: " << bad;
+    EXPECT_EQ(gen.usage().plan_calls, 2);  // 坏输出被拦下 → 回喂重试了一次
+  }
+}
+
+// reject.reason 也来自模型：非字符串不能把类型错抛出生成器。
+TEST(WfGenerator, reject_with_non_string_reason_falls_back) {
+  ScriptedChatModel model;
+  model.replies = {R"({"reject":{"reason":42}})"};
+  tool::ToolRegistry reg = make_registry();
+  WorkflowGenerator gen(model, reg);
+
+  auto r = gen.run("收到淘宝推送时提醒我比价");
+  EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Rejected);
+  ASSERT_TRUE(r.rejected);
+  EXPECT_EQ(r.rejected->reason, "未说明原因");
+}

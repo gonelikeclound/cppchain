@@ -247,3 +247,53 @@ TEST(WfCompiler, simulate_multi_fire_independent) {
   ASSERT_EQ(states.size(), 2u);
   EXPECT_EQ(sinks.notifications.size(), 2u);  // 每次触发干净独立
 }
+// 回归：parameters 里**嵌套在数组/对象中**的引用也必须在运行期解析。
+// validator 的 VR1/VR2 是递归走进容器的（所以嵌套引用会被校验为合法），
+// 而 resolve_parameter 原先对非字符串直接原样返回 —— 嵌套引用以字面量
+// "$src.result.price" 丢给工具，校验过的引用静默失效（传错数据且不报错）。
+TEST(WfCompiler, nested_refs_inside_containers_are_resolved) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  // 探针：原样回吐收到的 arguments，用于断言"运行期究竟传了什么"
+  reg.add(cppchain::tool::make_tool(
+      "args_probe", "回吐收到的参数",
+      cppchain::tool::SchemaBuilder()
+          .prop("top", "string", "顶层引用", false)
+          .prop("list", "array", "数组内的引用", false)
+          .prop("obj", "object", "对象内的引用", false)
+          .build(),
+      [](Json const& args, tool::ToolContext&) -> std::expected<Json, tool::ToolError> {
+        return args;
+      }));
+
+  Json ir_json = Json{
+      {"id", "wf_nested_ref"},
+      {"trigger", Json{{"source", "time"}, {"timing", Json{{"kind", "schedule"},
+                                                           {"schedule", "0 8 * * *"}}}}},
+      {"nodes", Json::array(
+                    {Json{{"id", "src"}, {"tool", "fetch_price"},
+                          {"parameters", Json{{"item_id", "@config.product_id"}}},
+                          {"output_schema", Json{{"price", "number"}}}, {"next", "sink"}},
+                     Json{{"id", "sink"},
+                          {"tool", "args_probe"},
+                          {"parameters",
+                           Json{{"top", "$src.result.price"},
+                                {"list", Json::array({"$src.result.price", "literal"})},
+                                {"obj", Json{{"nested", "$src.result.price"}}}}},
+                          {"output_schema", Json::object()},
+                          {"next", "_turn_end"}}})}};
+
+  auto ir = WorkflowIR::parse(ir_json);
+  ASSERT_TRUE(ir) << ir.error();
+  auto wf = compile_workflow(*ir, reg);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  auto r = fire_once(*wf, Json{{"product_id", "p1"}});
+  ASSERT_TRUE(r) << r.error().message;
+
+  Json const& got = (*r)["results"]["sink"];
+  EXPECT_EQ(got["top"].get<int>(), 799);            // 顶层（原本就对）
+  EXPECT_EQ(got["list"][0].get<int>(), 799);        // 修复前是字面量 "$src.result.price"
+  EXPECT_EQ(got["obj"]["nested"].get<int>(), 799);  // 修复前是字面量
+  EXPECT_EQ(got["list"][1].get<std::string>(), "literal");  // 无引用项原样保留
+}
