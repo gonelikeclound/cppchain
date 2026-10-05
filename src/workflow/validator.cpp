@@ -51,6 +51,10 @@ namespace {
 inline constexpr char kTurnEnd[] = "_turn_end";
 inline constexpr char kEndId[] = "__end__";
 
+// on_error.retry 的上界。retry 是在**一次节点调用内**同步循环的（compiler.cpp），
+// graph 的 max_steps 只数 super-step、完全管不到这里 —— 没有上界就等于能把进程挂死。
+inline constexpr int kMaxRetry = 10;
+
 // ---- 小工具 ----
 
 bool is_ident(std::string_view s) {
@@ -386,8 +390,23 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   // ---- VH：on_error ----
   for (NodeIR const& n : ir.nodes)
     if (n.on_error) {
-      if (n.on_error->retry < 0)
-        c.err("VH1", "tool 节点 '" + n.id + "' 的 on_error.retry 必须 ≥ 0");
+      // retry 必须在 [0, kMaxRetry] 内。判定回读 raw 的**原始数值**，而不是解析结果：
+      // ir.cpp 用 get<int>() 取值，超出 int 范围的数字会被静默截断
+      // （3000000000 → 负数；超 64 位 → 0），只看解析结果会漏判。
+      bool retry_bad = n.on_error->retry < 0;
+      Json const* oe = nullptr;
+      if (auto it = n.raw.find("on_error"); it != n.raw.end() && it->is_object()) oe = &(*it);
+      if (oe != nullptr) {
+        if (auto it = oe->find("retry"); it != oe->end()) {
+          Json const& rv = *it;
+          // 必须是整数（浮点/字符串一律不收）；上限很小，用 double 判值域足够。
+          retry_bad = !(rv.is_number_integer() || rv.is_number_unsigned()) ||
+                      rv.get<double>() < 0 || rv.get<double>() > kMaxRetry;
+        }
+      }
+      if (retry_bad)
+        c.err("VH1", "tool 节点 '" + n.id + "' 的 on_error.retry 必须是 0–" +
+                         std::to_string(kMaxRetry) + " 的整数");
       if (n.on_error->fallback) {
         std::string const& t = *n.on_error->fallback;
         bool const exists =
@@ -495,49 +514,36 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     if (entry.empty() || c.index.find(entry) == c.index.end())
       c.err("VG6", "入口无法解析（nodes[0] 是 label 但无续接）");
 
-    // 前向可达集
-    std::vector<std::string> reached;
+    // 前向可达集：从入口出发，沿 next/then/else **以及 on_error.fallback** 展开到不动点。
+    //
+    // 早先的实现分两段走：先只沿前向边做 DFS，再把"可达节点声明的 fallback 目标"补进来，
+    // 但补进来的目标**不展开其后继** —— 于是"只能经 fallback 到达"的下游会被误判成死节点，
+    // 合法 IR 被拒（逼生成器空转修复轮）。统一成一个 worklist 就没有这个缝。
+    // 另外 fallback 目标同样要过 resolve_target：它可能是一个 label。
     std::unordered_map<std::string, bool> seen;
     std::vector<std::string> stack;
-    if (!entry.empty() && c.index.count(entry)) {
-      stack.push_back(entry);
-      seen[entry] = true;
-    }
+    auto push = [&](std::string const& t) {
+      if (t != kEndId && !seen[t]) {
+        seen[t] = true;
+        stack.push_back(t);
+      }
+    };
+    if (!entry.empty() && c.index.count(entry)) push(entry);
+
     while (!stack.empty()) {
       std::string const v = stack.back();
       stack.pop_back();
-      reached.push_back(v);
       auto it = c.kind.find(v);
       if (it == c.kind.end() || it->second == NodeKind::Label) continue;
+      NodeIR const& node = ir.nodes[c.index.at(v)];
       if (it->second == NodeKind::Tool) {
-        std::string t = resolve_target(c, ir.nodes[c.index.at(v)].next);
-        if (t != kEndId && !seen[t]) {
-          seen[t] = true;
-          stack.push_back(t);
-        }
+        push(resolve_target(c, node.next));
+        // 失败路径也是一条可达路径：目标要解析，且它自己的后继要接着展开
+        if (node.on_error && node.on_error->fallback)
+          push(resolve_target(c, *node.on_error->fallback));
       } else if (it->second == NodeKind::Expr) {
-        for (std::string const& t_ : {resolve_target(c, ir.nodes[c.index.at(v)].then),
-                                      resolve_target(c, ir.nodes[c.index.at(v)].else_)})
-          if (t_ != kEndId && !seen[t_]) {
-            seen[t_] = true;
-            stack.push_back(t_);
-          }
-      }
-    }
-    // fallback 目标豁免：**可达节点**声明的 fallback 目标视为可达（迭代到不动点）
-    {
-      bool changed = true;
-      while (changed) {
-        changed = false;
-        for (NodeIR const& m : ir.nodes)
-          if (m.kind == NodeKind::Tool && m.on_error && m.on_error->fallback) {
-            std::string const t = *m.on_error->fallback;
-            if (t != kTurnEnd && seen[m.id] && !seen[t]) {
-              seen[t] = true;
-              reached.push_back(t);
-              changed = true;
-            }
-          }
+        push(resolve_target(c, node.then));
+        push(resolve_target(c, node.else_));
       }
     }
     // 死节点检查

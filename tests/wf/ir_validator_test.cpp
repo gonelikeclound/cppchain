@@ -299,3 +299,55 @@ TEST(WfValidator, label_as_join_target) {
   ValidationResult r = validate_json(j, ValidatorOptions{&tools()});
   EXPECT_TRUE(r.ok()) << r.describe();
 }
+// 回归：on_error.retry 必须有上界。
+// retry 是在**一次节点调用内**同步循环的（compiler.cpp），graph 的 max_steps 只数
+// super-step、管不到这里 —— 没有上界就等于能把进程挂死。
+// 注意判定要回读 raw：ir.cpp 的 get<int>() 对超 int 范围的数字是静默截断。
+TEST(WfValidator, on_error_retry_is_bounded) {
+  auto with_retry = [](Json const& retry) {
+    Json j = minimal_price_ir();
+    j["nodes"][0]["on_error"] = Json{{"retry", retry}};
+    return validate_json(j, ValidatorOptions{&tools()});
+  };
+
+  EXPECT_TRUE(with_retry(0).ok());
+  EXPECT_TRUE(with_retry(2).ok());
+  EXPECT_TRUE(with_retry(10).ok());
+
+  // 越界 / 非整数 / 超 int 范围（会静默截断，旧实现漏判）
+  for (Json const& bad : {Json(-1), Json(11), Json(2.5), Json("2"), Json(2000000000),
+                          Json(10000000000000000000ULL)}) {
+    ValidationResult r = with_retry(bad);
+    EXPECT_FALSE(r.ok()) << "应被拒绝但通过了: " << bad.dump();
+    EXPECT_NE(r.describe().find("VH1"), std::string::npos) << bad.dump();
+  }
+}
+
+// 回归：on_error.fallback 的**下游**也必须是可达的。
+// 早先只把 fallback 目标标记为 seen、不展开它的后继 → "只能经 fallback 到达"的节点
+// 被误判成死节点，合法 IR 被拒（逼生成器空转修复轮）。
+TEST(WfValidator, fallback_successors_count_as_reachable) {
+  Json j = Json{
+      {"id", "wf_fb_chain"},
+      {"trigger", Json{{"source", "time"},
+                       {"timing", Json{{"kind", "schedule"}, {"schedule", "0 * * * *"}}}}},
+      {"nodes", Json::array(
+                    {Json{{"id", "main"}, {"tool", "fetch_price"},
+                          {"parameters", Json{{"item_id", "@config.product_id"}}},
+                          {"output_schema", Json{{"price", "number"}}}, {"next", "_turn_end"},
+                          {"on_error", Json{{"retry", 1}, {"fallback", "backup"}}}},
+                     Json{{"id", "backup"}, {"tool", "echo"}, {"parameters", Json{{"v", "b"}}},
+                          {"output_schema", Json{{"value", "string"}}}, {"next", "after"}},
+                     Json{{"id", "after"}, {"tool", "echo"}, {"parameters", Json{{"v", "a"}}},
+                          {"output_schema", Json{{"value", "string"}}}, {"next", "_turn_end"}}})}};
+
+  ValidationResult r = validate_json(j, ValidatorOptions{&tools()});
+  EXPECT_TRUE(r.ok()) << r.describe();  // 修复前：VG7 误报 'after' 为死节点
+
+  // 对照：真正没人到达的节点仍要被判死（别把护栏一起修没了）
+  j["nodes"].push_back(Json{{"id", "orphan"}, {"tool", "echo"},
+                            {"output_schema", Json{{"value", "string"}}}, {"next", "_turn_end"}});
+  ValidationResult r2 = validate_json(j, ValidatorOptions{&tools()});
+  EXPECT_FALSE(r2.ok());
+  EXPECT_NE(r2.describe().find("VG7"), std::string::npos);
+}
