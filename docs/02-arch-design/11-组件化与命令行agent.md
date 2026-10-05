@@ -158,7 +158,7 @@ IR 也长了 —— 这直接影响 §8 的 Q4（初版不让生成器产出这�
 | kind | 语义 | 写哪里 | 复用 |
 |---|---|---|---|
 | `model` | 一次 LLM 调用，回复追进 messages | `messages` | 从 M7 `Agent::invoke` 抽出"调模型"那一段 |
-| `route` | 按**封闭词表**的条件路由（§5.2） | — | 编译成 `add_conditional_edges` |
+| `route` | **match 分派**：按封闭词表的 outcome 选下一跳（§5.2） | — | 编译成 `add_conditional_edges`（相当于 path_map） |
 | `run_tools` | 执行最后一条 AI 消息的 tool_calls | `messages` | **`tool::ToolNode` 已实现**，只差通道语义 |
 | `load_history` | 工作路径 → messages | `messages` | 新增（§7 的落盘纪律可复用） |
 | `save_history` | messages → 工作路径 | — | 新增 |
@@ -167,20 +167,76 @@ IR 也长了 —— 这直接影响 §8 的 Q4（初版不让生成器产出这�
 `tool` 节点是**业务语义**（调某个工具，产物进 `results[<id>]`），
 `run_tools` 是**对话语义**（跑模型刚请求的那批工具，产物进 `messages`）。两者不可混用。
 
-### 5.2 `route`：封闭词表（选定方案 a）
+### 5.2 `route`：match 分派（先确认模型层产出什么）
+
+设计路由之前先查证**模型层实际会产出哪些状态**（本项目的纪律：不凭印象、看代码+实测）。
+
+#### 5.2.1 确认结果
+
+| 产出 | 载体 | 目前**谁在分支** |
+|---|---|---|
+| 文本回复 | `content`(TextBlock) | ✅ 隐式（`tool_calls` 空即结束） |
+| 工具调用 | `Message.tool_calls` | ✅ **Agent 循环的唯一判据** |
+| **非法工具调用** | `Message.invalid_tool_calls` | ❌ **全仓无人消费** |
+| 结束原因 | `response_metadata["finish_reason"]` | ❌ **只记录，从不分支** |
+| 推理内容 | `ReasoningBlock` | ❌ 无人分支 |
+| **模型/传输错误** | `ModelError`（`std::expected`） | ❌ **到不了 route** |
+
+两条已核对代码的事实：
+
+1. `Agent::invoke` 的退出判据**只有一条**：`if (reply->tool_calls.empty()) return *reply;`
+2. `invalid_tool_calls` 由 `wire.hpp` / `chunk.hpp` 产出、有单测覆盖，
+   但**没有任何决策读它**（`has_tool_calls()` 只被 `validate_sequence` 用）。
+
+**顺带查出一个真缺口**：`parse_response` / `finalize_chunk` 对"args 解析失败"或"没拿到
+name"的处理是**只塞进 `invalid_tool_calls`、不塞进 `tool_calls`**。于是
+`tool_calls.empty()` 为真 → 循环正常结束 → **模型请求了工具但参数坏了，agent 静默把它当作
+最终答复返回**。这是当前实现里一个真实的静默失败点。
+
+#### 5.2.2 结论：实际是**三分支**，改用 match
+
+```
+tool_calls 非空          → run_tools
+invalid_tool_calls 非空  → ？（当前静默吞掉）
+两者都空                 → 结束（文本回复）
+```
+
+所以 `then`/`else` 的二分**会漏掉一档**。改用分派表：
 
 ```jsonc
 { "id": "route", "kind": "route",
-  "when": "last_ai_has_tool_calls",   // ← 封闭词表，初版只有这一个
-  "then": "act", "else": "persist" }
+  "on": "last_ai_outcome",            // ← 封闭词表：见下
+  "cases": {
+    "tool_calls":         "act",
+    "invalid_tool_calls": "_fail",    // ← 不静默：显式失败终止
+    "text":               "persist"
+  },
+  "default": "persist"                // ← **强制显式**（见 §6）
+}
 ```
 
-**为什么是封闭词表而不是扩 expr 语言**：expr 的定位是"标量比较"，明确**无函数**
-（`11-ir-syntax.md` §6）。而 `tool_calls` 是消息级结构、不是 `$<id>.result.<字段>` 能表达的。
-加内建谓词等于扩语言；用封闭词表则**未知 `when` 直接在编译期拒绝**，与项目
-"白名单 / 歧义即错"的纪律一致（对标 `VN6` 对未知工具的做法）。
+**判别式用 cppchain 自己归一化过的 outcome**（`tool_calls` / `invalid_tool_calls` / `text`），
+**不用端点给的自由字符串**。理由：分层上"端点差异由适配层吃住"，上游只该看到归一化结果 ——
+项目有前科（`response_format=json_schema` 在目标端点直接 400）。
 
-后续若需要新条件（如"连续 N 轮调同一个工具就停"），往词表里加，不改文法。
+**`invalid_tool_calls` 这一档先做 fail-closed**：走保留名 `_fail`（语义：以错误终止本次触发，
+错误信息带 IR id + 节点 id，细节就在 `state.messages` 里可查）。**修复节点**（把错误回喂给模型
+让它重发，像 M4 结构化输出那样）留作后续 —— **现状是"静默假装成功"，先让它变可见，
+比先让它变聪明重要**。
+
+`_fail` 是与 `_turn_end` 并列的一个小保留名，编译期映射为"抛 `WorkflowError::Runtime`"，
+约 5 行；但它是通用的（不止这一处想要"显式失败"）。
+
+#### 5.2.3 为什么是封闭词表而不是扩 expr 语言
+
+expr 的定位是"标量比较"，明确**无函数**（`11-ir-syntax.md` §6）；而 `tool_calls` /
+`invalid_tool_calls` 是**消息级结构**，不是 `$<id>.result.<字段>` 能表达的。加内建谓词等于扩
+语言；用封闭词表则**未知 `on` / 未知 `cases` 键直接在编译期拒绝**，与"白名单 / 歧义即错"的
+纪律一致（对标 `VN6` 对未知工具的做法）。
+
+**`finish_reason` 初版不作判别式**：它确实含额外信息（`length` = 被 max_tokens 截断，属
+"成功但不完整"，当前会被当成完整答案），但取值是**端点相关的自由字符串**，要拿它做路由
+必须先在目标端点实测取值分布。留作词表扩展（§8 Q10）。
 
 ### 5.3 完整 IR 样例（ReAct + 历史）
 
@@ -196,8 +252,11 @@ IR 也长了 —— 这直接影响 §8 的 Q4（初版不让生成器产出这�
       "model": "main", "tools": "research_toolset",        // 组件名，§5.4
       "next": "route" },
 
-    { "id": "route", "kind": "route", "when": "last_ai_has_tool_calls",
-      "then": "act", "else": "persist" },
+    { "id": "route", "kind": "route", "on": "last_ai_outcome",
+      "cases": { "tool_calls": "act",
+                 "invalid_tool_calls": "_fail",   // ← 不静默失败（见 §5.2.2）
+                 "text": "persist" },
+      "default": "persist" },
 
     { "id": "act", "kind": "run_tools", "next": "loop" },  // ← 不直接指回 L（见下）
 
@@ -248,10 +307,16 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
   五者与既有节点一样受单链约束（该有 `next` 的必须有）。
 - **新增校验规则**（编号待定，接 `VN` 段）：
   · 组件名（`model`/`tools`）必须在注册表里（对标 VN6）；
-  · `route.when` 必须在**封闭词表**里（未知 → 拒绝）；
-  · `route.then/else` 必须指向存在的节点（VG1 复用）；
+  · `route.on` 必须在**封闭词表**里（`tool_calls` / `invalid_tool_calls` / `text`）；
+  · `route.cases` 的**键**同属该词表（未知键 → 拒绝）；
+  · **`route.cases` 必须覆盖全部 outcome，或显式给出 `default`** ——
+    不允许"漏一档就静默走 else"（这正是本设计要消灭的失败模式）；两者皆无 → 拒绝；
+  · `cases` / `default` 的值必须是存在的节点 id 或保留名（`_turn_end` / `_fail`）（VG1 复用）；
   · `load_history` 的 `path`/`session` 形状合法（VR 段规则复用）；
   · **顺序检查**：`load_history` 必须出现在消费 messages 的节点之前（硬拒绝，见 §8 Q8）。
+- **保留名**：`_turn_end`（正常终止）之外新增 **`_fail`**（以错误终止本次触发）。
+  编译期映射为抛 `WorkflowError::Runtime`，错误信息带 IR id + 节点 id —— 细节在
+  `state.messages` 里可查。它通用（不止 `invalid_tool_calls` 一处想要"显式失败"）。
 - **文件布局**：`<workspace>/.cppchain/session-<name>.json`（沿用验证 A 的形状）。
   建议同时写 `.cppchain/.gitignore`（内容 `*`），避免会话历史被误提交。
 - **落盘纪律**（沿用验证 A）：**原子写**（临时文件 → `rename`）；**fail-closed**
@@ -313,7 +378,10 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
 | Q7 | `model` 节点的工具集怎么给 | 内联列表 / 按名字引用 tool 组件 / 整个注册表 | **按名字引用**（内联会让工具集散落在 IR；整个注册表则失去 M3 工具检索的意义） |
 | Q8 | `load_history` 顺序不对 | 硬拒绝 / 告警 | **硬拒绝**（与"歧义即错"一致） |
 | Q9 | `save_history` 落盘时机 | 每次执行落一次 / 仅结束时 | **每次落一次**（崩溃不丢），但会放大 Q5 |
-| Q10 | **`route` 词表要不要扩** | 只 `last_ai_has_tool_calls` / 加"连续 N 轮同工具即停" | **先只一个**，按需加 |
+| Q10 | **`route` 的 outcome 词表要不要扩** | 先只三档 / 加 `finish_reason` 细分（如 `truncated`）/ 加"连续 N 轮同工具即停" | **先只三档**；截断档须先在目标端点**实测** `finish_reason` 取值分布（项目有"标准有≠实现有"的前科） |
+| Q11 | `invalid_tool_calls` 那一档怎么处置 | 修复节点（回喂重发）/ fail-closed 终止 | ✅ **已定**：先 fail-closed 到 `_fail`；修复节点留后续（先让它可见，比先让它变聪明重要） |
+| Q12 | `route` 的形状 | `then`/`else` 二分 / **match 分派** | ✅ **已定**：match —— 实测是三分支，二分必漏一档（§5.2.1） |
+| Q13 | `_fail` 保留名 | 加 / 不加（用别的方式表达失败） | ✅ **已定**：加（与 `_turn_end` 并列的小保留名，通用） |
 
 ---
 
@@ -323,7 +391,7 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
 |---|---|---|---|
 | **A** ✅ | 落盘续跑验证（跨进程读回） | 无 | 已完成 |
 | **B** ✅ | 本文（形状与取舍） | A | — |
-| **C** | `model`/`route`/`run_tools` 三节点 + 循环（ReAct 打通，**先不接 history**） | B | IR 扩张；需同步 IR 语法文档 |
+| **C** | `model`/`route`(match)/`run_tools` 三节点 + 循环 + `_fail` 保留名（ReAct 打通，**先不接 history**） | B | IR 扩张；需同步 IR 语法文档 |
 | **D** | `load_history`/`save_history` + CLI（`--workdir`/`--session`/`--show`/`--workflow`） | C | 小 |
 | **E** | 组件注册表完善（model/agent/memory）+ memory 落盘 | C | 小 |
 | **F** | 教生成器产出这些节点（Q4 放开） | C+D + 生成端评测方法 | 生成质量与 IR 表达力互相纠缠 |
@@ -337,7 +405,9 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
 
 - [ ] `NodeKind::{Model, Route, RunTools, LoadHistory, SaveHistory}` + IR 解析 + 校验规则
 - [ ] ReAct 循环跑通：`model → route → run_tools → goto` 有界回跳，每步落快照
-- [ ] `route.when` 封闭词表 + 未知值编译期拒绝
+- [ ] `route` match 分派：`on` / `cases` 键走封闭词表，未知值编译期拒绝
+- [ ] `route` 校验：必须覆盖全部 outcome 或显式给 `default`（禁止"漏一档静默走 else"）
+- [ ] `_fail` 保留名：`invalid_tool_calls` 一档显式失败终止，不再静默当最终答复
 - [ ] `run_tools` 复用 `tool::ToolNode`，产物写 `messages` 通道
 - [ ] middleware 可挂到 `model`（before_model）与 `run_tools`（审批/after_tool）
 - [ ] `load_history`/`save_history` + `<workspace>/.cppchain/` 布局与被忽略
