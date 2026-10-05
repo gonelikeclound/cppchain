@@ -90,8 +90,9 @@ std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
           if (nn.is_string()) in.nodes.push_back(nn.get<std::string>());
       if (in.lib.empty())
         return err("imports 里的条目缺 lib（库是信任单元，库名必须显式）");
-      if (in.nodes.empty())
-        return err("imports['" + in.lib + "'] 必须显式列出节点名（A1 枚举落地前省略即报错）");
+      // nodes 可省略（A1 枚举时整库加载，见 plugin_node.hpp）；列了就做形状检查。
+      for (std::string const& nm : in.nodes)
+        if (nm.empty()) return err("imports['" + in.lib + "'] 的节点名不能为空");
       out.imports.push_back(std::move(in));
     }
   }
@@ -141,8 +142,11 @@ Json WorkflowIR::to_json() const {
   Json out{{"id", id}, {"trigger", std::move(t)}, {"nodes", std::move(nodes)}};
   if (!imports.empty()) {
     Json arr = Json::array();
-    for (ImportIR const& im : imports)
-      arr.push_back(Json{{"lib", im.lib}, {"nodes", im.nodes}});
+    for (ImportIR const& im : imports) {
+      Json entry{{"lib", im.lib}};
+      if (!im.nodes.empty()) entry["nodes"] = im.nodes;  // 省略（A1 整库）语义往返要保住
+      arr.push_back(std::move(entry));
+    }
     out["imports"] = std::move(arr);
   }
   return out;

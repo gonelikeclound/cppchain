@@ -305,15 +305,13 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   }
 
   // ---- VI：imports 形状（⑤ 动态库导入）----
-  // 真正的"库存在 / 符号取得到 / 版本匹配"由 load_workflow_imports 在 parse 前做（fail-closed）；
-  // 这里兜底程序化构造的 IR（不经 parse 直接 validate 的）。
+  // 真正的"库存在 / 符号取得到 / 版本匹配 / 枚举"由 load_workflow_imports 在 parse 前做
+  // （fail-closed）；这里兜底程序化构造的 IR（不经 parse 直接 validate 的）。
+  // nodes 可省略（A1 枚举整库，⑤b）；列了就必须是标识符。
   for (std::size_t i = 0; i < ir.imports.size(); ++i) {
     ImportIR const& im = ir.imports[i];
     std::string const where = "imports[" + std::to_string(i) + "]";
-    if (im.lib.empty())
-      c.err("VI1", where + " 缺 lib（库是信任单元，库名必须显式）");
-    if (im.nodes.empty())
-      c.err("VI1", where + " 必须显式列出节点名（A1 枚举落地前省略即报错）");
+    if (im.lib.empty()) c.err("VI1", where + " 缺 lib（库是信任单元，库名必须显式）");
     for (std::string const& nm : im.nodes)
       if (!is_ident(nm))
         c.err("VI1", where + " 的节点名 '" + nm + "' 非法（应为 [A-Za-z][A-Za-z0-9_]*）");

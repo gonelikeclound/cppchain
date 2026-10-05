@@ -13,6 +13,7 @@
 //   --session NAME  同路径下多段会话（缺省 "cli"）
 //   --workflow FILE 手写 IR（必填；生成端产出这些节点是 F 阶段的事）
 //   --allow-import  放行 IR 顶部 imports 声明的动态库节点（§5.5：默认拒绝）
+//   --list-nodes    只枚举每个 import 库导出的节点名（读 .so 文件、不执行代码）后退出
 //   --show          不起模型，只打印已存历史
 //   --reset         清空该会话的日志
 //
@@ -84,7 +85,7 @@ void print_session(std::string const& path) {
 
 int main(int argc, char** argv) {
   std::string workdir = ".", session = "cli", workflow_file, input;
-  bool reset = false, show = false, allow_import = false;
+  bool reset = false, show = false, allow_import = false, list_nodes = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string const a = argv[i];
@@ -92,11 +93,12 @@ int main(int argc, char** argv) {
     else if (a == "--session" && i + 1 < argc) session = argv[++i];
     else if (a == "--workflow" && i + 1 < argc) workflow_file = argv[++i];
     else if (a == "--allow-import") allow_import = true;
+    else if (a == "--list-nodes") list_nodes = true;
     else if (a == "--reset") reset = true;
     else if (a == "--show") show = true;
     else if (a == "--help" || a == "-h") {
       std::println("用法: workflow_cli --workflow FILE [--workdir DIR] [--session NAME] "
-                   "[--allow-import] [--reset] [--show] \"你的输入\"");
+                   "[--allow-import] [--list-nodes] [--reset] [--show] \"你的输入\"");
       return 0;
     } else input = input.empty() ? a : input + " " + a;
   }
@@ -110,6 +112,35 @@ int main(int argc, char** argv) {
   }
   if (show) {
     print_session(path);
+    return 0;
+  }
+
+  // --list-nodes：只枚举每个 import 库导出的节点名（读 ELF 文件、**不 dlopen 库** →
+  // 不执行任何库代码，也就不需要 --allow-import），打印后退出。必须排在"未给输入"提前
+  // 返回之前（否则无输入时到不了这里）。
+  if (list_nodes) {
+    std::ifstream in(workflow_file);
+    Json j;
+    try {
+      in >> j;
+    } catch (std::exception const& e) {
+      std::println("workflow JSON 解析失败: {}", e.what());
+      return 2;
+    }
+    if (j.contains("imports")) {
+      for (Json const& imp : j["imports"]) {
+        std::string const lib = imp.value("lib", "");
+        auto e = enumerate_plugin_nodes(lib);
+        if (!e) {
+          std::println("枚举失败 {}: {}", lib, e.error());
+          return 2;
+        }
+        std::println("[{}]:", lib);
+        for (std::string const& nm : *e) std::println("  {}", nm);
+      }
+    } else {
+      std::println("（IR 没有 imports）");
+    }
     return 0;
   }
 

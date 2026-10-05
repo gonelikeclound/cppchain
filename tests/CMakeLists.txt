@@ -114,6 +114,12 @@ target_include_directories(node_demo_plugin PRIVATE ${PROJECT_SOURCE_DIR}/includ
 target_include_directories(node_demo_plugin SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
 target_compile_options(node_demo_plugin PRIVATE -Wall -Wextra -Wpedantic)
 
+# ⑤b（A1）E2E 用的"全好"库：省略 nodes 走枚举时它能整库干净加载
+add_library(node_enum_plugin SHARED plugin_demo/node_enum_plugin.cpp)
+target_include_directories(node_enum_plugin PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(node_enum_plugin SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(node_enum_plugin PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(workflow_tests
   wf/expr_test.cpp
   wf/refs_test.cpp
@@ -139,10 +145,11 @@ target_link_libraries(workflow_tests PRIVATE
 # （StateGraph::* / message::* 等在 .so 里保持未定义，加载时从这里找）
 target_link_options(workflow_tests PRIVATE -Wl,--export-dynamic)
 
-# 给测试 bake 进 .so 的绝对路径（dlopen 用）；依赖关系保证先构建
+# 给测试 bake 进 .so 的绝对路径（dlopen/枚举用）；依赖关系保证先构建
 target_compile_definitions(workflow_tests PRIVATE
-  CPPCHAIN_NODE_DEMO_SO="$<TARGET_FILE:node_demo_plugin>")
-add_dependencies(workflow_tests node_demo_plugin)
+  CPPCHAIN_NODE_DEMO_SO="$<TARGET_FILE:node_demo_plugin>"
+  CPPCHAIN_NODE_ENUM_SO="$<TARGET_FILE:node_enum_plugin>")
+add_dependencies(workflow_tests node_demo_plugin node_enum_plugin)
 
 target_compile_options(workflow_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(workflow_tests)

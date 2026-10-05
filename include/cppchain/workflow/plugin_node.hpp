@@ -64,11 +64,22 @@ class DynamicNode {
 [[nodiscard]] std::expected<void, std::string> load_dynamic_node(std::string const& lib_path,
                                                                  std::string const& name);
 
+// A1（⑤b，docs/12 §5.2）：**只扫这个库自己的 `.dynsym`**，枚举它导出的
+// `graph_node_<name>_creator` 名单（按名排序去重）。实现是**读 ELF 文件**（.dynsym/.dynstr
+// 区段），不是 `dl_iterate_phdr` —— 后者遍历整个进程，会把别的库的同名符号也扫进来。
+//
+// 不 dlopen → **不执行库代码**，所以 `--list-nodes`（检查一番）不需要 `--allow-import`。
+// 限制：ELF64 且 little-endian（本平台）；section header 被 strip 掉的库会枚举不到（→ 报错，
+// 调用方应回退到显式列名）。返回的每个名字是合法 C 标识符。
+[[nodiscard]] std::expected<std::vector<std::string>, std::string>
+enumerate_plugin_nodes(std::string const& lib_path);
+
 // 顶层 `imports` 的解析 + 加载 + 注册（fail-closed），CLI/宿主在 parse 前调用：
 //   · 无 imports 键 → 成功（什么都不做）；
 //   · 有 imports 但 !allow_import → 拒绝（§5.5：加载 .so = 任意代码执行，需显式放行）；
-//   · 逐个库、逐个节点 dlopen/dlsym/校验；**任一失败 → 整体失败，不注册任何东西**
-//     （避免部分注册后 IR 判别产生半吊子状态）；
+//   · 每条 import：`nodes` 显式 → 逐个 dlsym 校验；`nodes` 省略 → A1 枚举该库全部创建者
+//     （枚举失败即拒）。**任一节点失败 → 整体失败，不注册任何东西**（避免部分注册的
+//     半吊子状态）；重复导入幂等（已加载的跳过）；
 //   · host_log 非空 → 把"本次加载了什么"写进会话日志（§5.5：事后可查）。
 // 返回实际注册的节点数。
 [[nodiscard]] std::expected<std::size_t, std::string>

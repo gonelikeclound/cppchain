@@ -176,22 +176,23 @@ TEST(WfPlugin, plugin_ref_texts_feed_vr_contract) {
 
 // ---- imports 形状（parse 层 + validator 的 VI1 兜底）----
 
-TEST(WfPlugin, imports_shape_rejected_at_parse) {
+TEST(WfPlugin, imports_empty_nodes_rejected_by_loader) {
+  // 空数组 ≠ 省略（省略走 A1 枚举）；空数组是类型错误，loader 拒
   auto raw = sentiment_ir();
-  raw["imports"][0]["nodes"] = Json::array();  // A1 前省略节点名 = 报错
-  auto r = WorkflowIR::parse(raw);
+  raw["imports"][0]["nodes"] = Json::array();
+  auto r = load_workflow_imports(raw, true, nullptr);
   ASSERT_FALSE(r);
-  EXPECT_NE(r.error().find("显式列出节点名"), std::string::npos) << r.error();
+  EXPECT_NE(r.error().find("空数组"), std::string::npos) << r.error();
 }
 
 TEST(WfPlugin, imports_shape_violates_vi1) {
-  // 程序化构造的 IR（不经 parse）→ validator 的 VI1 兜底形状
+  // 程序化构造的 IR（不经 parse）→ validator 的 VI1 兜底形状（缺 lib）
   WorkflowIR ir;
   ir.id = "x";
   ir.trigger.source = "time";
   ir.trigger.kind = "schedule";
   ir.trigger.schedule = "0 8 * * *";
-  ir.imports.push_back(ImportIR{"libx.so", {}});
+  ir.imports.push_back(ImportIR{/*lib=*/"", /*nodes=*/{"ultra"}});
   NodeIR node;  // 逐字段赋值（designated 初始化会触发 -Wmissing-field-initializers）
   node.id = "L";
   node.kind = NodeKind::Label;
@@ -201,4 +202,69 @@ TEST(WfPlugin, imports_shape_violates_vi1) {
   auto r = validate(ir, {});
   ASSERT_FALSE(r.ok());
   EXPECT_NE(r.describe().find("VI1"), std::string::npos) << r.describe();
+}
+
+// ---- ⑤b（A1）：枚举本库自带符号 + 省略 nodes 走整库加载 ----
+// 用"全好"库 tests/plugin_demo/node_enum_plugin.cpp（blink / nudge）：
+// 枚举的每个节点都能干净加载；带坏 creator 的库（node_demo_plugin）省略加载会整体失败，
+// 这种库只能显式列名 —— 这正是"库是信任单元"的本意。
+
+TEST(WfPlugin, enumerate_lists_defined_creators) {
+  // A1 只扫**本库定义**的 graph_node_*_creator（不看进程里其它库的同名符号）
+  auto e = enumerate_plugin_nodes(CPPCHAIN_NODE_DEMO_SO);
+  ASSERT_TRUE(e) << e.error();
+  std::vector<std::string> const expect{"ancient", "misnamed", "sentiment"};
+  EXPECT_EQ(*e, expect);
+}
+
+TEST(WfPlugin, enumerate_reads_file_not_executes) {
+  // 枚举是读 ELF 文件：即使库里掺坏 creator，也不执行任何库代码 → --list-nodes 无需放行
+  auto e = enumerate_plugin_nodes(CPPCHAIN_NODE_DEMO_SO);
+  ASSERT_TRUE(e) << e.error();
+  EXPECT_EQ(e->size(), 3u);
+}
+
+TEST(WfPlugin, import_without_nodes_enumerates_and_runs) {
+  Json node = Json::object();
+  node["id"] = "b";
+  node["kind"] = "blink";
+  node["next"] = "_turn_end";
+  Json import = Json::object();
+  import["lib"] = CPPCHAIN_NODE_ENUM_SO;  // 省略 nodes → A1 枚举整库
+  Json const raw = Json{{"id", "wf_a1"},
+                        {"trigger", Json{{"source", "time"},
+                                         {"timing", Json{{"kind", "schedule"},
+                                                         {"schedule", "0 8 * * *"}}}}},
+                        {"imports", Json::array({std::move(import)})},
+                        {"nodes", Json::array({std::move(node)})}};
+
+  auto loaded = load_workflow_imports(raw, /*allow_import=*/true, nullptr);
+  ASSERT_TRUE(loaded) << loaded.error();
+  EXPECT_GE(*loaded, 2u);  // blink + nudge
+  EXPECT_NE(node_type_of_name("blink"), nullptr);
+  EXPECT_NE(node_type_of_name("nudge"), nullptr);
+
+  auto ir = WorkflowIR::parse(raw);
+  ASSERT_TRUE(ir) << ir.error();
+  EXPECT_EQ(ir->nodes[0].kind, NodeKind::Dynamic);
+  auto vr = validate(*ir, {});
+  ASSERT_TRUE(vr.ok()) << vr.describe();
+
+  tool::ToolRegistry const reg;
+  auto wf = compile_workflow(*ir, reg, nullptr, CompileOptions{});
+  ASSERT_TRUE(wf) << wf.error().message;
+  auto r = fire_once(*wf, Json::object());
+  ASSERT_TRUE(r) << r.error().message;
+  ASSERT_TRUE(r->contains(kMessagesKey));
+  EXPECT_EQ((*r)[std::string(kMessagesKey)][0]["content"][0]["text"].get<std::string>(), "blink");
+}
+
+TEST(WfPlugin, enumeration_failure_is_fail_closed) {
+  Json import = Json::object();
+  import["lib"] = "/nonexistent/lib_plugin.so";  // 省略 nodes，但库文件读不了
+  Json const raw = Json{{"imports", Json::array({std::move(import)})}};
+
+  auto r = load_workflow_imports(raw, true, nullptr);
+  ASSERT_FALSE(r);
+  EXPECT_NE(r.error().find("无法打开库文件"), std::string::npos) << r.error();
 }
