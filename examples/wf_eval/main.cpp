@@ -2,9 +2,9 @@
 //
 //  对 主动智能/10-eval-cases.md 的 12 例意图跑完整管线（PlanStage →
 //  IRStage → compile → fire），并按特征断言打出矩阵：
-//   · golden 7 例：expect=Generated，还要 must_have 全中 / must_not_have 全缺，
+//   · golden 8 例：expect=Generated，还要 must_have 全中 / must_not_have 全缺，
 //     且能编译 + 触发一次不抛错；
-//   · boundary 5 例：Reject（拒绝理由非空）/ Clarify（问题命中 must_ask 关键词）。
+//   · boundary 4 例：Reject（拒绝理由非空）/ Clarify（问题命中 must_ask 关键词）。
 // 末尾补一段"调度模拟"：对某个已生成的价格 worklow 连续触发 3 次（每次全新状态），
 // 展示通知逐次新增、loop_counts 每次归零 —— D1：手动触发，不做 OS 调度。
 //

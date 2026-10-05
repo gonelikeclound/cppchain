@@ -67,13 +67,45 @@ TEST(WfFeatures, purchase_claims_detected) {
 
 TEST(WfFeatures, eval_cases_fixture_sanity) {
   auto const& cases = eval_cases();
-  ASSERT_EQ(cases.size(), 12u);  // 7 golden + 5 boundary（转写 10-eval-cases.md）
+  ASSERT_EQ(cases.size(), 12u);  // 8 golden + 4 boundary（转写 10-eval-cases.md）
   EXPECT_EQ(cases[0].id, "wf_taobao_price_drop");
   EXPECT_EQ(cases[6].id, "wf_manual_order");
-  EXPECT_EQ(cases[7].expect, "Reject");
+  // 前 8 例是 golden；wf_expressiveness_gap 原先被误判为 Reject，已据 IR 规范改正
+  EXPECT_EQ(cases[7].id, "wf_expressiveness_gap");
+  EXPECT_EQ(cases[7].expect, "Generated");
+  for (std::size_t i = 0; i < 8; ++i) EXPECT_EQ(cases[i].expect, "Generated") << cases[i].id;
+  // 后 4 例是 boundary（不得再有 Generated 期望）
+  for (std::size_t i = 8; i < cases.size(); ++i) EXPECT_NE(cases[i].expect, "Generated")
+      << cases[i].id;
   EXPECT_EQ(cases[11].id, "wf_ambiguous_morning");
   EXPECT_EQ(cases[11].expect, "Clarify");
   EXPECT_FALSE(cases[11].must_ask.empty());
+}
+
+// "非空判断"谓词：只认 IR 规范的两个惯用法，纯业务比较不算。
+TEST(WfFeatures, emptiness_check_predicate) {
+  auto ir_with_expr = [](std::string const& e) {
+    return WorkflowIR::parse(simple_ir(
+        "0 8 * * *", Json::array({Json{{"id", "check"}, {"expr", e},
+                                       {"then", "_turn_end"}, {"else", "_turn_end"}}})));
+  };
+
+  for (char const* e : {"$_.result.html != null", "$_.result.html != \"\"",
+                        "$_.result.html !=null", "$_.result.html !=  \"\""}) {
+    auto ir = ir_with_expr(e);
+    ASSERT_TRUE(ir) << e;
+    EXPECT_TRUE(check(*ir, "非空判断")) << e;
+  }
+
+  // 业务比较不是非空判断（只看 `!=` 会误判）
+  auto price = ir_with_expr("$_.result.price != 800");
+  ASSERT_TRUE(price);
+  EXPECT_FALSE(check(*price, "非空判断"));
+
+  // 没有 expr 节点 → false
+  auto bare = WorkflowIR::parse(simple_ir("0 8 * * *", Json::array()));
+  ASSERT_TRUE(bare);
+  EXPECT_FALSE(check(*bare, "非空判断"));
 }
 
 TEST(WfFeatures, unknown_feature_false) {

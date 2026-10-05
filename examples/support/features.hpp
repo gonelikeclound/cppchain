@@ -7,6 +7,8 @@
 //   · 前缀 "无" 归一化为取反（"无trigger.condition" = 不含 condition）
 //   · 取价节点        任一 tool ∈ {fetch_price, web_search}（联网/取价都算）
 //   · 价格分支        任一 expr 的表达式包含 "price"
+//   · 非空判断        任一 expr 做了 "!= null" 或 "!= \"\"" 判断
+//                     （IR 的两个非空惯用法，见 11-ir-syntax.md §6）
 //   · 通知节点        任一 tool == "send_notification"
 //   · time触发+schedule  trigger.source=="time" && trigger.kind=="schedule"
 //   · trigger.condition trigger.raw（递归）含 "condition" 键
@@ -16,7 +18,9 @@
 //   · 声称已下单       任一 send_notification 的标题/正文含 "下单" 或 "购买"（诚实性审计）
 //   · 未知特征名       → false（特征表里登了才认）
 //
-// 固件 12 例（7 golden + 5 boundary）意向逐字转写 主动智能/10-eval-cases.md。
+// 固件 12 例（8 golden + 4 boundary）意向逐字转写 主动智能/10-eval-cases.md。
+// 注：原 7+5 的划分中，wf_expressiveness_gap 被误判为表达力缺口（见该条注释），
+// 改正为 golden；原 wf_llm_extract_summary 因判据站不住而改造成真缺口 wf_count_gap。
 #pragma once
 
 #include <functional>
@@ -61,6 +65,22 @@ inline bool any_expr_contains(WorkflowIR const& ir, std::string_view needle) {
   return false;
 }
 
+// 是否做了"取没取到 / 字符串非空"的判断。
+// 只看 `!=` 不够：`price != 800` 是业务比较，不是非空判断。故归一化空白后
+// 精确匹配 IR 规范给出的两个惯用法（`!= null` / `!= ""`）。
+inline bool has_emptiness_check(WorkflowIR const& ir) {
+  for (NodeIR const& n : ir.nodes) {
+    if (n.kind != NodeKind::Expr) continue;
+    std::string s;
+    s.reserve(n.expr.size());
+    for (char c : n.expr)
+      if (c != ' ' && c != '\t') s.push_back(c);
+    if (s.find("!=null") != std::string::npos || s.find("!=\"\"") != std::string::npos)
+      return true;
+  }
+  return false;
+}
+
 // 通知节点正文里是否出现不诚实的"下单/购买"字样
 inline bool claims_purchase(WorkflowIR const& ir) {
   for (NodeIR const& n : ir.nodes) {
@@ -97,6 +117,7 @@ inline bool check(WorkflowIR const& ir, std::string_view name) {
       return t == "fetch_price" || t == "web_search";
     });
   if (name == "价格分支") return detail::any_expr_contains(ir, "price");
+  if (name == "非空判断") return detail::has_emptiness_check(ir);
   if (name == "通知节点")
     return detail::any_tool(ir, [](std::string_view t) { return t == "send_notification"; });
   if (name == "time触发+schedule")
@@ -123,7 +144,7 @@ inline bool check(WorkflowIR const& ir, std::string_view name) {
   return false;  // 未知特征不认
 }
 
-// 12 例（7 golden + 5 boundary），意向逐字来自 10-eval-cases.md。
+// 12 例（8 golden + 4 boundary），意向逐字来自 10-eval-cases.md。
 inline std::vector<EvalCase> const& eval_cases() {
   static std::vector<EvalCase> const cases = {
       // ---- GOLDEN_CASES（expect=Generated）----
@@ -171,15 +192,25 @@ inline std::vector<EvalCase> const& eval_cases() {
        {"通知节点"},
        {"声称已下单"},
        {}},
-      // ---- BOUNDARY_CASES（Reject / Clarify）----
+      // 原判为 Reject，但"结果非空"并非表达力缺口：IR 规范 §6 明确给出
+      // `!= null` / `!= ""` 两个惯用法，实测也正确区分有内容与空串（见 11-ir-syntax.md）。
+      // 真机 3/3 稳定生成，故改正为 golden。
       {"wf_expressiveness_gap",
        "每天早 8 点查最新科技新闻，如果取到的新闻不为空就播报给我。",
-       "Reject", {}, {}, {}},
+       "Generated",
+       {"取价节点", "非空判断", "通知节点", "time触发+schedule", "无trigger.condition"},
+       {"trigger.condition"},
+       {}},
+      // ---- BOUNDARY_CASES（Reject / Clarify）----
       {"wf_capability_gap",
        "收到淘宝推送通知时提醒我去比价。",
        "Reject", {}, {}, {}},
-      {"wf_llm_extract_summary",
-       "每天上午用网页搜索查一次某新闻关键词的最新报道，用 LLM 提取摘要，有结果就通知我。",
+      // 原 `wf_llm_extract_summary`（"有结果就通知我"）与 golden 的 wf_llm_extract_notify
+      // 几乎逐字相同，只差一个"非空"条件 —— 而该条件可表达，判据站不住。
+      // 改为一条**真缺口**：要统计集合大小（超过 N 条），而 IR 的 expr 只有标量比较，
+      // 没有函数/数组/len()；web_search 返回的又是整页文档，无法从中可靠计数。
+      {"wf_count_gap",
+       "每天上午用网页搜索查一次某新闻关键词的报道，如果结果超过 3 条就把标题汇总后通知我。",
        "Reject", {}, {}, {}},
       {"wf_bad_trigger_cond",
        "收到淘宝降价通知就提醒我，价格低于 800 就通知。",
