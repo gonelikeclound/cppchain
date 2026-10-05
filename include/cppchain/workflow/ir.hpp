@@ -60,6 +60,8 @@ enum class NodeKind {
   Model,     // 一次 LLM 调用：读 state.messages → 追加回复（不循环）
   Route,     // match 分派：按 last_ai_outcome 选下一跳
   RunTools,  // 执行最后一条 AI 消息的 tool_calls → ToolMessage 追加进 messages
+  LoadHistory,   // 工作路径的历史消息 → 追加进 state.messages
+  SaveHistory,   // state.messages → 工作路径
 };
 
 struct OnErrorIR {
@@ -96,6 +98,11 @@ struct NodeIR {
   std::string on;                            // 判别式名，初版只有 "last_ai_outcome"
   std::map<std::string, std::string> cases;  // outcome → 目标节点 id（或保留名）
   std::string default_;                      // 未命中目标；**必须显式给出**（禁止漏档静默）
+
+  // Load/SaveHistory 节点（M12）：workspace/session 是运行期取值的**参数**
+  // （可写 `@config.workspace` 这类引用，与该层其它参数同一套解析）
+  std::string path;
+  std::string session;
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

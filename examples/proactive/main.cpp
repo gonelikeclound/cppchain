@@ -103,6 +103,14 @@ void print_readable_ir(WorkflowIR const& ir) {
       case NodeKind::RunTools:
         std::println("  [{}] run_tools → {}", n.id, n.next);
         break;
+      case NodeKind::LoadHistory:
+        std::println("  [{}] load_history path={} session={} → {}", n.id, n.path,
+                     n.session.empty() ? "-" : n.session, n.next);
+        break;
+      case NodeKind::SaveHistory:
+        std::println("  [{}] save_history path={} session={} → {}", n.id, n.path,
+                     n.session.empty() ? "-" : n.session, n.next);
+        break;
     }
   }
   std::println("  ---- JSON 规范形 ----");

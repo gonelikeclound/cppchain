@@ -25,6 +25,8 @@
 //   VR4 @config.k：键为标识符（parse 层保证）；若宿主声明了 config 契约，键必须在其列
 //   VN10 M12 节点：model 组件名/tools 工具集名必须在注册表；route 的 on/cases 键走封闭词表，
 //        且 cases 必须覆盖全部 outcome 或显式给 default（禁止"漏一档静默走 else"）
+//   VN11 M12 history 节点：path/next 必填
+//   VG9  load_history 必须在消费 messages 的节点之前（Q8：硬拒绝，读了没人用就是错）
 //   VH1 on_error：retry ≥ 0；fallback 为存在节点 id 或 _turn_end
 //   VG1 指针目标：next/then/else 为存在节点或 _turn_end；goto 必须指向 label
 //   VG2 前向边（tool.next / expr.then/else 替换 label 后）无环（循环只能经 goto）
@@ -419,6 +421,15 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       case NodeKind::RunTools:
         if (n.next.empty()) c.err("VN10", "run_tools 节点 '" + n.id + "' 缺少 next");
         break;
+
+      case NodeKind::LoadHistory:
+      case NodeKind::SaveHistory: {
+        std::string const what =
+            (n.kind == NodeKind::LoadHistory) ? "load_history" : "save_history";
+        if (n.path.empty()) c.err("VN11", what + " 节点 '" + n.id + "' 缺少 path（工作路径）");
+        if (n.next.empty()) c.err("VN11", what + " 节点 '" + n.id + "' 缺少 next");
+        break;
+      }
     }
   }
 
@@ -492,6 +503,8 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       }
       case NodeKind::Model:
       case NodeKind::RunTools:
+      case NodeKind::LoadHistory:
+      case NodeKind::SaveHistory:
         target_ok("next", n.next);
         break;
       case NodeKind::Route:
@@ -514,7 +527,9 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
           referenced = true;
         else if (m.kind == NodeKind::Goto && m.goto_target == n.id)
           referenced = true;
-        else if ((m.kind == NodeKind::Model || m.kind == NodeKind::RunTools) && m.next == n.id)
+        else if ((m.kind == NodeKind::Model || m.kind == NodeKind::RunTools ||
+                  m.kind == NodeKind::LoadHistory || m.kind == NodeKind::SaveHistory) &&
+                 m.next == n.id)
           referenced = true;
         else if (m.kind == NodeKind::Route &&
                  (m.default_ == n.id ||
@@ -526,6 +541,23 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
         c.err("VG8", "label '" + n.id + "' 没有被任何 goto / next / then / else 指向（死 label）");
     }
 
+  // ---- VG9：load_history 必须在消费 messages 的节点之前 ----
+  // 顺序用**数组下标**判定（与 VR2 的"上游/更早"同一套约定）。读了没人用就是编排错误，
+  // 硬拒绝比告警好：告警会被忽略，而这条错会让"历史明明加载了却没进上下文"变成谜案。
+  {
+    auto first_of = [&](bool (*pred)(NodeIR const&)) -> std::optional<std::size_t> {
+      for (std::size_t i = 0; i < ir.nodes.size(); ++i)
+        if (pred(ir.nodes[i])) return i;
+      return std::nullopt;
+    };
+    auto const load_i = first_of([](NodeIR const& n) { return n.kind == NodeKind::LoadHistory; });
+    auto const use_i = first_of(
+        [](NodeIR const& n) { return n.kind == NodeKind::Model || n.kind == NodeKind::RunTools; });
+    if (load_i && use_i && *load_i > *use_i)
+      c.err("VG9", "load_history 节点 '" + ir.nodes[*load_i].id +
+                       "' 出现在消费 messages 的节点之后：历史加载了也没人用");
+  }
+
   // ---- VG2：前向边无环（label 已替换） ----
   {
     std::unordered_map<std::string, std::vector<std::string>> adj;
@@ -536,7 +568,8 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       } else if (n.kind == NodeKind::Expr) {
         for (std::string const& t_ : {resolve_target(c, n.then), resolve_target(c, n.else_)})
           if (t_ != kEndId) adj[n.id].push_back(t_);
-      } else if (n.kind == NodeKind::Model || n.kind == NodeKind::RunTools) {
+      } else if (n.kind == NodeKind::Model || n.kind == NodeKind::RunTools ||
+                 n.kind == NodeKind::LoadHistory || n.kind == NodeKind::SaveHistory) {
         std::string const t_ = resolve_target(c, n.next);
         if (t_ != kEndId) adj[n.id].push_back(t_);
       } else if (n.kind == NodeKind::Route) {
@@ -617,7 +650,8 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       } else if (it->second == NodeKind::Expr) {
         push(resolve_target(c, node.then));
         push(resolve_target(c, node.else_));
-      } else if (it->second == NodeKind::Model || it->second == NodeKind::RunTools) {
+      } else if (it->second == NodeKind::Model || it->second == NodeKind::RunTools ||
+                 it->second == NodeKind::LoadHistory || it->second == NodeKind::SaveHistory) {
         push(resolve_target(c, node.next));
       } else if (it->second == NodeKind::Route) {
         for (auto const& [k, v] : node.cases) push(resolve_target(c, v));

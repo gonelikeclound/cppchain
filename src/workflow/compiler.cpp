@@ -14,6 +14,7 @@
 #include "cppchain/tool/tool.hpp"
 #include "cppchain/tool/tool_node.hpp"  // M12: run_tools 复用 M3 的 ToolNode
 #include "cppchain/workflow/expr.hpp"
+#include "cppchain/workflow/history_file.hpp"
 #include "cppchain/workflow/refs.hpp"
 #include "cppchain/workflow/validator.hpp"
 
@@ -72,6 +73,9 @@ std::string last_ai_outcome(Json const& state) {
   }
   return {};
 }
+
+// 参数取字符串（引用解析后可能是任意 JSON；非字符串按 dump 取，便于把路径写进模板）
+std::string as_string(Json const& v) { return v.is_string() ? v.get<std::string>() : v.dump(); }
 
 // _fail 的落地：一个"一定会抛"的节点（见 ir.hpp 的 kFailName）
 constexpr char kFailTarget[] = "__fail__";
@@ -299,6 +303,38 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
           Json arr = Json::array();
           for (message::Message& m : tn.run(calls)) arr.push_back(m);
           return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
+        });
+        g.add_edge(n.id, resolve(n.next));
+        ++registered;
+        break;
+      }
+
+      case NodeKind::LoadHistory: {
+        // path/session 是**运行期取值**（如 @config.workspace），与该层其它参数同一套解析
+        Json const path_expr = Json(n.path);
+        Json const sess_expr = Json(n.session);
+        g.add_node(n.id, [path_expr, sess_expr](Json const& state, NodeContext&) {
+          std::string const ws = as_string(resolve_parameter(path_expr, state));
+          std::string const sess = as_string(resolve_parameter(sess_expr, state));
+          auto const hist = load_history_file(session_path(ws, sess));
+          Json arr = Json::array();
+          for (message::Message const& m : hist) arr.push_back(m);
+          // 走 messages 通道 → add_messages 与本次输入合并（同 id 覆盖、无 id 追加）
+          return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
+        });
+        g.add_edge(n.id, resolve(n.next));
+        ++registered;
+        break;
+      }
+
+      case NodeKind::SaveHistory: {
+        Json const path_expr = Json(n.path);
+        Json const sess_expr = Json(n.session);
+        g.add_node(n.id, [path_expr, sess_expr](Json const& state, NodeContext&) {
+          std::string const ws = as_string(resolve_parameter(path_expr, state));
+          std::string const sess = as_string(resolve_parameter(sess_expr, state));
+          save_history_file(session_path(ws, sess), messages_from_state(state), sess);
+          return Command{};  // 不产出状态更新（它是"出口动作"，不是数据流节点）
         });
         g.add_edge(n.id, resolve(n.next));
         ++registered;

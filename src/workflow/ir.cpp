@@ -101,6 +101,22 @@ NodeIR parse_node(Json const& node, NodeKind kind, std::string const& id) {
       if (node.contains("next") && node["next"].is_string())
         out.next = node["next"].get<std::string>();
       break;
+    case NodeKind::LoadHistory:
+      if (node.contains("path") && node["path"].is_string())
+        out.path = node["path"].get<std::string>();
+      if (node.contains("session") && node["session"].is_string())
+        out.session = node["session"].get<std::string>();
+      if (node.contains("next") && node["next"].is_string())
+        out.next = node["next"].get<std::string>();
+      break;
+    case NodeKind::SaveHistory:
+      if (node.contains("path") && node["path"].is_string())
+        out.path = node["path"].get<std::string>();
+      if (node.contains("session") && node["session"].is_string())
+        out.session = node["session"].get<std::string>();
+      if (node.contains("next") && node["next"].is_string())
+        out.next = node["next"].get<std::string>();
+      break;
   }
   return out;
 }
@@ -121,9 +137,12 @@ std::expected<NodeKind, std::string> WorkflowIR::classify(Json const& node) {
     else if (kind_str == "model") declared = NodeKind::Model;
     else if (kind_str == "route") declared = NodeKind::Route;
     else if (kind_str == "run_tools") declared = NodeKind::RunTools;
+    else if (kind_str == "load_history") declared = NodeKind::LoadHistory;
+    else if (kind_str == "save_history") declared = NodeKind::SaveHistory;
     else
       return std::unexpected("unknown node kind: '" + kind_str +
-                             "'（可用：label/goto/expr/tool/model/route/run_tools）");
+                             "'（可用：label/goto/expr/tool/model/route/run_tools/"
+                             "load_history/save_history）");
   }
 
   bool const has_goto = node.contains("goto");
@@ -235,6 +254,13 @@ Json WorkflowIR::to_json() const {
       }
       case NodeKind::RunTools:
         node["kind"] = "run_tools";
+        node["next"] = n.next;
+        break;
+      case NodeKind::LoadHistory:
+      case NodeKind::SaveHistory:
+        node["kind"] = (n.kind == NodeKind::LoadHistory) ? "load_history" : "save_history";
+        node["path"] = n.path;
+        if (!n.session.empty()) node["session"] = n.session;
         node["next"] = n.next;
         break;
     }

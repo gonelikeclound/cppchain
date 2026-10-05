@@ -299,6 +299,19 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
   无 --workflow  走 M11 生成器：意图 → IR → 编译 → fire_once
 ```
 
+**输入怎么进 `state.messages`（D 阶段定下，含一次设计纠错）**
+
+最初想给引擎加"初始状态种子"，但写测试时发现**顺序会反**：`add_messages` 是 append，
+种子会排在 `load_history` 拉回的历史**之前**，对话顺序就错了。故改为：
+
+> **宿主（CLI）先把本轮输入追加进会话文件**，workflow 再整体 `load_history → 跑 → save_history`。
+
+顺序天然正确，且只用既有机制（不必给引擎加种子参数）。代价是一次失败的运行也会在历史里
+留下那句用户输入 —— 但"用户确实说过这句话"是事实，留下反而更诚实。
+
+另：**空输入不跑**。实测给空对话调模型，模型会自己编（"假设我已完成工具调用…"）——
+CLI 应在跑之前拦下，而不是让模型对着空上下文发挥。
+
 ---
 
 ## 6. 契约
@@ -392,7 +405,7 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
 | **A** ✅ | 落盘续跑验证（跨进程读回） | 无 | 已完成 |
 | **B** ✅ | 本文（形状与取舍） | A | — |
 | **C** ✅ | `model`/`route`(match)/`run_tools` 三节点 + 循环 + `_fail` 保留名（ReAct 打通，**未接 history**）；IR 语法文档已同步 | B | IR 扩张 |
-| **D** | `load_history`/`save_history` + CLI（`--workdir`/`--session`/`--show`/`--workflow`） | C | 小 |
+| **D** ✅ | `load_history`/`save_history` + CLI（`examples/workflow_cli`：`--workdir`/`--session`/`--show`/`--reset`/`--workflow`）；真机两进程验证走**完整 workflow** 续跑 | C | — |
 | **E** | 组件注册表完善（model/agent/memory）+ memory 落盘 | C | 小 |
 | **F** | 教生成器产出这些节点（Q4 放开） | C+D + 生成端评测方法 | 生成质量与 IR 表达力互相纠缠 |
 
@@ -410,11 +423,11 @@ cppchain-cli [--workdir DIR] [--session NAME] [--reset] [--show] [--workflow FIL
 - [ ] `_fail` 保留名：`invalid_tool_calls` 一档显式失败终止，不再静默当最终答复
 - [ ] `run_tools` 复用 `tool::ToolNode`，产物写 `messages` 通道
 - [ ] middleware 可挂到 `model`（before_model）与 `run_tools`（审批/after_tool）
-- [ ] `load_history`/`save_history` + `<workspace>/.cppchain/` 布局与被忽略
+- [x] `load_history`/`save_history` + `<workspace>/.cppchain/session-<name>.json` 布局（含原子写与 fail-closed）
 - [ ] `--workdir` 经 `@config` 注入并被 B2 的 config 契约校验
-- [ ] CLI：`--workdir`/`--session`/`--reset`/`--show`/`--workflow`
-- [ ] 离线单测：循环有界、route 词表、history 节点、跨 workdir 隔离
-- [ ] 真机：同一 workdir 两次独立进程，第二轮答出只有第一轮才知道的信息
+- [x] CLI：`--workdir`/`--session`/`--reset`/`--show`/`--workflow`（`examples/workflow_cli`）
+- [x] 离线单测：循环有界、route 词表、history 节点、跨 workdir 隔离
+- [x] 真机：同一 workdir 两次独立进程（走完整 workflow），第二轮答出"你叫东俊，在做 cppchain 项目"
 - [x] IR 语法文档（`主动智能/11-ir-syntax.md`）同步：§3 判定规则（改为 fail-closed 的歧义即错，原文"第一个命中即定"与实现不符）、§4 三种新节点字段 + ReAct 循环规范写法、§7 链约束与 `_fail`；生成器提示词暂不动（Q4）
 
 ---
