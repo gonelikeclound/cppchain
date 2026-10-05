@@ -351,3 +351,31 @@ TEST(WfValidator, fallback_successors_count_as_reachable) {
   EXPECT_FALSE(r2.ok());
   EXPECT_NE(r2.describe().find("VG7"), std::string::npos);
 }
+
+// B2 回归：宿主声明 config 契约后，IR 里的 @config.<键> 必须在其列。
+// 此前这个引用**毫无约束** —— 写一个宿主不会提供的键能过校验，运行期静默解析成
+// null，直到工具读到 null 才炸（校验期 fail-closed，运行期 fail-open）。
+TEST(WfValidator, config_keys_contract_is_enforced) {
+  auto with_keys = [](std::optional<std::vector<std::string>> keys) {
+    ValidatorOptions o{&tools()};
+    o.config_keys = std::move(keys);
+    return validate_json(minimal_price_ir(), o);
+  };
+
+  // 未声明契约 → 不检查（向后兼容，minimal_price_ir 里用的是 @config.product_id）
+  EXPECT_TRUE(with_keys(std::nullopt).ok());
+
+  // 声明了且命中 → 通过
+  EXPECT_TRUE(with_keys(std::vector<std::string>{"product_id"}).ok());
+
+  // 声明了但不含该键 → VR4 拒绝，且报出实际引用的键
+  auto bad = with_keys(std::vector<std::string>{"item_id", "threshold"});
+  EXPECT_FALSE(bad.ok());
+  EXPECT_NE(bad.describe().find("VR4"), std::string::npos);
+  EXPECT_NE(bad.describe().find("product_id"), std::string::npos) << bad.describe();
+
+  // 空契约 = 不允许任何 @config 引用
+  auto none = with_keys(std::vector<std::string>{});
+  EXPECT_FALSE(none.ok());
+  EXPECT_NE(none.describe().find("VR4"), std::string::npos);
+}

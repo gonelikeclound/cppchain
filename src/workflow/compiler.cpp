@@ -57,7 +57,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   };
 
   // 1) 先过校验器（fail-closed：不编译坏 IR）
-  ValidationResult vr = validate(ir, ValidatorOptions{&registry});
+  ValidationResult vr = validate(ir, ValidatorOptions{&registry, opts.config_keys});
   if (!vr.ok()) return invalid("IR 校验未过：" + vr.describe());
   if (ir.nodes.empty())
     return invalid("IR nodes 为空（生成器不应产出）");

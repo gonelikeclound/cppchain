@@ -79,6 +79,12 @@ struct GeneratorOptions {
   int clarify_max_rounds = 3;  // 澄清轮数上限
   int model_calls_budget = 12; // 总调用预算；耗尽 → fail-closed 拒绝
   std::string system_prompt;   // 空 → 内置默认模板（含工具目录/诚实规则/IR 语法要点）
+
+  // 宿主运行时**将会提供**的 config 键（B3）。非空时：
+  //   · 注入 IR 阶段提示词（告诉模型只能用这些键，别自己发明）；
+  //   · 传给 validator 的 VR4 校验（写错键 → 校验不过 → 回喂重写，而不是运行期变 null）。
+  // 空 = 不约束（保持旧行为）。
+  std::vector<std::string> config_keys;
 };
 
 class WorkflowGenerator {

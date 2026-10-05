@@ -47,6 +47,16 @@ std::shared_ptr<openai::OpenAIChatModel> make_model(
 
 }  // namespace
 
+// 宿主 fire 时**真正提供**的 config 键。必须与下面 fire_once 的入参一致 ——
+// 声明之后，IR 里引用别的键会在编译期被 VR4 拒掉，而不是运行期静默变 null。
+std::vector<std::string> config_keys() { return {"product_id"}; }
+
+CompileOptions compile_opts() {
+  CompileOptions o;
+  o.config_keys = config_keys();
+  return o;
+}
+
 int main() {
   auto env = demo::load_dotenv({".env", "../.env", "../../.env"});
   std::string const key = demo::env_or(env, "LLM_API_KEY");
@@ -58,7 +68,11 @@ int main() {
 
   FakeToolSinks sinks;
   tool::ToolRegistry registry = make_fake_tools(sinks);
-  WorkflowGenerator gen(*model, registry);
+  // 声明宿主会提供的 config 键：生成端据此约束提示词 + 校验（VR4），
+  // 免得模型写出宿主没有的键、运行期静默变 null。
+  GeneratorOptions gopts;
+  gopts.config_keys = config_keys();
+  WorkflowGenerator gen(*model, registry, nullptr, gopts);
 
   std::println("=== 主动智能 Workflow 生成验收矩阵（12 例 / 真机）===\n");
 
@@ -105,7 +119,7 @@ int main() {
 
           bool fired = false;
           std::string why;
-          auto wf = compile_workflow(r.generated->ir, registry);
+          auto wf = compile_workflow(r.generated->ir, registry, nullptr, compile_opts());
           if (!wf) {
             why = "编译失败：" + wf.error().message;  // 别把原因吞掉，否则无法诊断
           } else {
@@ -145,7 +159,7 @@ int main() {
   if (!golden_ir.empty()) {
     auto ir = WorkflowIR::parse(Json::parse(golden_ir[0]));
     if (ir) {
-      auto wf = compile_workflow(*ir, registry);
+      auto wf = compile_workflow(*ir, registry, nullptr, compile_opts());
       if (wf) {
         std::println("\n=== 调度模拟（D1：手动触发，不做 OS 调度）===");
         std::println("触发器元数据：schedule = {}", ir->trigger.schedule);

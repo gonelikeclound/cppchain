@@ -198,9 +198,21 @@ struct WorkflowGenerator::Impl {
         "规则：id 字母开头（不以下划线开头、不叫 result）；循环只能用 label+goto；"
         "_turn_end 只出现在 next/then/else 里（不写节点）；trigger 不带 condition；"
         "节点 id 即 tool 输出帧名（下游用 $<id>.result.<字段> 引用，字段必须已被 output_schema 声明）。\n"
-        "诚实性：无下单工具就写『提醒用户确认下单』，绝不写『已自动下单』。\n\n"
-        "【意图】" +
-        intent + "\n";
+        "诚实性：无下单工具就写『提醒用户确认下单』，绝不写『已自动下单』。\n";
+    // B3：把宿主真正会提供的 config 键写进提示词。不说的话模型会自己发明键名
+    // （真机实测它写了 @config.item_id / @config.threshold，而宿主只提供 product_id），
+    // 运行期取不到就静默变 null，直到工具读到 null 才炸。
+    if (!opts.config_keys.empty()) {
+      std::string keys;
+      for (std::string const& k : opts.config_keys) {
+        if (!keys.empty()) keys += ", ";
+        keys += k;
+      }
+      s += "【可用配置键】运行前由宿主提供，且只能用这些（写法 @config.<键>，"
+           "不得发明其它键）：" +
+           keys + "\n";
+    }
+    s += "\n【意图】" + intent + "\n";
     if (!qa.empty()) {
       s += "【澄清问答】\n";
       for (auto const& [q, a] : qa) s += "Q: " + q + "\nA: " + a + "\n";
@@ -336,7 +348,10 @@ struct WorkflowGenerator::Impl {
         msgs.push_back(human_message("IR 结构解析失败：" + wi.error() + "。请整体重写为完整 IR JSON。"));
         continue;
       }
-      ValidationResult vr = validate(*wi, ValidatorOptions{registry});
+      // 声明了 config 契约才启用 VR4（空 = 不约束，保持旧行为）
+      ValidatorOptions vopts{registry};
+      if (!opts.config_keys.empty()) vopts.config_keys = opts.config_keys;
+      ValidationResult vr = validate(*wi, vopts);
       if (vr.ok()) {
         WorkflowGenerationResult out;
         out.kind = WorkflowGenerationResult::Kind::Generated;

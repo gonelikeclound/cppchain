@@ -351,3 +351,25 @@ TEST(WfCompiler, on_error_applies_when_handler_throws) {
     EXPECT_NE(r.error().message.find("工具内部炸了"), std::string::npos) << r.error().message;
   }
 }
+
+// B2 回归：编译路径也要认这份 config 契约 —— 否则手写/存下来的 IR 会绕过
+// 生成端的约束，照样在运行期拿到 null。
+TEST(WfCompiler, compile_enforces_config_contract) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  auto ir = WorkflowIR::parse(price_ir());  // 用 @config.product_id
+  ASSERT_TRUE(ir) << ir.error();
+
+  CompileOptions ok_opts;
+  ok_opts.config_keys = std::vector<std::string>{"product_id"};
+  EXPECT_TRUE(compile_workflow(*ir, reg, nullptr, ok_opts).has_value());
+
+  CompileOptions bad_opts;
+  bad_opts.config_keys = std::vector<std::string>{"other_key"};
+  auto bad = compile_workflow(*ir, reg, nullptr, bad_opts);
+  ASSERT_FALSE(bad.has_value());
+  EXPECT_NE(bad.error().message.find("VR4"), std::string::npos) << bad.error().message;
+
+  // 不声明 → 不检查（向后兼容）
+  EXPECT_TRUE(compile_workflow(*ir, reg).has_value());
+}

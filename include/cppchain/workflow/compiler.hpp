@@ -35,6 +35,11 @@ struct WorkflowError {
 
 struct CompileOptions {
   std::size_t max_steps = 200;  // 循环由 goto.max 界定，max_steps 兜底防病态 IR
+
+  // 宿主将要传给 fire_once 的 config 键（B2）。语义同 ValidatorOptions::config_keys：
+  // nullopt = 不检查；声明后，IR 里引用未声明的 @config.<键> 会在**编译期**被 VR4 拒绝，
+  // 而不是运行期静默解析成 null（工具读到 null 才炸）。
+  std::optional<std::vector<std::string>> config_keys = std::nullopt;
 };
 
 struct CompiledWorkflow {

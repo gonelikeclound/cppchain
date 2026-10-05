@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,16 @@ struct ValidationResult {
 
 struct ValidatorOptions {
   tool::ToolRegistry const* registry = nullptr;  // 非拥有；null → 跳过工具存在性检查
+
+  // 宿主**将要提供**的 config 键（B2）。nullopt = 不做该项检查（向后兼容）。
+  //
+  // 为什么要它：`@config.<键>` 原先没有任何约束 —— 提示词不限定键名，IR 里也没有
+  // 声明。于是模型写一个宿主不会提供的键能**通过校验**，运行期静默解析成 null，
+  // 直到工具读到 null 才炸（校验期 fail-closed，运行期 fail-open）。
+  // 声明了契约后，VR4 会把这种 IR 挡在编译之前。
+  //
+  // 语义：nullopt → 跳过；空 vector → "不允许任何 @config 引用"。
+  std::optional<std::vector<std::string>> config_keys = std::nullopt;
 };
 
 // 对已解析的 IR 做全量校验。

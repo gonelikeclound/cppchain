@@ -22,7 +22,7 @@
 //   VR1 所有 $/@config 片段语法合法
 //   VR2 $<id>.result.f：id 存在且为 tool 节点、下标在上游、字段已声明（或 schema 为 *）
 //   VR3 $_.result.f：字段被 ≥1 个上游 tool 声明（或 *）
-//   VR4 @config.k：键为标识符（parse 层保证）
+//   VR4 @config.k：键为标识符（parse 层保证）；若宿主声明了 config 契约，键必须在其列
 //   VH1 on_error：retry ≥ 0；fallback 为存在节点 id 或 _turn_end
 //   VG1 指针目标：next/then/else 为存在节点或 _turn_end；goto 必须指向 label
 //   VG2 前向边（tool.next / expr.then/else 替换 label 后）无环（循环只能经 goto）
@@ -577,8 +577,24 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     find_refs_in_node(refs, n);
     for (auto const& [_, r] : refs) {
       switch (r.kind) {
-        case RefKind::Config:
-          break;  // VR4：parse 已保证键为标识符
+        case RefKind::Config: {
+          // VR4：parse 已保证键是标识符；这里再按**宿主声明的 config 契约**核对（B2）。
+          // 未声明契约（nullopt）→ 跳过，保持旧行为。
+          if (opts.config_keys) {
+            auto const& keys = *opts.config_keys;
+            if (std::find(keys.begin(), keys.end(), r.field) == keys.end()) {
+              std::string avail;
+              for (std::string const& k : keys) {
+                if (!avail.empty()) avail += ", ";
+                avail += k;
+              }
+              c.err("VR4", "节点 '" + n.id + "' 引用了 @config." + r.field +
+                               "，但宿主未声明该配置键（可用：" +
+                               (avail.empty() ? "（无）" : avail) + "）");
+            }
+          }
+          break;
+        }
         case RefKind::NamedResult: {
           auto it = c.index.find(r.node);
           if (it == c.index.end())

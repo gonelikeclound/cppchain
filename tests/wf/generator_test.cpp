@@ -35,9 +35,11 @@ class ScriptedChatModel final : public model::ChatModel {
  public:
   std::deque<std::string> replies;
   std::size_t invoked = 0;
+  std::vector<Message> last_msgs;  // 最近一次 invoke 收到的消息（断言提示词内容用）
 
-  std::expected<Message, ModelError> invoke(std::span<Message const>,
+  std::expected<Message, ModelError> invoke(std::span<Message const> msgs,
                                             CallOptions const&) override {
+    last_msgs.assign(msgs.begin(), msgs.end());
     if (replies.empty())
       return std::unexpected(ModelError{ModelError::Kind::Parse, 0, "no scripted reply", {}});
     Message m = cppchain::message::ai_message(replies.front());
@@ -253,4 +255,46 @@ TEST(WfGenerator, reject_with_non_string_reason_falls_back) {
   EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Rejected);
   ASSERT_TRUE(r.rejected);
   EXPECT_EQ(r.rejected->reason, "未说明原因");
+}
+
+// B3 回归：宿主声明的 config 键要同时
+//   ① 注入 IR 阶段提示词（告诉模型只能用这些键）；
+//   ② 参与 VR4 校验（写错键 → 回喂重写，而不是放行到运行期变 null）。
+TEST(WfGenerator, config_contract_reaches_prompt_and_validator) {
+  tool::ToolRegistry reg = make_registry();
+
+  {  // ① 提示词里要出现可用键
+    ScriptedChatModel model;
+    model.replies = {kPlanJson, kIrJson};  // kIrJson 用 @config.product_id
+    GeneratorOptions o;
+    o.config_keys = {"product_id"};
+    WorkflowGenerator gen(model, reg, nullptr, o);
+
+    auto r = gen.run("每天 8 点查价格，低于 800 通知我");
+    EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Generated);
+
+    std::string prompt;
+    for (Message const& m : model.last_msgs) prompt += m.text() + "\n";
+    EXPECT_NE(prompt.find("可用配置键"), std::string::npos);
+    EXPECT_NE(prompt.find("product_id"), std::string::npos);
+  }
+
+  {  // ② 契约不含 product_id → 生成的 IR 被 VR4 拦下，反复重写也不会返回 Generated
+    ScriptedChatModel model;
+    model.replies = {kPlanJson, kIrJson, kIrJson, kIrJson};  // 1 次 plan + 3 次 IR 尝试
+    GeneratorOptions o;
+    o.config_keys = {"other_key"};
+    WorkflowGenerator gen(model, reg, nullptr, o);
+
+    auto r = gen.run("每天 8 点查价格，低于 800 通知我");
+    EXPECT_NE(r.kind, WorkflowGenerationResult::Kind::Generated);
+  }
+
+  {  // 不声明契约 → 保持旧行为（kIrJson 照常生成）
+    ScriptedChatModel model;
+    model.replies = {kPlanJson, kIrJson};
+    WorkflowGenerator gen(model, reg);
+    auto r = gen.run("每天 8 点查价格，低于 800 通知我");
+    EXPECT_EQ(r.kind, WorkflowGenerationResult::Kind::Generated);
+  }
 }
