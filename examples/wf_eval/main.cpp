@@ -104,15 +104,19 @@ int main() {
             if (check(r.generated->ir, f)) feats = false;
 
           bool fired = false;
+          std::string why;
           auto wf = compile_workflow(r.generated->ir, registry);
-          if (wf) {
+          if (!wf) {
+            why = "编译失败：" + wf.error().message;  // 别把原因吞掉，否则无法诊断
+          } else {
             auto st = fire_once(*wf, Json{{"product_id", "P1001"}});
             fired = st.has_value();
+            // 失败原因必须打出来：光写"触发失败"无法分辨是模型写的引用不对还是运行时出问题
+            if (!fired) why = "触发失败：" + st.error().message;
           }
           pass = (expect == "Generated") && feats && fired;
           detail = "nodes=" + std::to_string(r.generated->ir.nodes.size()) +
-                   (fired ? " 触发OK" : " 触发失败");
-          (void)wf;
+                   (fired ? " 触发OK" : " " + why);
         }
         break;
     }
