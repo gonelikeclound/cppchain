@@ -19,3 +19,4 @@
 | 09 | [09-多智能体架构设计.md](09-多智能体架构设计.md) | M8 多智能体：subagent-as-tool + orchestrator-worker(串行) + handoff | ✅ 已实现 |
 | 10 | [10-m9收官设计.md](10-m9收官设计.md) | M9 收官：三中间件做深（token 阈值/成本量化/审批记忆化）+ 混合检索 + artifact 落盘 | ✅ 已实现 |
 | 11 | [11-组件化与命令行agent.md](11-组件化与命令行agent.md) | 拟定 M12：**agent 循环 = 图上的回边**（对齐 langgraph ReAct）+ history 节点 + 组件按名引用 + 工作路径续跑 | 🟡 设计（落盘机制已验证）|
+| 12 | [12-节点接口与注册表.md](12-节点接口与注册表.md) | 节点接口 `NodeType` + 工厂动态注册（内置 / 动态库 import）+ **统一日志**（history 改为日志投影）| 🟡 设计（会推翻 D 阶段落盘）|
