@@ -90,8 +90,9 @@ if(CPPCHAIN_BUILD_HTTP)
   target_include_directories(cppchain_http_curl PUBLIC
     ${PROJECT_SOURCE_DIR}/include)
 
+  # 只依赖 CURL：本库仅实现 http::Transport（+ core/cancel.hpp），与模型层无关。
+  # 早先 PUBLIC 链了 cppchain_model，导致"想单独用传输层"也被迫拖入整个模型层。
   target_link_libraries(cppchain_http_curl PUBLIC
-    cppchain_model
     CURL::libcurl)
 
   target_compile_options(cppchain_http_curl PRIVATE -Wall -Wextra -Wpedantic)
@@ -101,10 +102,10 @@ endif()
 add_executable(smoke smoke/main.cpp)
 target_link_libraries(smoke PRIVATE cppchain_message)
 target_compile_options(smoke PRIVATE -Wall -Wextra -Wpedantic)
-# ---- M6: cppchain_graph（极简 Graph 引擎 + M8 的 Agent 节点适配）----
+# ---- M6: cppchain_graph（极简 Graph 引擎）----
+# 只含引擎本身：仅依赖 state。图引擎是最可独立复用的一层，不应被上层拖累。
 add_library(cppchain_graph STATIC
-  graph/graph.cpp
-  graph/agent_node.cpp)
+  graph/graph.cpp)
 
 target_include_directories(cppchain_graph PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
@@ -114,10 +115,29 @@ target_include_directories(cppchain_graph SYSTEM BEFORE PUBLIC
 
 target_link_libraries(cppchain_graph PUBLIC
   cppchain_state
-  cppchain_agent   # M8: as_agent_node 需要 Agent（agent 不依赖 graph，单向无环）
   nlohmann_json::nlohmann_json)
 
 target_compile_options(cppchain_graph PRIVATE -Wall -Wextra -Wpedantic)
+
+# ---- M8: cppchain_graph_agent（Agent → 图节点适配器）----
+# 单独成库的理由：as_agent_node 只是把 agent::Agent 包成 NodeFn 的适配器，
+# 引擎本身不需要 agent。合并的话，任何只用 StateGraph 的人（如图 demo、workflow 编译器）
+# 都会被 PUBLIC 链拖入 agent→tool→model 整栈。
+add_library(cppchain_graph_agent STATIC
+  graph/agent_node.cpp)
+
+target_include_directories(cppchain_graph_agent PUBLIC
+  ${PROJECT_SOURCE_DIR}/include)
+
+target_include_directories(cppchain_graph_agent SYSTEM BEFORE PUBLIC
+  ${nlohmann_json_SOURCE_DIR}/include)
+
+target_link_libraries(cppchain_graph_agent PUBLIC
+  cppchain_graph
+  cppchain_agent   # 单向无环：agent 不依赖 graph
+  nlohmann_json::nlohmann_json)
+
+target_compile_options(cppchain_graph_agent PRIVATE -Wall -Wextra -Wpedantic)
 
 # ---- M7/M9: cppchain_agent（Agent 循环 + middleware + subagent + tokens/artifact）----
 add_library(cppchain_agent STATIC

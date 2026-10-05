@@ -69,13 +69,13 @@ target_link_libraries(state_tests PRIVATE
 target_compile_options(state_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(state_tests)
 
-# ---- M6: Graph 引擎测试 ----
+# ---- M6: Graph 引擎测试（含 M8 的 agent 适配器测试 → 需 graph_agent）----
 add_executable(graph_tests
   graph/graph_test.cpp
   graph/agent_node_test.cpp)
 
 target_link_libraries(graph_tests PRIVATE
-  cppchain_graph
+  cppchain_graph_agent
   GTest::gtest_main)
 
 target_compile_options(graph_tests PRIVATE -Wall -Wextra -Wpedantic)

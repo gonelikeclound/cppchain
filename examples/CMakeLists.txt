@@ -64,8 +64,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic)
   if(t IN_LIST AGENT_EXAMPLE_TARGETS)
     if(t IN_LIST SUBAGENT_EXAMPLE_TARGETS)
-      # graph → agent（graph PUBLIC 依赖 agent），满足静态库链接顺序
-      target_link_libraries(${t} PRIVATE cppchain_graph cppchain_agent cppchain_http_curl)
+      # 用到 as_agent_node → 需要 graph_agent 适配器库（它 PUBLIC 带出 graph 与 agent）
+      target_link_libraries(${t} PRIVATE cppchain_graph_agent cppchain_agent cppchain_http_curl)
     else()
       target_link_libraries(${t} PRIVATE cppchain_agent cppchain_http_curl)
     endif()
@@ -82,7 +82,9 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   elseif(t IN_LIST WF_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow cppchain_http_curl)
   elseif(t IN_LIST HTTP_EXAMPLE_TARGETS)
-    target_link_libraries(${t} PRIVATE cppchain_http_curl)
+    # chat_live 真机联调：既用传输层也用模型层。两库都显式列出
+    # （此前靠 http_curl 的传递依赖白蹭 model，已随依赖修正一并去掉）。
+    target_link_libraries(${t} PRIVATE cppchain_http_curl cppchain_model)
   elseif(t IN_LIST MODEL_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_model)
   else()
