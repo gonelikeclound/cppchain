@@ -24,7 +24,7 @@
 
 | 目录 | 用途 | 状态 |
 |------|------|------|
-| [01-discuss](01-discuss/README.md) | 讨论区 · 项目方向与理论探讨 | 🟢 进行中 |
-| [02-arch-design](02-arch-design/README.md) | 架构设计 · 分层与核心抽象 | ⚪ 待开始 |
-| [03-detail-design](03-detail-design/README.md) | 详细设计 · 模块内部实现 | ⚪ 待开始 |
-| [04-problems](04-problems/README.md) | 问题分析 · 解法对比与 demo 验证 | ⚪ 待开始 |
+| [01-discuss](01-discuss/README.md) | 讨论区 · 项目方向与理论探讨 | 🟢 已落地（含架构模式清单） |
+| [02-arch-design](02-arch-design/README.md) | 架构设计 · 分层与核心抽象 | 🟢 已落地（M1–M11 各层） |
+| [03-detail-design](03-detail-design/README.md) | 详细设计 · 模块内部实现 | 🟢 已落地 |
+| [04-problems](04-problems/README.md) | 问题分析 · 解法对比与 demo 验证 | 🟢 已落地（五大问题收官 + 主动智能） |

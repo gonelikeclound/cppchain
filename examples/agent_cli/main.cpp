@@ -1,6 +1,6 @@
 // demo: agent_cli —— 命令行的 single-agent / react-agent（--mode 切换策略，交互式 / 文件批量）
 //
-// 用途：myplane.md 架构模式实验的 CLI 载体。同一个可执行体用 --mode 切四种策略，
+// 用途：docs/01-discuss/04-架构模式清单.md 的架构模式实验之 CLI 载体。同一个可执行体用 --mode 切四种策略，
 //      在相同输入上对比「效果」差异（无工具基线 / 工具循环 / 历史压缩 / 副作用审批）。
 //
 // 四种模式（全部复用 Agent 循环 + 中间件，见 cppchain/agent/agent.hpp）：

@@ -15,7 +15,7 @@ source ~/opt/gcc16/env.sh
 
 cmake --preset dev            # 配置（首次会 FetchContent 拉 nlohmann/gtest）
 cmake --build --preset dev    # 编译
-ctest --preset dev            # 全部测试（136 项）
+ctest --preset dev            # 全部测试（339 项）
 
 ./run-demo.sh                 # 编译并运行全部 demo
 ./run-demo.sh --list          # 列出 demo
@@ -29,7 +29,8 @@ ctest --preset dev            # 全部测试（136 项）
 ## 分层结构（自底向上）
 
 ```
-agent/    Agent 循环（M7）：middleware = 压缩 / 截断 / 审批
+workflow/ 主动智能（M11）：IR → 校验 → 编译成图 → 生成端（ChatModel 驱动）
+agent/    Agent 循环（M7）：middleware = 压缩 / 截断 / 审批；M8 subagent-as-tool
 graph/    Graph 引擎（M6）：StateGraph、条件边、每步快照、恢复续跑
 state/    状态层（M5）：reducer / add_messages / Checkpointer / Store
 tool/     工具层（M3）：ToolSpec、注册表、**可插拔检索**、ToolNode（并行）
@@ -40,6 +41,10 @@ message/  消息层（M1）：Message/ContentBlock/**JSON 序列化契约**
 
 约束：**每层只依赖下层**；`cppchain_model` 不链接 libcurl（传输由外部注入）；
 状态全程 JSON（快照可直接落盘/跨进程）。
+
+每个模块一个静态库，尽量**小到可独立复用**：`cppchain_graph`（引擎）与
+`cppchain_graph_agent`（Agent→节点的适配器）分开，正是为此——只用 StateGraph 的人
+不会被拖入 agent 整栈。
 
 ## 里程碑
 
@@ -53,7 +58,10 @@ message/  消息层（M1）：Message/ContentBlock/**JSON 序列化契约**
 | M5 | State/Reducer + Checkpointer + Store | ✅ |
 | M6 | Graph 引擎（顺序 super-step + 快照恢复） | ✅ |
 | M7 | Agent 循环 + 三中间件（压缩/截断/审批） | ✅ |
-| M8–M10 | Subagent / 问题收官 / 运行时补全（Streaming·Interrupt·Send） | ⬜ |
+| M8 | Subagent（ask_expert / orchestrator-worker / handoff） | ✅ |
+| M9 | 五大问题收官（混合召回 / artifact 落盘 / 审批记忆化 / token 预算） | ✅ |
+| M10 | 运行时补全（Streaming·Interrupt·Send） | ⬜ |
+| M11 | 主动智能 Workflow（IR → 图 → 生成端 + proactive CLI） | ✅ |
 
 ## 几条实测结论（省得再踩）
 
@@ -70,5 +78,6 @@ message/  消息层（M1）：Message/ContentBlock/**JSON 序列化契约**
 include/cppchain/  头文件（按层分目录）      src/       实现（按层分目录）
 tests/             gtest（按层分目录）      examples/  每个 demo 验证一件事（见 examples/README.md）
 docs/              01-discuss / 02-arch-design / 03-detail-design / 04-problems
+主动智能/          Workflow IR 规范来源（10-eval-cases / 11-ir-syntax / 12-generation-process）
 run-demo.sh        编译并运行 demo
 ```

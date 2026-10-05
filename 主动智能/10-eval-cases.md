@@ -1,6 +1,6 @@
 # 评测用例集
 
-> 代码为准：`crates/demo_core/src/eval.rs`（`GOLDEN_CASES` / `BOUNDARY_CASES`），本文件为其用例转写。
+> 代码为准：`examples/support/features.hpp`（12 例固件）与 `tests/wf/features_test.cpp`（谓词单测），本文件为其用例转写。
 
 ## GOLDEN_CASES（7 例 · `Expect::Features`）
 

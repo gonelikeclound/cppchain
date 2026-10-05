@@ -1,6 +1,6 @@
 // demo: research_chat —— 单 Agent 连续聊天：意图二分（casual/research）+ 联网取数兜底保证（M7，真机）
 //
-// 架构参照 myplane.md 的「Single-Agent + Router + Skill」。
+// 架构参照 docs/01-discuss/04-架构模式清单.md 的「Single-Agent + Router + Skill」。
 // 路由器只分两类（不做按工具的分类 —— 否则以后每加一个工具就要加一个意图标签）：
 //   · casual   → 不挂任何工具（闲聊/记忆问答/常识答复）
 //   · research → 挂上「全部外部数据源」工具集（现在 = web_search + get_weather +

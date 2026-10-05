@@ -47,10 +47,12 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `subagent_ask_expert` | **M8 ask_expert（真机）**：父把子任务整体委派给 `make_subagent_tool` 包出的子代理，只回 `answer + stats`；token 会计证明主上下文不膨胀；子代理内部副作用工具仍走它自己的审批（父不豁免） | langgraph subgraph-as-tool、ask_expert |
 | `subagent_workers` | **M8 orchestrator-worker（串行版，真机）**：supervisor 用 M4 结构化输出拆任务 → 条件 router 按 results 下标串行点选 worker → finalize 汇总；worker 结果只进 `results` 槽，主线 messages 保持干净 | orchestrator-worker（无 Send 的串行版） |
 | `subagent_handoff` | **M8 handoff 简化（真机）**：worker 判领域不符 → 调用保留工具 `call_supervisor` → 包裹层 `Command{goto:["supervisor"]}` 上交 → 主管重派 → redispatch 上限兜底 | LangGraph `Command`(goto)/ handoff |
-| `m9_approval` | **M9 审批记忆化（离线）**：同一参数指纹只审一次、键序不影响指纹、只读工具免审；结论由 memoh_hits/denials 打印 | 审批记忆化 |
+| `m9_approval` | **M9 审批记忆化（离线）**：同一参数指纹只审一次、键序不影响指纹、只读工具免审；结论由 memo_hits/denials 打印 | 审批记忆化 |
 | `m9_artifact` | **M9 超长结果落盘（离线）**：`ArtifactToolResults` 全文→文件，prompt 只放引用行（8151B≈2698 tok → 67 tok）；含 `Message.artifact` 序列化 | artifact 落盘引用 |
 | `m9_hybrid` | **M9 混合召回三路对照（离线）**：keyword 3/5 vs vector 4/5 vs hybrid 4/5，向量补回改写、关键词保持在前 | HybridSelector（混合召回） |
 | `m9_budget` | **M9 压缩成本/收益量化（真机）**：`TrimHistory.max_tokens` 阈值触发 + 摘要真实 usage（~360 输出 tok 换 ~10k 输入 tok） | token 预算压缩 |
+| `wf_eval` | **主动智能生成端验收（真机）**：对 12 例评测固件跑完整管线（PlanStage → IRStage → compile → fire），按特征断言打矩阵（golden 7 例须 Generated + must_have 全中 + 能编译能跑）；含调度模拟 | 工作流生成（generate → validate → run） |
+| `proactive` | **主动智能交互演示（真机）**：`ask_user` 编号菜单澄清 → 易读 IR；`--intent` 单条 / `--question-answer` 批量自动作答 / `--cases` 并入 12 例矩阵（`./run-proactive.sh` 是它的便捷入口） | 澄清循环（human-in-the-loop 的离线替身） |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
