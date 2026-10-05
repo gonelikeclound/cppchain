@@ -15,6 +15,44 @@ Json state_with(Json results, std::string last) {
 
 }  // namespace
 
+// 回归：两条递归爆栈路径都必须被"拒绝"而不是崩掉进程 ——
+// validator 会 parse 模型产出的表达式，崩在这里等于 fail-closed 承诺失效。
+TEST(WfExpr, rejects_instead_of_crashing_on_deep_nesting) {
+  // ① 嵌套括号：300 层（token 数仍在上限内）→ 命中**深度**护栏
+  std::string parens;
+  for (int i = 0; i < 300; ++i) parens += '(';
+  parens += "true";
+  for (int i = 0; i < 300; ++i) parens += ')';
+  auto nested = Expr::parse(parens);
+  ASSERT_FALSE(nested.has_value());
+  EXPECT_NE(nested.error().find("嵌套过深"), std::string::npos);
+
+  // 连串取反：parse_not 自递归，同一护栏
+  auto bang = Expr::parse(std::string(300, '!') + "true");
+  ASSERT_FALSE(bang.has_value());
+  EXPECT_NE(bang.error().find("嵌套过深"), std::string::npos);
+
+  // ② 原先会 SIGSEGV 的量级（2 万层）：先被 token 上限拦下，同样不崩
+  std::string huge;
+  huge.reserve(40000);
+  for (int i = 0; i < 20000; ++i) huge += '(';
+  huge += "true";
+  for (int i = 0; i < 20000; ++i) huge += ')';
+  auto big = Expr::parse(huge);
+  ASSERT_FALSE(big.has_value());
+  EXPECT_NE(big.error().find("过长"), std::string::npos);
+}
+
+TEST(WfExpr, rejects_instead_of_crashing_on_long_flat_chain) {
+  // ② 求值路径：`true || true || …` 解析端是循环、不递归，但构造出的左倾树深度 = 项数，
+  // 求值端按树深递归 → 原先同样会爆栈。
+  std::string chain = "true";
+  for (int i = 0; i < 20000; ++i) chain += " || true";
+  auto r = Expr::parse(chain);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().find("过长"), std::string::npos);
+}
+
 TEST(WfExpr, literal_truthiness) {
   EXPECT_TRUE(Expr::parse("true")->eval(Json::object()));
   EXPECT_FALSE(Expr::parse("false")->eval(Json::object()));

@@ -221,6 +221,29 @@ struct Parser {
   std::vector<Tok> toks_;
   std::size_t i = 0;
 
+  // 栈深护栏。这里有两条**独立**的爆栈路径：
+  //   ① 解析：嵌套括号 / 连串取反是递归下降，深度无任何限制；
+  //   ② 求值：`a || b || c || …` 解析端是 while 循环（自身不递归），但会构造出
+  //      深度 = 项数的左倾树，求值端照样按树深递归。
+  // ① 由 kMaxDepth 直接限制；② 由 kMaxTokens 限制 —— AST 节点数 ≤ token 数，
+  // 而树的深度 ≤ 节点数，故求值递归深度同样有界。
+  // validator 会 parse 模型产出的表达式，崩在这里 = fail-closed 承诺失效，必须挡住。
+  static constexpr int kMaxDepth = 256;
+  static constexpr std::size_t kMaxTokens = 1024;
+  int depth = 0;
+
+  struct DepthGuard {
+    int& d;
+    bool ok;
+    explicit DepthGuard(int& depth) : d(depth), ok(++depth <= kMaxDepth) {}
+    ~DepthGuard() { --d; }
+  };
+
+  [[nodiscard]] std::string too_deep() const {
+    return "表达式嵌套过深（超过 " + std::to_string(kMaxDepth) + " 层，位置 " +
+           std::to_string(peek().pos) + "）";
+  }
+
   Tok const& peek() const { return toks_[i]; }
   bool at(Tok::K k) const { return peek().k == k; }
 
@@ -265,6 +288,8 @@ struct Parser {
   }
 
   std::expected<std::shared_ptr<Ast>, std::string> parse_not() {
+    DepthGuard g(depth);
+    if (!g.ok) return std::unexpected(too_deep());
     if (at(Tok::K::Not)) {
       ++i;
       auto c = parse_not();
@@ -300,6 +325,8 @@ struct Parser {
   }
 
   std::expected<std::shared_ptr<Ast>, std::string> parse_primary() {
+    DepthGuard g(depth);
+    if (!g.ok) return std::unexpected(too_deep());
     Tok const& t = peek();
     switch (t.k) {
       case Tok::K::LParen: {
@@ -454,6 +481,10 @@ struct Expr::Impl {
 std::expected<Expr, std::string> Expr::parse(std::string const& text) {
   auto toks = tokenize(text);
   if (!toks) return std::unexpected("表达式语法错误：" + toks.error());
+  // 长度上限：见 Parser 处注释 —— 它兜住"左倾长链"那条求值爆栈路径。
+  // 正常表达式只有几个 token，这个上限极宽松。
+  if (toks->size() > Parser::kMaxTokens)
+    return std::unexpected("表达式过长（token 数超过 " + std::to_string(Parser::kMaxTokens) + "）");
 
   Parser p(std::move(*toks));
   auto root = p.run();

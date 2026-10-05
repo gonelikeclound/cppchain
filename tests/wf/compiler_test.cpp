@@ -134,6 +134,41 @@ TEST(WfCompiler, on_error_retry_succeeds) {
   EXPECT_EQ((*r)["results"]["run"]["price"].get<int>(), 777);
 }
 
+// 回归：on_error.fallback 指向 **label** 时，编译期必须把它解析成该标签的续接节点。
+// 原先 fallback 直接用原始 id 构造 Command.goto，而 label 并不注册为图节点
+// → validate 通过、compile 成功，一 fire 就 "Runtime: unknown node: L0"。
+TEST(WfCompiler, on_error_fallback_may_target_a_label) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  reg.add(cppchain::tool::make_tool(
+      "always_fail", "永远失败", Json::object(),
+      [](Json const&, tool::ToolContext&) -> std::expected<Json, tool::ToolError> {
+        return std::unexpected(tool::ToolError{"boom"});
+      }));
+
+  Json ir_json = Json{
+      {"id", "wf_fb_label"},
+      {"trigger", Json{{"source", "time"}, {"timing", Json{{"kind", "schedule"},
+                                                           {"schedule", "0 8 * * *"}}}}},
+      {"nodes", Json::array(
+                    {Json{{"id", "main"}, {"tool", "always_fail"}, {"parameters", Json::object()},
+                          {"output_schema", Json{{"x", "number"}}}, {"next", "L0"},
+                          {"on_error", Json{{"retry", 0}, {"fallback", "L0"}}}},
+                     Json{{"id", "L0"}, {"kind", "label"}},
+                     Json{{"id", "backup"}, {"tool", "echo"}, {"parameters", Json{{"v", "fallback!"}}},
+                          {"output_schema", Json{{"value", "string"}}}, {"next", "_turn_end"}}})}};
+
+  auto ir = WorkflowIR::parse(ir_json);
+  ASSERT_TRUE(ir) << ir.error();
+  auto wf = compile_workflow(*ir, reg);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  // main 恒失败 → 唯一到达 backup 的路径就是 fallback
+  auto r = fire_once(*wf, Json::object());
+  ASSERT_TRUE(r) << r.error().message;
+  EXPECT_EQ((*r)["results"]["backup"]["value"].get<std::string>(), "fallback!");
+}
+
 TEST(WfCompiler, on_error_fallback_runs_and_runtime_thrown) {
   FakeToolSinks sinks;
   tool::ToolRegistry reg = make_fake_tools(sinks);

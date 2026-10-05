@@ -2,6 +2,7 @@
 #include "cppchain/workflow/compiler.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -95,11 +96,18 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
         std::string const node_id = n.id;
         std::string const tool = n.tool;
         Json const parameters = n.parameters;
-        std::optional<OnErrorIR> const on_error = n.on_error;
+        int const retry = n.on_error ? n.on_error->retry : 0;
+        // fallback 与 next/then/else 走**同一条**解析：label → 它的续接节点、_turn_end → kEnd。
+        // 原先直接把原始 id 塞进 Command.goto，而 label 并不注册为图节点
+        // → 能过校验、能编译，一跑就是 "unknown node"（fail-closed 承诺失效）。
+        std::optional<std::string> const fallback =
+            (n.on_error && n.on_error->fallback)
+                ? std::optional<std::string>(resolve(*n.on_error->fallback))
+                : std::nullopt;
         tool::ToolRegistry const* reg = &registry;
 
         g.add_node(
-            n.id, [node_id, tool, parameters, on_error, reg](Json const& state, NodeContext&) {
+            n.id, [node_id, tool, parameters, retry, fallback, reg](Json const& state, NodeContext&) {
               tool::ToolSpec const* spec = reg->find(tool);
               if (spec == nullptr)
                 throw tool::ToolException("tool '" + tool + "' not in registry (node '" +
@@ -109,8 +117,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
               tool::ToolContext tctx;
               tctx.tool_call_id = node_id;  // 幂等/审计兜底：节点 id 即本次调用的标识
 
-              int const attempts = on_error ? on_error->retry : 0;
-              for (int a = 0; a <= attempts; ++a) {
+              for (int a = 0; a <= retry; ++a) {
                 auto r = spec->handler(args, tctx);
                 if (r) {
                   Json update = Json{{kResultsKey, Json{{node_id, *r}}},
@@ -119,12 +126,9 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
                 }
               }
               // 失败耗尽；无 fallback → 抛给引擎（→ WorkflowError::Runtime）
-              if (on_error && on_error->fallback) {
-                std::string const fb = *on_error->fallback;
-                return Command{{}, {fb == "_turn_end" ? graph::kEnd : fb}};
-              }
+              if (fallback) return Command{{}, {*fallback}};
               throw tool::ToolException("tool '" + tool + "' failed after " +
-                                        std::to_string(attempts + 1) + " attempts (node '" +
+                                        std::to_string(retry + 1) + " attempts (node '" +
                                         node_id + "')");
             });
         // 成功出口：静态边（next 目标已由 resolve 替换 label/_turn_end）
