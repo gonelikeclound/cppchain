@@ -1,6 +1,8 @@
 // cppchain —— src/workflow/compiler.cpp
 #include "cppchain/workflow/compiler.hpp"
 
+#include <exception>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <string>
@@ -117,19 +119,35 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
               tool::ToolContext tctx;
               tctx.tool_call_id = node_id;  // 幂等/审计兜底：节点 id 即本次调用的标识
 
+              std::string last_err;
               for (int a = 0; a <= retry; ++a) {
-                auto r = spec->handler(args, tctx);
+                // handler **抛异常**与返回 unexpected 同等对待：都算本次尝试失败，
+                // 交给 retry / fallback 处置。比照 ToolNode::execute_one 的纪律
+                // （那里也是把异常转成错误、不让它穿透）—— 否则 on_error 在最常见的
+                // 失败形态（工具抛错）下完全不生效：IR 明明声明了 fallback，照样直接崩。
+                std::expected<nlohmann::json, tool::ToolError> r =
+                    std::unexpected(tool::ToolError{"(handler 未产生结果)"});
+                try {
+                  r = spec->handler(args, tctx);
+                } catch (std::exception const& e) {
+                  r = std::unexpected(tool::ToolError{std::string("handler threw: ") + e.what()});
+                } catch (...) {
+                  r = std::unexpected(tool::ToolError{"handler threw: (非 std 异常)"});
+                }
+
                 if (r) {
                   Json update = Json{{kResultsKey, Json{{node_id, *r}}},
                                      {kLastExecKey, node_id}};
                   return Command::with_update(std::move(update));
                 }
+                last_err = r.error().message;
               }
               // 失败耗尽；无 fallback → 抛给引擎（→ WorkflowError::Runtime）
               if (fallback) return Command{{}, {*fallback}};
+              // 带上最后一次的具体原因：只说"failed after N attempts"没法排查
               throw tool::ToolException("tool '" + tool + "' failed after " +
                                         std::to_string(retry + 1) + " attempts (node '" +
-                                        node_id + "')");
+                                        node_id + "'): " + last_err);
             });
         // 成功出口：静态边（next 目标已由 resolve 替换 label/_turn_end）
         g.add_edge(n.id, resolve(n.next));

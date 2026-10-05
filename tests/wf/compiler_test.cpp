@@ -297,3 +297,57 @@ TEST(WfCompiler, nested_refs_inside_containers_are_resolved) {
   EXPECT_EQ(got["obj"]["nested"].get<int>(), 799);  // 修复前是字面量
   EXPECT_EQ(got["list"][1].get<std::string>(), "literal");  // 无引用项原样保留
 }
+
+// 回归：工具 handler **抛异常** 时，on_error 的 retry / fallback 必须照样生效。
+// 原先 compiler 直接调 handler，异常穿透节点 → 重试循环与 fallback 全被绕过，
+// 而 IR 明明声明了 on_error（真机验收里模型产出的 IR 正是这个形态）。
+// 这与 ToolNode::execute_one 的纪律不一致：那里是异常转错误回喂，不让它穿透。
+TEST(WfCompiler, on_error_applies_when_handler_throws) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  int calls = 0;
+  reg.add(cppchain::tool::make_tool(
+      "boom", "总是抛异常", cppchain::tool::SchemaBuilder().build(),
+      [&calls](Json const&, tool::ToolContext&) -> std::expected<Json, tool::ToolError> {
+        ++calls;
+        throw std::runtime_error("工具内部炸了");  // 抛，而不是返回 unexpected
+      }));
+
+  // with_backup=false 时不留 backup 节点 —— 没有 fallback 指向它，它就是死节点（VG7）
+  auto ir_of = [](Json on_error, bool with_backup) {
+    Json nodes = Json::array(
+        {Json{{"id", "main"}, {"tool", "boom"}, {"parameters", Json::object()},
+              {"output_schema", Json{{"x", "number"}}}, {"next", "_turn_end"},
+              {"on_error", std::move(on_error)}}});
+    if (with_backup)
+      nodes.push_back(Json{{"id", "backup"}, {"tool", "echo"},
+                           {"parameters", Json{{"v", "fallback!"}}},
+                           {"output_schema", Json{{"value", "string"}}}, {"next", "_turn_end"}});
+    return Json{
+        {"id", "wf_throw"},
+        {"trigger", Json{{"source", "time"},
+                         {"timing", Json{{"kind", "schedule"}, {"schedule", "0 8 * * *"}}}}},
+        {"nodes", std::move(nodes)}};
+  };
+
+  {  // 有 fallback：异常也算失败 → 走降级，而不是把异常抛穿整张图
+    auto ir = WorkflowIR::parse(ir_of(Json{{"retry", 2}, {"fallback", "backup"}}, true));
+    ASSERT_TRUE(ir) << ir.error();
+    auto wf = compile_workflow(*ir, reg);
+    ASSERT_TRUE(wf) << wf.error().message;
+    auto r = fire_once(*wf, Json::object());
+    ASSERT_TRUE(r) << r.error().message;  // 修复前：Runtime: node 'main' threw: 工具内部炸了
+    EXPECT_EQ((*r)["results"]["backup"]["value"].get<std::string>(), "fallback!");
+    EXPECT_EQ(calls, 3);  // retry=2 → 共 3 次尝试，异常同样计入重试
+  }
+
+  {  // 无 fallback：耗尽后 fail-closed，且错误里要带上底层原因（便于排查）
+    auto ir = WorkflowIR::parse(ir_of(Json{{"retry", 0}}, false));
+    ASSERT_TRUE(ir) << ir.error();
+    auto wf = compile_workflow(*ir, reg);
+    ASSERT_TRUE(wf) << wf.error().message;
+    auto r = fire_once(*wf, Json::object());
+    ASSERT_FALSE(r);
+    EXPECT_NE(r.error().message.find("工具内部炸了"), std::string::npos) << r.error().message;
+  }
+}
