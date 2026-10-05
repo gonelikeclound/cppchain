@@ -77,21 +77,43 @@ std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
     out.trigger.enabled = trig["enabled"].get<bool>();
   fill_timing(out.trigger, trig);
 
+  // ⑤ imports：动态库导入声明（形状先收一遍，真正 dlopen/校验在 load_workflow_imports）
+  if (j.contains("imports")) {
+    if (!j["imports"].is_array()) return err("imports 必须是数组");
+    for (Json const& imp : j["imports"]) {
+      if (!imp.is_object())
+        return err("imports 里的条目不是对象（应为 {lib, nodes[]}）");
+      ImportIR in;
+      if (imp.contains("lib") && imp["lib"].is_string()) in.lib = imp["lib"].get<std::string>();
+      if (imp.contains("nodes") && imp["nodes"].is_array())
+        for (Json const& nn : imp["nodes"])
+          if (nn.is_string()) in.nodes.push_back(nn.get<std::string>());
+      if (in.lib.empty())
+        return err("imports 里的条目缺 lib（库是信任单元，库名必须显式）");
+      if (in.nodes.empty())
+        return err("imports['" + in.lib + "'] 必须显式列出节点名（A1 枚举落地前省略即报错）");
+      out.imports.push_back(std::move(in));
+    }
+  }
+
   Json const& nodes = j["nodes"];
   for (Json const& node : nodes) {
     if (!node.is_object()) return err("nodes[?] is not an object");
     if (!node.contains("id") || !node["id"].is_string())
       return err("node has no id (string)");
     std::string id = node["id"].get<std::string>();
-    auto kind = classify(node);
-    if (!kind) return err(std::string(kind.error()) + " (node '" + id + "')");
-    NodeType const* type = node_type_of(*kind);
-    if (type == nullptr)  // 注册表缺项 = 内部错误
-      return err("internal: no NodeType registered for this kind (node '" + id + "')");
+    // 判别由注册表驱动（内置按 matches、导入按显式 kind 名）—— 与 classify 的区别
+    // 是它能认出动态节点；classify 保留给"内置 only"的语义（生成器/测试仍可用）。
+    NodeType const* type = node_type_for_node(node);
+    if (type == nullptr) {
+      auto kind = classify(node);  // 产出可回喂的错误信息（unknown kind / no key / ambiguous）
+      if (!kind) return err(std::string(kind.error()) + " (node '" + id + "')");
+      return err("internal: 已分类但找不到 NodeType（node '" + id + "'）");
+    }
     NodeIR n;
     n.raw = node;
     n.id = std::move(id);
-    n.kind = *kind;
+    n.kind = type->kind;
     type->parse(n, node);  // 类型专属字段
     out.nodes.push_back(std::move(n));
   }
@@ -110,12 +132,20 @@ Json WorkflowIR::to_json() const {
   Json nodes = Json::array();
   for (NodeIR const& n : this->nodes) {
     Json node{{"id", n.id}};
-    NodeType const* type = node_type_of(n.kind);
+    // 按名分发：动态节点（NodeKind::Dynamic）也能序列化回原形状
+    NodeType const* type = node_type_of_name(type_name_of(n));
     if (type != nullptr) type->write(node, n);
     nodes.push_back(std::move(node));
   }
 
-  return Json{{"id", id}, {"trigger", std::move(t)}, {"nodes", std::move(nodes)}};
+  Json out{{"id", id}, {"trigger", std::move(t)}, {"nodes", std::move(nodes)}};
+  if (!imports.empty()) {
+    Json arr = Json::array();
+    for (ImportIR const& im : imports)
+      arr.push_back(Json{{"lib", im.lib}, {"nodes", im.nodes}});
+    out["imports"] = std::move(arr);
+  }
+  return out;
 }
 
 std::optional<std::size_t> WorkflowIR::index_of(std::string const& id) const {

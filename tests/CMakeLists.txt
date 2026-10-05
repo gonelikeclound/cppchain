@@ -102,10 +102,18 @@ target_link_libraries(agent_tests PRIVATE
 target_compile_options(agent_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(agent_tests)
 
-# ---- 主动智能 workflow：IR/引用/表达式/校验/编译/生成/特征 ----
+# ---- 主动智能 workflow：IR/引用/表达式/校验/编译/生成/特征/动态库 ----
 # （feaked 工具离线确定性；生成器用 ScriptedChatModel 全离线驱动）
 # 特征谓词 + 12 例固件在 examples/support/features.hpp（仅 demo/评测用，不进库）：
 # 这里是纯 header，加 examples/ 头路径直接引用同一份。
+add_library(node_demo_plugin SHARED plugin_demo/node_demo_plugin.cpp)
+target_include_directories(node_demo_plugin PRIVATE ${PROJECT_SOURCE_DIR}/include)
+# nlohmann 纯头：SYSTEM include 压制其第三方告警（与其它 target 同一套做法）——
+# .so 不需要链接任何 cppchain 静态库（静态库非 -fPIC 塞进 .so 会 ld 报错；
+# 插件对 cc.graph.* / message::* 的引用保持未定义，dlopen 时宿主 --export-dynamic 解析）
+target_include_directories(node_demo_plugin SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(node_demo_plugin PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(workflow_tests
   wf/expr_test.cpp
   wf/refs_test.cpp
@@ -116,14 +124,25 @@ add_executable(workflow_tests
   wf/richtools_test.cpp
   wf/fakes_test.cpp
   wf/agent_loop_test.cpp
-  wf/history_nodes_test.cpp)
+  wf/history_nodes_test.cpp
+  wf/plugin_import_test.cpp)
 
 target_include_directories(workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)
 
 target_link_libraries(workflow_tests PRIVATE
   cppchain_workflow
   GTest::gtest_main
-  Threads::Threads)
+  Threads::Threads
+  ${CMAKE_DL_LIBS})
+
+# 把宿主（workflow_tests）的符号导出进全局作用域，供 dlopen 的插件 .so 解析：
+# （StateGraph::* / message::* 等在 .so 里保持未定义，加载时从这里找）
+target_link_options(workflow_tests PRIVATE -Wl,--export-dynamic)
+
+# 给测试 bake 进 .so 的绝对路径（dlopen 用）；依赖关系保证先构建
+target_compile_definitions(workflow_tests PRIVATE
+  CPPCHAIN_NODE_DEMO_SO="$<TARGET_FILE:node_demo_plugin>")
+add_dependencies(workflow_tests node_demo_plugin)
 
 target_compile_options(workflow_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(workflow_tests)

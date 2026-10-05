@@ -62,6 +62,16 @@ enum class NodeKind {
   RunTools,  // 执行最后一条 AI 消息的 tool_calls → ToolMessage 追加进 messages
   LoadHistory,   // 工作路径的历史消息 → 追加进 state.messages（④：日志的 replay 投影）
   // （save_history 已随 ④ 删除：history = 日志的投影，不再单独落盘）
+  // ---- ⑤ 动态库导入 ----
+  Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
+             // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
+             // label/goto/on_error 等结构性判定时区分"不是内置节点"。
+};
+
+// ---- ⑤ 动态库导入声明（docs/02-arch-design/12 §5.3）----
+struct ImportIR {
+  std::string lib;                 // 库路径（**信任单元**，永远显式列出）
+  std::vector<std::string> nodes;  // 显式节点名（A1 枚举落地前省略即报错）；取不到 → 校验期拒
 };
 
 struct OnErrorIR {
@@ -111,6 +121,7 @@ struct WorkflowIR {
   std::string id;
   TriggerIR trigger;
   std::vector<NodeIR> nodes;                 // nodes[0] = 入口（隐式，§3）
+  std::vector<ImportIR> imports;             // ⑤：动态库导入声明（顶层"imports"键）
 
   // 从顶层 JSON 解析；失败返回人类可读错误（可直接回喂给生成器）。
   // 只做"看懂结构"，不做规则校验（规则在 validator.hpp，是另一道关）。

@@ -151,15 +151,15 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   auto sink = std::make_shared<SessionSink>();
   LoggingStateGraph g(std::move(schema));
   g.sink = sink;
-  for (NodeIR const& n : ir.nodes) {  // 预登记 node_kind（wrapper 在运行期查表）
-    NodeType const* t = node_type_of(n.kind);
+  for (NodeIR const& n : ir.nodes) {  // 预登记 node_kind（wrapper 在运行期查表；按名分发含动态节点）
+    NodeType const* t = node_type_of_name(type_name_of(n));
     if (t != nullptr) g.note_kind(n.id, t->name);
   }
 
   // 3) 逐节点编译：走**注册表**（加一种节点不必再改这里）
   NodeType::CompileContext cctx{g, &registry, opts.components, resolve, 0, {}, sink};
   for (NodeIR const& n : ir.nodes) {
-    NodeType const* type = node_type_of(n.kind);
+    NodeType const* type = node_type_of_name(type_name_of(n));
     if (type == nullptr || !type->compile)
       return invalid("internal: 该节点类型没有注册 compile（node '" + n.id + "'）");
     type->compile(n, cctx);

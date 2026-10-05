@@ -171,6 +171,7 @@ add_library(cppchain_workflow STATIC
   workflow/compiler.cpp
   workflow/session_log.cpp
   workflow/node_types.cpp
+  workflow/plugin.cpp
   workflow/generator.cpp)
 
 target_include_directories(cppchain_workflow PUBLIC

@@ -5,9 +5,11 @@
 #include "cppchain/workflow/node_type.hpp"
 
 #include <cctype>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 #include "cppchain/message/serializer.hpp"
@@ -606,6 +608,62 @@ std::vector<NodeType> const& builtin_node_types() {
 NodeType const* node_type_of(NodeKind k) {
   for (NodeType const& t : builtin_node_types())
     if (t.kind == k) return &t;
+  return nullptr;
+}
+
+// ---- ⑤ 运行期导入注册表（docs/12 §5）----
+// 内置保持集中注册（可读性资产）；导入类型进程期追加在这里。名字为唯一键（内置优先）。
+namespace {
+
+std::unordered_map<std::string, std::unique_ptr<NodeType>>& imported_node_types() {
+  static std::unordered_map<std::string, std::unique_ptr<NodeType>> m;
+  return m;
+}
+
+}  // namespace
+
+NodeType const* node_type_of_name(std::string_view name) {
+  for (NodeType const& t : builtin_node_types())
+    if (t.name == name) return &t;
+  auto& m = imported_node_types();
+  auto const it = m.find(std::string(name));
+  return it != m.end() ? it->second.get() : nullptr;
+}
+
+bool register_dynamic_node_type(std::string name, std::unique_ptr<NodeType> t) {
+  for (NodeType const& b : builtin_node_types())
+    if (b.name == name) return false;
+  auto& m = imported_node_types();
+  if (m.count(name)) return false;
+  // 名字的稳定存储：泄漏一个 std::string（进程期，与内置表的生命周期同规）；
+  // 这样 NodeType::name 的 string_view 永远有效（名字多为短串，避免 SSO 失效）。
+  auto* stable = new std::string(std::move(name));
+  t->name = *stable;
+  m.emplace(*stable, std::move(t));
+  return true;
+}
+
+std::string type_name_of(NodeIR const& n) {
+  if (NodeType const* t = node_type_of(n.kind); t != nullptr) return std::string(t->name);
+  if (n.raw.is_object())
+    if (auto const it = n.raw.find("kind"); it != n.raw.end() && it->is_string())
+      return it->get<std::string>();
+  return {};
+}
+
+NodeType const* node_type_for_node(Json const& node) {
+  // 1) 内置 matches（显式 kind / 历史写法）；命中>1 是"歧义即错"，不该落到动态名兜底
+  std::vector<NodeType const*> hits;
+  for (NodeType const& t : builtin_node_types())
+    if (t.matches(node)) hits.push_back(&t);
+  if (hits.size() == 1) return hits[0];
+  if (!hits.empty()) return nullptr;  // 歧义
+
+  // 2) 内置没命中 → 显式 kind 名匹配导入的动态节点（kind 就是它的名字，§5.3）
+  if (node.contains("kind") && node["kind"].is_string())
+    if (NodeType const* t = node_type_of_name(node["kind"].get<std::string>());
+        t != nullptr && t->kind == NodeKind::Dynamic)
+      return t;
   return nullptr;
 }
 

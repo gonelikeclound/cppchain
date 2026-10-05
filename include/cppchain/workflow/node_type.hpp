@@ -5,7 +5,8 @@
 // "JSON 声明"与"C++ 实现"之间没有绑定。本文件把两者绑在一处，于是
 // **加一种节点 = 加一个 NodeType + 一行注册**。
 //
-// 本步（①）保留 NodeKind 枚举作内部判别；彻底去掉枚举要等 ②（把图规则收敛到 edges()）。
+// 分发：② 起图规则由 edges() 统一驱动；⑤ 起**框架分发一律按名**（node_type_of_name，
+// 内置先、导入后；NodeKind 只留给 label/goto/on_error 等结构性判定，见 §4.3）。
 #pragma once
 
 #include <nlohmann/json.hpp>
@@ -88,7 +89,24 @@ struct NodeType {
 // 内置节点类型表（9 种）。静态、不可变、生命周期贯穿进程。
 [[nodiscard]] std::vector<NodeType> const& builtin_node_types();
 
-// 按内部判别取类型；找不到 → nullptr（调用方应视为内部错误）
+// 按内部判别取类型（内置表）。Dynamic 节点**不要**用它 —— 分发一律按名字走。
 [[nodiscard]] NodeType const* node_type_of(NodeKind k);
+
+// ---- ⑤ 运行期导入（docs/12 §5）----
+// 内置 + 运行期导入的**统一按名查找**：内置先、导入后；找不到 → nullptr。
+// 这是 ③④⑤ 之后框架的**唯一分发入口**（parse/validator/compiler/展示都用它）。
+[[nodiscard]] NodeType const* node_type_of_name(std::string_view name);
+
+// 注册一个导入的节点类型（宿主在 dlopen/校验后调用）。名字与内置冲突 / 重复导入 → false。
+// 传入的 name 会被**进程期稳定持有**，NodeType::name 指向它（与内置表的生命周期同规）。
+[[nodiscard]] bool register_dynamic_node_type(std::string name, std::unique_ptr<NodeType> t);
+
+// 一个节点的规范类型名：内置 → NodeType::name（历史写法也归一到它）；
+// 动态 → JSON 里的 kind 字面量。用于所有按名分发点。
+[[nodiscard]] std::string type_name_of(NodeIR const& n);
+
+// 判别 + 查找一个 JSON 节点（parse 用）：内置按 matches（显式/历史写法，命中>1 歧义 → 不返回），
+// 未命中内置时按显式 kind 名找导入节点；都不中 → nullptr（调用方报"未知 kind"）。
+[[nodiscard]] NodeType const* node_type_for_node(Json const& node);
 
 }  // namespace cppchain::workflow

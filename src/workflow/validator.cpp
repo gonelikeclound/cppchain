@@ -75,6 +75,10 @@ bool is_internal_key(std::string_view id) {
   return id == kResultsKey || id == kLastExecKey || id == kLoopCountsKey || id == kConfigKey;
 }
 
+// ⑤：框架对节点的**统一按名分发**（内置或导入的动态节点都走这里）。
+// 所有"要调这个节点的 validate/edges/ref_texts"的地方用它，别再用 node_type_of(kind)。
+NodeType const* node_type_of_ir(NodeIR const& n) { return node_type_of_name(type_name_of(n)); }
+
 // ---- cron（VT5）----
 
 // 数值 token："*" | N | N-M（都在范围内）；不带 "/"（步进拒绝）。
@@ -204,7 +208,7 @@ std::string resolve_target(Ctx const& c, std::string const& t) {
 void find_refs_in_node(std::vector<std::pair<std::string, Ref>>& out, NodeIR const& n) {
   // 引用收集与 VR1 的语法检查走**同一个钩子**（NodeType::ref_texts）——
   // 原先两处各自按 kind 走、都只覆盖 Tool/Expr，history 节点的 path/session 两边都漏。
-  NodeType const* t = node_type_of(n.kind);
+  NodeType const* t = node_type_of_ir(n);
   if (t == nullptr || !t->ref_texts) return;
   for (std::string const& text : t->ref_texts(n))
     for (RefScan const& sc : scan_refs(text))
@@ -290,7 +294,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       c.err("VN2", "节点 id 不得用保留名 '" + n.id + "'");
 
     // 类型专属校验走注册表（VN5–VN11）。通用图规则不在这里 —— 见下方 VG 段（② 会收敛到 edges()）。
-    NodeType const* type = node_type_of(n.kind);
+    NodeType const* type = node_type_of_ir(n);
     if (type != nullptr && type->validate) {
       NodeType::ValidateContext const vctx{opts.registry, opts.components};
       NodeType::ErrorSink const sink = [&c](std::string rule, std::string message) {
@@ -298,6 +302,21 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       };
       type->validate(n, vctx, sink);
     }
+  }
+
+  // ---- VI：imports 形状（⑤ 动态库导入）----
+  // 真正的"库存在 / 符号取得到 / 版本匹配"由 load_workflow_imports 在 parse 前做（fail-closed）；
+  // 这里兜底程序化构造的 IR（不经 parse 直接 validate 的）。
+  for (std::size_t i = 0; i < ir.imports.size(); ++i) {
+    ImportIR const& im = ir.imports[i];
+    std::string const where = "imports[" + std::to_string(i) + "]";
+    if (im.lib.empty())
+      c.err("VI1", where + " 缺 lib（库是信任单元，库名必须显式）");
+    if (im.nodes.empty())
+      c.err("VI1", where + " 必须显式列出节点名（A1 枚举落地前省略即报错）");
+    for (std::string const& nm : im.nodes)
+      if (!is_ident(nm))
+        c.err("VI1", where + " 的节点名 '" + nm + "' 非法（应为 [A-Za-z][A-Za-z0-9_]*）");
   }
 
   // ---- 唯一性 ----
@@ -349,7 +368,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
 
   // VG1：每条边的目标必须存在（或为保留名）
   for (NodeIR const& n : ir.nodes) {
-    NodeType const* t = node_type_of(n.kind);
+    NodeType const* t = node_type_of_ir(n);
     if (t == nullptr || !t->edges) continue;
     for (NodeType::Edge const& e : t->edges(n)) {
       if (e.target.empty()) continue;  // 缺字段由各类型的 validate 报（VN*）
@@ -375,7 +394,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   {
     std::unordered_map<std::string, bool> targeted;
     for (NodeIR const& m : ir.nodes) {
-      NodeType const* t = node_type_of(m.kind);
+      NodeType const* t = node_type_of_ir(m);
       if (t == nullptr || !t->edges) continue;
       for (NodeType::Edge const& e : t->edges(m)) targeted[e.target] = true;
     }
@@ -405,7 +424,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   {
     std::unordered_map<std::string, std::vector<std::string>> adj;
     for (NodeIR const& n : ir.nodes) {
-      NodeType const* t = node_type_of(n.kind);
+      NodeType const* t = node_type_of_ir(n);
       if (t == nullptr || !t->edges) continue;
       for (NodeType::Edge const& e : t->edges(n)) {
         if (!e.forward) continue;  // 回边（goto）不参与前向环判定
@@ -472,7 +491,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       auto it = c.kind.find(v);
       if (it == c.kind.end() || it->second == NodeKind::Label) continue;
       NodeIR const& node = ir.nodes[c.index.at(v)];
-      NodeType const* t = node_type_of(node.kind);
+      NodeType const* t = node_type_of_ir(node);
       if (t == nullptr || !t->edges) continue;
       for (NodeType::Edge const& e : t->edges(node)) {
         if (!e.forward) continue;  // 回边不参与"从入口可达"的展开
@@ -489,7 +508,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   // VR1：本节点所有"可能含引用"的文本片段里，$/@config 片段必须语法合法。
   // 走 NodeType::ref_texts —— 与下面的引用收集**同一个钩子**，不会再出现某类节点漏检。
   for (NodeIR const& n : ir.nodes) {
-    NodeType const* t = node_type_of(n.kind);
+    NodeType const* t = node_type_of_ir(n);
     if (t == nullptr || !t->ref_texts) continue;
     for (std::string const& text : t->ref_texts(n))
       if (auto p = ref_syntax_problem(text))

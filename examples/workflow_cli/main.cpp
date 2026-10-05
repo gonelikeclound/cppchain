@@ -12,6 +12,7 @@
 //   --workdir DIR   工作路径（决定会话日志落点；缺省 cwd）
 //   --session NAME  同路径下多段会话（缺省 "cli"）
 //   --workflow FILE 手写 IR（必填；生成端产出这些节点是 F 阶段的事）
+//   --allow-import  放行 IR 顶部 imports 声明的动态库节点（§5.5：默认拒绝）
 //   --show          不起模型，只打印已存历史
 //   --reset         清空该会话的日志
 //
@@ -22,6 +23,7 @@
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/components.hpp>
 #include <cppchain/workflow/ir.hpp>
+#include <cppchain/workflow/plugin_node.hpp>
 #include <cppchain/workflow/session_log.hpp>
 
 #include <filesystem>
@@ -82,18 +84,19 @@ void print_session(std::string const& path) {
 
 int main(int argc, char** argv) {
   std::string workdir = ".", session = "cli", workflow_file, input;
-  bool reset = false, show = false;
+  bool reset = false, show = false, allow_import = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string const a = argv[i];
     if (a == "--workdir" && i + 1 < argc) workdir = argv[++i];
     else if (a == "--session" && i + 1 < argc) session = argv[++i];
     else if (a == "--workflow" && i + 1 < argc) workflow_file = argv[++i];
+    else if (a == "--allow-import") allow_import = true;
     else if (a == "--reset") reset = true;
     else if (a == "--show") show = true;
     else if (a == "--help" || a == "-h") {
       std::println("用法: workflow_cli --workflow FILE [--workdir DIR] [--session NAME] "
-                   "[--reset] [--show] \"你的输入\"");
+                   "[--allow-import] [--reset] [--show] \"你的输入\"");
       return 0;
     } else input = input.empty() ? a : input + " " + a;
   }
@@ -163,6 +166,17 @@ int main(int argc, char** argv) {
     std::println("workflow JSON 解析失败: {}", e.what());
     return 2;
   }
+  // ⑤ 动态库导入（§5.5：加载 .so = 任意代码执行，默认拒绝、显式 --allow-import 才放行）。
+  // 必须在 parse 前：parse 需要按名字判别动态节点。
+  if (ir_json.contains("imports")) {
+    auto loaded = load_workflow_imports(ir_json, allow_import, /*host_log=*/nullptr);
+    if (!loaded) {
+      std::println("import 失败: {}", loaded.error());
+      return 2;
+    }
+    std::println("已加载动态节点: {} 个", *loaded);
+  }
+
   auto ir = WorkflowIR::parse(ir_json);
   if (!ir) {
     std::println("IR 解析失败: {}", ir.error());
