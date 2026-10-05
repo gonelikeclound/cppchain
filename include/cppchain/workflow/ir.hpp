@@ -11,13 +11,35 @@
 #include <nlohmann/json.hpp>
 
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cppchain::workflow {
 
 using Json = nlohmann::json;
+
+// ---- M12：保留目标名（编译期映射，不是节点）----
+inline constexpr char kTurnEndName[] = "_turn_end";  // 正常终止
+inline constexpr char kFailName[] = "_fail";         // 以错误终止（route 的 fail-closed 档）
+
+// ---- M12：route 的判别式与 outcome（**封闭词表**）----
+// 判别式用 cppchain 自己归一化过的 outcome，不用端点给的自由字符串（如 finish_reason）——
+// 分层上"端点差异由适配层吃住"，且端点字符串有实测差异（见 02-arch-design/11 §5.2.3）。
+inline constexpr char kOnLastAiOutcome[] = "last_ai_outcome";
+inline constexpr char kOutcomeToolCalls[] = "tool_calls";
+inline constexpr char kOutcomeInvalidToolCalls[] = "invalid_tool_calls";
+inline constexpr char kOutcomeText[] = "text";
+
+// 校验与编译共用同一份词表，避免两处漂移
+[[nodiscard]] inline bool is_known_discriminant(std::string_view s) {
+  return s == kOnLastAiOutcome;
+}
+[[nodiscard]] inline bool is_known_outcome(std::string_view s) {
+  return s == kOutcomeToolCalls || s == kOutcomeInvalidToolCalls || s == kOutcomeText;
+}
 
 // ---- trigger：v1 只放行 time/schedule（宿主导入的简写形）----
 struct TriggerIR {
@@ -29,7 +51,16 @@ struct TriggerIR {
   Json raw = Json::object();                 // 原样保留（元数据；校验只查 raw 的禁项）
 };
 
-enum class NodeKind { Tool, Expr, Label, Goto };
+enum class NodeKind {
+  Tool,
+  Expr,
+  Label,
+  Goto,
+  // ---- M12（组件化与命令行 agent，见 02-arch-design/11）----
+  Model,     // 一次 LLM 调用：读 state.messages → 追加回复（不循环）
+  Route,     // match 分派：按 last_ai_outcome 选下一跳
+  RunTools,  // 执行最后一条 AI 消息的 tool_calls → ToolMessage 追加进 messages
+};
 
 struct OnErrorIR {
   int retry = 0;                             // 重试次数（总尝试 = retry + 1）
@@ -55,6 +86,16 @@ struct NodeIR {
   // Goto 节点
   std::string goto_target;                   // 指向一个 label 节点的 id（§4）
   int max = 0;                               // 循环有界（正整数）
+
+  // Model 节点（M12）：一次模型调用。model/toolset 都是**组件名**（宿主注册，见 components.hpp）
+  std::string model;                         // 必填：模型组件名
+  std::string toolset;                       // 可选：工具集组件名（空 = 不带工具）
+  std::string system_prompt;                 // 可选：本节点追加的 system 提示
+
+  // Route 节点（M12）：match 分派。判别式与 outcome 都是**封闭词表**
+  std::string on;                            // 判别式名，初版只有 "last_ai_outcome"
+  std::map<std::string, std::string> cases;  // outcome → 目标节点 id（或保留名）
+  std::string default_;                      // 未命中目标；**必须显式给出**（禁止漏档静默）
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

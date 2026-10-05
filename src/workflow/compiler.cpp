@@ -3,13 +3,16 @@
 
 #include <exception>
 #include <expected>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 
+#include "cppchain/message/serializer.hpp"  // Message ↔ JSON（messages 通道需要）
 #include "cppchain/state/state.hpp"
 #include "cppchain/tool/tool.hpp"
+#include "cppchain/tool/tool_node.hpp"  // M12: run_tools 复用 M3 的 ToolNode
 #include "cppchain/workflow/expr.hpp"
 #include "cppchain/workflow/refs.hpp"
 #include "cppchain/workflow/validator.hpp"
@@ -39,6 +42,40 @@ Json resolve_args(Json const& params, Json const& state) {
   return out;
 }
 
+// ---- M12：对话通道（state.messages）----
+// 状态里的 messages 是**规范 JSON**（Message 的序列化契约），这里与 Message 互转。
+std::vector<message::Message> messages_from_state(Json const& state) {
+  std::vector<message::Message> out;
+  auto const it = state.find(kMessagesKey);
+  if (it == state.end() || !it->is_array()) return out;
+  out.reserve(it->size());
+  for (Json const& raw : *it) {
+    try {
+      out.push_back(raw.get<message::Message>());
+    } catch (std::exception const&) {
+      // 坏消息不静默吞：交由调用方语义处理（此处跳过，validator 上游已保证形状）
+    }
+  }
+  return out;
+}
+
+// 最后一条 AI 消息的**归一化 outcome**（封闭词表，见 ir.hpp）。
+// 没有 AI 消息时返回空串（不匹配任何 case）→ 强制走 route 的 default 分支，
+// 而不是被当成正常文本回复。
+std::string last_ai_outcome(Json const& state) {
+  auto const msgs = messages_from_state(state);
+  for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
+    if (it->type != message::Role::Ai) continue;
+    if (!it->tool_calls.empty()) return kOutcomeToolCalls;
+    if (!it->invalid_tool_calls.empty()) return kOutcomeInvalidToolCalls;
+    return kOutcomeText;
+  }
+  return {};
+}
+
+// _fail 的落地：一个"一定会抛"的节点（见 ir.hpp 的 kFailName）
+constexpr char kFailTarget[] = "__fail__";
+
 // 命令构造器：带更新 + 跳转（fallback / goto 用）
 Command jump_update(Json update, std::vector<std::string> goto_nodes) {
   Command c;
@@ -57,7 +94,8 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   };
 
   // 1) 先过校验器（fail-closed：不编译坏 IR）
-  ValidationResult vr = validate(ir, ValidatorOptions{&registry, opts.config_keys});
+  ValidationResult vr =
+      validate(ir, ValidatorOptions{&registry, opts.config_keys, opts.components});
   if (!vr.ok()) return invalid("IR 校验未过：" + vr.describe());
   if (ir.nodes.empty())
     return invalid("IR nodes 为空（生成器不应产出）");
@@ -78,8 +116,13 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     }
   }
 
+  bool need_fail_node = false;  // 只有真的用到 _fail 才注册那个节点（否则会污染 registered 计数）
   auto resolve = [&](std::string const& t) -> std::string {
-    if (t == "_turn_end") return graph::kEnd;
+    if (t == kTurnEndName) return graph::kEnd;
+    if (t == kFailName) {
+      need_fail_node = true;
+      return kFailTarget;
+    }
     auto it = cont.find(t);
     return it == cont.end() ? t : it->second;
   };
@@ -88,6 +131,9 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   state::StateSchema schema;
   schema.set_reducer(std::string(kResultsKey), merge_slots);
   schema.set_reducer(std::string(kLoopCountsKey), merge_slots);
+  // messages 必须走 add_messages：model/run_tools 节点返回的是"新增消息"，
+  // 默认的 overwrite 会把整个数组替换掉（历史当场丢光）。
+  schema.set_reducer(std::string(kMessagesKey), state::add_messages);
 
   graph::StateGraph g(std::move(schema));
   std::size_t registered = 0;
@@ -194,10 +240,84 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
         break;
       }
 
+      case NodeKind::Model: {
+        model::ChatModel* m =
+            (opts.components != nullptr) ? opts.components->model(n.model) : nullptr;
+        if (m == nullptr)
+          return invalid("model 节点 '" + n.id + "' 引用的组件 '" + n.model + "' 不可用");
+        Json tools_json = Json::array();
+        if (!n.toolset.empty() && opts.components != nullptr)
+          if (auto const* ts = opts.components->toolset(n.toolset); ts != nullptr)
+            for (std::string const& tname : *ts)
+              if (auto const* sp = registry.find(tname); sp != nullptr)
+                tools_json.push_back(sp->to_openai());
+        std::string const sys = n.system_prompt;
+
+        g.add_node(n.id, [m, tools_json, sys](Json const& state, NodeContext&) {
+          std::vector<message::Message> msgs = messages_from_state(state);
+          if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
+          model::CallOptions co;
+          co.tools = tools_json;
+          auto r = m->invoke(msgs, co);
+          if (!r) throw tool::ToolException("model 节点调用失败：" + r.error().message);
+          // **只发一次**：把回复追加进 messages，循环由 route + 回边负责
+          return Command::with_update(Json{{kMessagesKey, Json::array({*r})}});
+        });
+        g.add_edge(n.id, resolve(n.next));
+        ++registered;
+        break;
+      }
+
+      case NodeKind::Route: {
+        // cases/default 在编译期就解析成目标名（label → 续接、_turn_end → kEnd、_fail → 失败节点）
+        std::map<std::string, std::string> targets;
+        for (auto const& [k, v] : n.cases) targets[k] = resolve(v);
+        std::string const dflt = resolve(n.default_);
+
+        g.add_node(n.id, [](Json const&, NodeContext&) { return Command{}; });  // no-op
+        g.add_conditional_edges(n.id, [targets, dflt](Json const& state) {
+          std::string const outcome = last_ai_outcome(state);
+          auto const it = targets.find(outcome);
+          return std::vector<std::string>{it != targets.end() ? it->second : dflt};
+        });
+        ++registered;
+        break;
+      }
+
+      case NodeKind::RunTools: {
+        tool::ToolNode tn(&registry);  // 复用 M3 的实现（并行、顺序对齐、错误回喂）
+        g.add_node(n.id, [tn](Json const& state, NodeContext&) {
+          std::vector<message::ToolCall> calls;
+          auto const msgs = messages_from_state(state);
+          for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
+            if (it->type == message::Role::Ai) {
+              calls = it->tool_calls;
+              break;
+            }
+          if (calls.empty())
+            throw tool::ToolException("run_tools 节点：最后一条 AI 消息没有 tool_calls");
+          Json arr = Json::array();
+          for (message::Message& m : tn.run(calls)) arr.push_back(m);
+          return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
+        });
+        g.add_edge(n.id, resolve(n.next));
+        ++registered;
+        break;
+      }
+
       case NodeKind::Label:
         break;  // 不注册（指针已替换）
     }
   }
+
+  // 3.5) _fail 的落地节点：只有真的被引用才注册（不污染 registered_nodes 计数）。
+  //      语义 = 以错误终止本次触发（fail-closed），错误里带 IR id 便于定位；
+  //      细节仍在 state.messages 里可查（不额外造错误载荷）。
+  if (need_fail_node)
+    g.add_node(kFailTarget, [ir_id = ir.id](Json const&, NodeContext&) -> Command {
+      throw tool::ToolException("workflow '" + ir_id +
+                                "' 路由到 _fail：本次触发以错误终止（原因见 state.messages）");
+    });
 
   // 4) 入口 = nodes[0]；为 label 时取它的续接
   std::string entry = ir.nodes[0].id;

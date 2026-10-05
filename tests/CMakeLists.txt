@@ -114,7 +114,8 @@ add_executable(workflow_tests
   wf/generator_test.cpp
   wf/features_test.cpp
   wf/richtools_test.cpp
-  wf/fakes_test.cpp)
+  wf/fakes_test.cpp
+  wf/agent_loop_test.cpp)
 
 target_include_directories(workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)
 

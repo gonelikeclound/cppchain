@@ -21,6 +21,7 @@
 #include "cppchain/graph/graph.hpp"
 #include "cppchain/state/checkpointer.hpp"
 #include "cppchain/tool/registry.hpp"
+#include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
 
 namespace cppchain::workflow {
@@ -40,6 +41,9 @@ struct CompileOptions {
   // nullopt = 不检查；声明后，IR 里引用未声明的 @config.<键> 会在**编译期**被 VR4 拒绝，
   // 而不是运行期静默解析成 null（工具读到 null 才炸）。
   std::optional<std::vector<std::string>> config_keys = std::nullopt;
+
+  // M12 组件注册表（nullptr = 含 model 节点时报错，因为无模型可用）
+  ComponentRegistry const* components = nullptr;
 };
 
 struct CompiledWorkflow {

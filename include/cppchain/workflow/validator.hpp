@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "cppchain/tool/registry.hpp"
+#include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
 #include "cppchain/workflow/refs.hpp"
 
@@ -43,6 +44,10 @@ struct ValidatorOptions {
   //
   // 语义：nullopt → 跳过；空 vector → "不允许任何 @config 引用"。
   std::optional<std::vector<std::string>> config_keys = std::nullopt;
+
+  // M12 组件注册表（nullptr = 不检查组件名，向后兼容）。给了就按它校验 model/tools 组件名，
+  // 做法与 registry 对工具名一致 —— 未知组件名在**校验期**就拒。
+  ComponentRegistry const* components = nullptr;
 };
 
 // 对已解析的 IR 做全量校验。

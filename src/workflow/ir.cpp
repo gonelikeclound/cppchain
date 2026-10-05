@@ -78,6 +78,29 @@ NodeIR parse_node(Json const& node, NodeKind kind, std::string const& id) {
       if (node.contains("max") && node["max"].is_number_integer())
         out.max = node["max"].get<int>();
       break;
+    case NodeKind::Model:
+      if (node.contains("model") && node["model"].is_string())
+        out.model = node["model"].get<std::string>();
+      if (node.contains("tools") && node["tools"].is_string())
+        out.toolset = node["tools"].get<std::string>();  // 工具集**组件名**（§5.4 Q7）
+      if (node.contains("system_prompt") && node["system_prompt"].is_string())
+        out.system_prompt = node["system_prompt"].get<std::string>();
+      if (node.contains("next") && node["next"].is_string())
+        out.next = node["next"].get<std::string>();
+      break;
+    case NodeKind::Route:
+      if (node.contains("on") && node["on"].is_string())
+        out.on = node["on"].get<std::string>();
+      if (node.contains("cases") && node["cases"].is_object())
+        for (auto it = node["cases"].begin(); it != node["cases"].end(); ++it)
+          if (it.value().is_string()) out.cases[it.key()] = it.value().get<std::string>();
+      if (node.contains("default") && node["default"].is_string())
+        out.default_ = node["default"].get<std::string>();
+      break;
+    case NodeKind::RunTools:
+      if (node.contains("next") && node["next"].is_string())
+        out.next = node["next"].get<std::string>();
+      break;
   }
   return out;
 }
@@ -85,23 +108,45 @@ NodeIR parse_node(Json const& node, NodeKind kind, std::string const& id) {
 }  // namespace
 
 std::expected<NodeKind, std::string> WorkflowIR::classify(Json const& node) {
-  bool const explicit_label = node.contains("kind") && node["kind"] == "label";
+  // kind 是**通用**判别键：label/goto/expr/tool/model/route/run_tools 都可用它显式声明。
+  // 未知值直接拒绝（不留"猜"的余地）。历史写法（靠 goto/expr/tool 键判别）继续支持。
+  std::optional<NodeKind> declared;
+  std::string kind_str;
+  if (node.contains("kind") && node["kind"].is_string()) {
+    kind_str = node["kind"].get<std::string>();
+    if (kind_str == "label") declared = NodeKind::Label;
+    else if (kind_str == "goto") declared = NodeKind::Goto;
+    else if (kind_str == "expr") declared = NodeKind::Expr;
+    else if (kind_str == "tool") declared = NodeKind::Tool;
+    else if (kind_str == "model") declared = NodeKind::Model;
+    else if (kind_str == "route") declared = NodeKind::Route;
+    else if (kind_str == "run_tools") declared = NodeKind::RunTools;
+    else
+      return std::unexpected("unknown node kind: '" + kind_str +
+                             "'（可用：label/goto/expr/tool/model/route/run_tools）");
+  }
+
   bool const has_goto = node.contains("goto");
   bool const has_expr = node.contains("expr");
   bool const has_tool = node.contains("tool");
 
-  // 歧义即错（fail-closed）：label 是显式标记，与任何执行类键并存都算歧义；
-  // 两个执行类键并存也歧义。
-  if (explicit_label && (has_goto || has_expr || has_tool))
-    return std::unexpected("ambiguous node: kind:label co-occurs with a decisive key");
+  if (declared) {
+    // 与声明**一致**的键不算歧义（如 {"kind":"tool","tool":...}）；**冲突**才算 —— fail-closed。
+    if ((has_goto && *declared != NodeKind::Goto) ||
+        (has_expr && *declared != NodeKind::Expr) ||
+        (has_tool && *declared != NodeKind::Tool))
+      return std::unexpected("ambiguous node: decisive key conflicts with kind='" + kind_str + "'");
+    return *declared;
+  }
+
   if (static_cast<int>(has_goto) + static_cast<int>(has_expr) + static_cast<int>(has_tool) > 1)
     return std::unexpected("ambiguous node: multiple decisive keys (goto/expr/tool)");
-
-  if (explicit_label) return NodeKind::Label;
   if (has_goto) return NodeKind::Goto;
   if (has_expr) return NodeKind::Expr;
   if (has_tool) return NodeKind::Tool;
-  return std::unexpected("unknown node: no decisive key (kind=label | goto | expr | tool)");
+  return std::unexpected(
+      "unknown node: no decisive key (kind=label|goto|expr|tool|model|route|run_tools,"
+      " 或 goto/expr/tool 键)");
 }
 
 std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
@@ -171,6 +216,26 @@ Json WorkflowIR::to_json() const {
       case NodeKind::Goto:
         node["goto"] = n.goto_target;
         node["max"] = n.max;
+        break;
+      case NodeKind::Model:
+        node["kind"] = "model";
+        node["model"] = n.model;
+        if (!n.toolset.empty()) node["tools"] = n.toolset;
+        if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+        node["next"] = n.next;
+        break;
+      case NodeKind::Route: {
+        node["kind"] = "route";
+        node["on"] = n.on;
+        Json cs = Json::object();
+        for (auto const& [k, v] : n.cases) cs[k] = v;
+        node["cases"] = std::move(cs);
+        node["default"] = n.default_;
+        break;
+      }
+      case NodeKind::RunTools:
+        node["kind"] = "run_tools";
+        node["next"] = n.next;
         break;
     }
     nodes.push_back(std::move(node));

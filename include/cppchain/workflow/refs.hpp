@@ -27,6 +27,7 @@ using Json = nlohmann::json;
 
 // ---- 运行时状态布局（CompiledGraph 的输入/输出）----
 inline constexpr char kConfigKey[] = "config";
+inline constexpr char kMessagesKey[] = "messages";  // M12：对话通道（add_messages reducer）
 inline constexpr char kResultsKey[] = "results";
 inline constexpr char kLastExecKey[] = "_last_exec";
 inline constexpr char kLoopCountsKey[] = "loop_counts";

@@ -90,6 +90,19 @@ void print_readable_ir(WorkflowIR const& ir) {
       case NodeKind::Goto:
         std::println("  [{}] goto {} (max {})", n.id, n.goto_target, n.max);
         break;
+      case NodeKind::Model:
+        std::println("  [{}] model {} (tools={}) → {}", n.id, n.model,
+                     n.toolset.empty() ? "-" : n.toolset, n.next);
+        break;
+      case NodeKind::Route: {
+        std::string cs;
+        for (auto const& [k, v] : n.cases) cs += (cs.empty() ? "" : " ") + k + "→" + v;
+        std::println("  [{}] route on={} {{{}}} default={}", n.id, n.on, cs, n.default_);
+        break;
+      }
+      case NodeKind::RunTools:
+        std::println("  [{}] run_tools → {}", n.id, n.next);
+        break;
     }
   }
   std::println("  ---- JSON 规范形 ----");

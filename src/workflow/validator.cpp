@@ -23,6 +23,8 @@
 //   VR2 $<id>.result.f：id 存在且为 tool 节点、下标在上游、字段已声明（或 schema 为 *）
 //   VR3 $_.result.f：字段被 ≥1 个上游 tool 声明（或 *）
 //   VR4 @config.k：键为标识符（parse 层保证）；若宿主声明了 config 契约，键必须在其列
+//   VN10 M12 节点：model 组件名/tools 工具集名必须在注册表；route 的 on/cases 键走封闭词表，
+//        且 cases 必须覆盖全部 outcome 或显式给 default（禁止"漏一档静默走 else"）
 //   VH1 on_error：retry ≥ 0；fallback 为存在节点 id 或 _turn_end
 //   VG1 指针目标：next/then/else 为存在节点或 _turn_end；goto 必须指向 label
 //   VG2 前向边（tool.next / expr.then/else 替换 label 后）无环（循环只能经 goto）
@@ -373,6 +375,50 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
           c.err("VN9", "goto 节点 '" + n.id + "' 的 max 必须是正整数（循环有界），收到 " +
                            std::to_string(n.max));
         break;
+
+      case NodeKind::Model: {
+        if (n.model.empty())
+          c.err("VN10", "model 节点 '" + n.id + "' 缺少 model（组件名）");
+        else if (opts.components != nullptr && opts.components->model(n.model) == nullptr)
+          c.err("VN10", "model 节点 '" + n.id + "' 引用的组件 '" + n.model +
+                            "' 不在注册表里（对标 VN6 对工具名的做法）");
+        if (n.next.empty()) c.err("VN10", "model 节点 '" + n.id + "' 缺少 next");
+        if (!n.toolset.empty()) {
+          if (opts.components == nullptr || opts.components->toolset(n.toolset) == nullptr) {
+            c.err("VN10", "model 节点 '" + n.id + "' 引用的工具集 '" + n.toolset + "' 不在注册表里");
+          } else {
+            for (std::string const& t : *opts.components->toolset(n.toolset))
+              if (opts.registry != nullptr && opts.registry->find(t) == nullptr)
+                c.err("VN10", "工具集 '" + n.toolset + "' 里的工具 '" + t + "' 不在工具注册表里");
+          }
+        }
+        break;
+      }
+
+      case NodeKind::Route: {
+        if (!is_known_discriminant(n.on))
+          c.err("VN10", "route 节点 '" + n.id + "' 的 on='" + n.on +
+                            "' 不在封闭词表里（可用：last_ai_outcome）");
+        for (auto const& [k, v] : n.cases) {
+          if (!is_known_outcome(k))
+            c.err("VN10", "route 节点 '" + n.id + "' 的 cases 键 '" + k +
+                              "' 不在 outcome 词表里（可用：tool_calls / invalid_tool_calls / text）");
+          (void)v;
+        }
+        if (n.default_.empty()) {
+          std::size_t covered = 0;
+          for (char const* o : {kOutcomeToolCalls, kOutcomeInvalidToolCalls, kOutcomeText})
+            if (n.cases.count(o) > 0) ++covered;
+          if (covered < 3)
+            c.err("VN10", "route 节点 '" + n.id +
+                              "' 既没有覆盖全部 outcome 也没有 default（漏档会静默走错分支）");
+        }
+        break;
+      }
+
+      case NodeKind::RunTools:
+        if (n.next.empty()) c.err("VN10", "run_tools 节点 '" + n.id + "' 缺少 next");
+        break;
     }
   }
 
@@ -424,7 +470,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     auto target_ok = [&](std::string const& key, std::string const& t) {
       if (t == "_turn_start")
         c.err("VG1", "节点 '" + n.id + "' 的 " + key + " 指向保留名 _turn_start（不允许）");
-      else if (t != kTurnEnd && c.index.find(t) == c.index.end())
+      else if (t != kTurnEnd && t != kFailName && c.index.find(t) == c.index.end())
         c.err("VG1", "节点 '" + n.id + "' 的 " + key + " 指向不存在的节点 '" + t + "'");
     };
     switch (n.kind) {
@@ -444,6 +490,14 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                            "' 不是 label");
         break;
       }
+      case NodeKind::Model:
+      case NodeKind::RunTools:
+        target_ok("next", n.next);
+        break;
+      case NodeKind::Route:
+        for (auto const& [k, v] : n.cases) target_ok("cases." + k, v);
+        if (!n.default_.empty()) target_ok("default", n.default_);
+        break;
       case NodeKind::Label:
         break;
     }
@@ -460,6 +514,13 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
           referenced = true;
         else if (m.kind == NodeKind::Goto && m.goto_target == n.id)
           referenced = true;
+        else if ((m.kind == NodeKind::Model || m.kind == NodeKind::RunTools) && m.next == n.id)
+          referenced = true;
+        else if (m.kind == NodeKind::Route &&
+                 (m.default_ == n.id ||
+                  std::any_of(m.cases.begin(), m.cases.end(),
+                              [&](auto const& kv) { return kv.second == n.id; })))
+          referenced = true;
       }
       if (!referenced)
         c.err("VG8", "label '" + n.id + "' 没有被任何 goto / next / then / else 指向（死 label）");
@@ -475,6 +536,18 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       } else if (n.kind == NodeKind::Expr) {
         for (std::string const& t_ : {resolve_target(c, n.then), resolve_target(c, n.else_)})
           if (t_ != kEndId) adj[n.id].push_back(t_);
+      } else if (n.kind == NodeKind::Model || n.kind == NodeKind::RunTools) {
+        std::string const t_ = resolve_target(c, n.next);
+        if (t_ != kEndId) adj[n.id].push_back(t_);
+      } else if (n.kind == NodeKind::Route) {
+        for (auto const& [k, v] : n.cases) {
+          std::string const t_ = resolve_target(c, v);
+          if (t_ != kEndId) adj[n.id].push_back(t_);
+        }
+        if (!n.default_.empty()) {
+          std::string const t_ = resolve_target(c, n.default_);
+          if (t_ != kEndId) adj[n.id].push_back(t_);
+        }
       }
     }
     // DFS 三色：0 未访问 / 1 在栈 / 2 完成
@@ -544,6 +617,11 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       } else if (it->second == NodeKind::Expr) {
         push(resolve_target(c, node.then));
         push(resolve_target(c, node.else_));
+      } else if (it->second == NodeKind::Model || it->second == NodeKind::RunTools) {
+        push(resolve_target(c, node.next));
+      } else if (it->second == NodeKind::Route) {
+        for (auto const& [k, v] : node.cases) push(resolve_target(c, v));
+        if (!node.default_.empty()) push(resolve_target(c, node.default_));
       }
     }
     // 死节点检查
