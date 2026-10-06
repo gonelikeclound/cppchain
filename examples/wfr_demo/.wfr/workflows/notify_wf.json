@@ -1,0 +1,9 @@
+{
+  "id": "notify_wf",
+  "nodes": [
+    { "id": "n", "tool": "send_notification",
+      "parameters": {"title": "到货提醒", "body": "$poll.result.price"},
+      "output_schema": {"ok": "boolean"},
+      "next": "_turn_end" }
+  ]
+}

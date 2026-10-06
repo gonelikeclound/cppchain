@@ -1,0 +1,13 @@
+{
+  "id": "loop_wf",
+  "import": { "workflow": "notify_wf" },
+  "nodes": [
+    { "id": "l0", "kind": "label" },
+    { "id": "poll", "tool": "fetch_price",
+      "parameters": {"item_id": "@config.product_id"},
+      "output_schema": {"price": "number", "in_stock": "boolean"},
+      "next": "ck" },
+    { "id": "ck", "expr": "$poll.result.price < 500", "then": "n", "else": "gp" },
+    { "id": "gp", "goto": "l0", "max": 3 }
+  ]
+}

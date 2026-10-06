@@ -21,8 +21,8 @@ set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics m10_streaming m10_interrupt m10_send m10_fork)
-# 主动智能 workflow 生成端到端验收（真机 LLM）
-set(WF_EXAMPLE_TARGETS wf_eval proactive workflow_cli)
+# 主动智能 workflow 生成端到端验收（真机 LLM）+ wfr 命令行运行器
+set(WF_EXAMPLE_TARGETS wf_eval proactive workflow_cli wfr)
 # 需要 agent 库（真机）的 demo
 set(AGENT_EXAMPLE_TARGETS agent_loop context_budget stale_state live_tools history_agent research_chat agent_cli session_resume)
 # M8 子代理 demo：额外依赖 graph 库（as_agent_node / StateGraph）
