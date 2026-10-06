@@ -20,6 +20,11 @@ ctest --preset dev            # 全部测试（438 项）
 ./run-demo.sh                 # 编译并运行全部 demo
 ./run-demo.sh --list          # 列出 demo
 ./run-demo.sh agent_loop      # 只跑指定的（真机 demo 需 .env）
+
+# wfr —— 正式 workflow 命令行（构建产物在 build/dev/bin/wfr）
+build/dev/bin/wfr chat "你好"          # 内置最简单的聊天 workflow（多轮续聊，需 .env）
+build/dev/bin/wfr list                 # 列内置 / .wfr/workflows/ 下 workflow
+build/dev/bin/wfr debug loop_wf --all --open   # 单 HTML 调试台（在 wfr_demo 目录）
 ```
 
 真实端点配置放 `.env`（**已被 git 忽略**，模板见 `.env.example`）：

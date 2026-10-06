@@ -137,6 +137,7 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 | `c7f9c50` | **wfr-③** import 其他 workflow —— 展开式跨文件复用（+8 测试） |
 | `e2c781e` | **wfr-④** 命令行运行器 —— 按名执行 + list/reset/set + `wfr_demo` |
 | `053a637` | **wfr-⑤** 调试可视化 —— 单 HTML 调试台（debug_view，+4 测试） |
+| `84222cf` | **wfr-⑪** 正式 CLI —— wfr 移出 examples（src/wfr + bin/wfr）+ 内置 chat workflow |
 
 ### 收官日量化底座
 

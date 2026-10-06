@@ -5,7 +5,8 @@
 
 ## 1. 定位与边界
 
-- **提供**：`examples/wfr` 命令行运行器；workflow 增强（trigger 可选 / import 复用）；
+- **提供**：`src/wfr`（正式 CLI，构建产物 `build/dev/bin/wfr`）命令行运行器；
+  workflow 增强（trigger 可选 / import 复用）；
   单 HTML 调试台（`wfr debug`）。
 - **不做**：OS 级调度（trigger 仅元数据，D1 语义）；真并行；cron 常驻；HTTP server。
 - 数据约定：**统一 `.wfr/` meta 目录**（`include/cppchain/workflow/wfr.hpp`）：
@@ -22,6 +23,13 @@
 - 子命令：`wfr list` / `wfr debug <name> [--session N|--all] [--out F] [--open]`。
 - 退出码：0 成功 / 2 用法・找不到・解析校验编译失败 / 1 fire 运行时错误。
 - 骨架复用：`examples/workflow_cli`（argv 手写、读 IR→load imports→expand→parse→compile→fire）。
+
+### 2.1 内置 workflow（`src/wfr/builtin_workflows.hpp`）
+
+`wfr chat`：**buildin——最简单聊天**（load_history + model，无 trigger manual）。
+同一 `--session` 下连续 `wfr chat "…"` 即多轮续聊（load_history 对会话日志 replay 带上历史）。
+命中内置名即用，不读 `.wfr/workflows/`；`wfr list` 单列内置。正式工具目录 =
+tool 库内建 `make_datetime_tool` + `make_calculator_tool`（不依赖 demo fakes）。
 
 ## 3. workflow 增强（本系列在 workflow 库的改动）
 
@@ -59,13 +67,15 @@ IR ──debug_view_graph──▶ {nodes, edges}       边=NodeType::edges()，
 
 ## 5. 验收
 
-- **全仓 438 测试全绿、clean-first 零告警**；新增 14 项（wfr 相关单测）：
+- **全仓 438+ 测试全绿、clean-first 零告警**；新增项（wfr 相关单测）：
   - ① `.wfr` 迁移路径断言；② 无 trigger parse/编译+fire；③ import 展开 8 项；⑤ debug_view 4 项。
-- 手工端到端（`examples/wfr_demo/`，离线）：
-  - `wfr list` → `loop_wf / notify_wf`，trigger=manual；
-  - `wfr loop_wf --session s1 --set product_id=P1 "检查"` → 退出 0、会话日志落
-    `.wfr/sessions/`、日志可见 `loop_counts{gp:1..3}`（goto `max:3` 循环）；
-  - `wfr debug loop_wf --all` → `.wfr/debug/loop_wf.html`（20 条记录、图含
+- 手工端到端（`build/dev/bin/wfr`）：
+  - `wfr list` → 内置 chat + `loop_wf / notify_wf`（trigger=manual）；
+  - `wfr chat --session c1 "你好"` → 真机回复；`"我叫小明记住"` → 二次续聊记住名字
+    （load_history 历史续接，多轮聊天成立）；
+  - `wfr loop_wf --session s1 "检查"`（在 `examples/wfr_demo`，`item_id` 内置 P1）→ 退出 0、
+    会话日志落 `.wfr/sessions/`、日志可见 `loop_counts{gp:1..3}`（goto `max:3` 循环）；
+  - `wfr debug loop_wf --all` → `.wfr/debug/loop_wf.html`（图含 import 节点
     `notify_wf__n`、gp 1..3 分组素材）。
 
 ## 6. 开放点
