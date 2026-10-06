@@ -91,6 +91,9 @@ struct FireOptions {
   // invoke 的 sink（逐包吐 node_start/node_end/…），且 wrapper 结构日志**让位**
   // （SessionSink.streaming=true，防双源重复记录）；宿主用 project_stream_to_log 落地。
   graph::EventSink stream = nullptr;
+  // M10: 时间旅行分叉 —— 从 source_thread 的历史 checkpoint 恢复并继续（新快照落到
+  // thread_id）。需要编译期注入 checkpointer（cp 非空）。分叉点找不到 → fail-closed。
+  std::optional<graph::ForkSpec> fork = std::nullopt;
 };
 
 // 把 graph 运行期事件投影成会话日志记录（供宿主在 FireOptions.stream 里自选落地）。

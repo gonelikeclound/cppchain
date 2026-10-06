@@ -45,6 +45,7 @@ KNOWN_DEMOS=(
   "m10_streaming:M10 graph Streaming——节点边界事件 + 节点内 delta（离线）"
   "m10_interrupt:M10 interrupt 原语——审批悬挂/resume 重跑/幂等契约（离线）"
   "m10_send:M10 Send 动态 fan-out——map-reduce 局部态 + reducer 归约（离线）"
+  "m10_fork:M10 时间旅行分叉——从中间 checkpoint 分叉探索另一条轨迹（离线）"
   "agent_loop:M7 Agent 循环与三中间件（需 LLM 端点）"
   "live_tools:M3 真网络工具 get_weather/web_search（需 .env：LLM + 搜索端点）"
   "history_agent:M7 会话历史——同一 thread 多轮记忆/无状态对照/thread 隔离（需 LLM 端点）"

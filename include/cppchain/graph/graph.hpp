@@ -56,11 +56,17 @@ struct StreamEvent {
 
 using EventSink = std::function<void(StreamEvent const&)>;
 
-// invoke 的扩展选项：注入事件 sink / 恢复续跑（M10）
+// invoke 的扩展选项：注入事件 sink / 恢复续跑 / 时间旅行分叉（M10）
+struct ForkSpec {
+  std::string source_thread;  // 分叉点快照所在的线程（可 ≠ 本次的 thread_id）
+  std::string checkpoint_id;  // 该线程内要分叉的 checkpoint；空 = 该线程最新快照
+};
+
 struct InvokeOptions {
   EventSink sink = nullptr;                    // 注入即触发流；nullptr = 不吐事件（零开销）
   EventMode mode = EventMode::Updates;
-  std::optional<Json> resume = std::nullopt;   // 对上次 interrupt 的答复（P2）
+  std::optional<Json> resume = std::nullopt;   // 对上次 interrupt 的答复
+  std::optional<ForkSpec> fork = std::nullopt; // 时间旅行分叉：从历史 checkpoint 恢复并继续
 };
 
 // 悬挂信号：节点内 interrupt(payload) 首次调用抛出，引擎据此暂停 + 落盘。
@@ -131,7 +137,7 @@ inline Json interrupt(Json const& payload, NodeContext& ctx) {
 
 struct GraphError {
   enum class Kind { InvalidGraph, UnknownNode, RecursionLimit, NodeError,
-                    InterruptUnavailable, ResumeNotInterrupted };
+                    InterruptUnavailable, ResumeNotInterrupted, CheckpointNotFound };
   Kind kind = Kind::InvalidGraph;
   std::string message;
 
@@ -146,6 +152,7 @@ inline std::string_view graph_error_kind(GraphError::Kind k) {
     case GraphError::Kind::NodeError: return "node_error";
     case GraphError::Kind::InterruptUnavailable: return "interrupt_unavailable";
     case GraphError::Kind::ResumeNotInterrupted: return "resume_not_interrupted";
+    case GraphError::Kind::CheckpointNotFound: return "checkpoint_not_found";
   }
   return "unknown";
 }

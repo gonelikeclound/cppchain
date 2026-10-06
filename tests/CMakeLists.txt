@@ -75,7 +75,8 @@ add_executable(graph_tests
   graph/agent_node_test.cpp
   graph/streaming_test.cpp
   graph/interrupt_test.cpp
-  graph/send_test.cpp)
+  graph/send_test.cpp
+  graph/time_travel_test.cpp)
 
 target_link_libraries(graph_tests PRIVATE
   cppchain_graph_agent

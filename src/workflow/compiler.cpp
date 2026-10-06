@@ -237,6 +237,7 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   iopts.sink = opts.stream;
   // 全模式事件：host 要的是事件流本身；没传 stream 时 sink=null → 零开销
   iopts.mode = graph::EventMode::All;
+  iopts.fork = opts.fork;
   auto const r = wf.graph.invoke(input, opts.thread_id, iopts);
 
   wf.sink->streaming = false;

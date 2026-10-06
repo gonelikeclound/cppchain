@@ -118,18 +118,33 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
   bool resuming_interrupt = false;
   std::string interrupt_node;
 
-  // ① 恢复态：有快照 → 恢复到"该步边界继续"（input 被忽略）
+  // ① 恢复态：有快照 → 恢复到"该步边界继续"（input 被忽略）。
+  //    默认取当前线程**最新**快照；fork 指定后取**那个线程的历史** checkpoint ——
+  //    时间旅行分叉：从快照的 values + next 继续跑，新快照落到本次的 thread_id
+  //    （原线程轨迹不污染），分叉点即新链的 parent。
   if (cp_ != nullptr && !thread_id.empty()) {
-    if (auto snap = cp_->get_tuple(thread_id, "", std::nullopt); snap.has_value()) {
+    std::string const src = opts.fork ? opts.fork->source_thread : thread_id;
+    std::optional<std::string> const ckpt =
+        opts.fork ? std::make_optional(opts.fork->checkpoint_id) : std::nullopt;
+    auto snap = cp_->get_tuple(src, "", ckpt);
+    if (opts.fork && !snap.has_value()) {
+      // 分叉点找不到：fail-closed（不默默退回"最新 / 全新开跑"，防走错轨迹）
+      finish();
+      return std::unexpected(GraphError{
+          GraphError::Kind::CheckpointNotFound,
+          "fork 目标快照不存在: thread='" + opts.fork->source_thread +
+              "' checkpoint='" + opts.fork->checkpoint_id + "'"});
+    }
+    if (snap.has_value()) {
       state = snap->values;
       current.assign(snap->next.begin(), snap->next.end());
       parent = snap->config.value("checkpoint_id", "");
       bool const interrupted = snap->metadata.value("interrupted", false);
       if (interrupted) {
-        // 上次站在 interrupt 上：payload 从该 checkpoint 的 writes 重建
+        // 上次站在 interrupt 上：payload 从该快照所在线程的 writes 重建
         interrupt_node = snap->metadata.value("node", "");
         Json payload = Json::object();
-        for (auto const& w : cp_->get_writes(thread_id, "", *parent))
+        for (auto const& w : cp_->get_writes(src, "", *parent))
           if (w.channel == "interrupt") {
             payload = w.value;
             break;
