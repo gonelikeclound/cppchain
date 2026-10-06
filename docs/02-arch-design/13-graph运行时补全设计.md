@@ -108,7 +108,7 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
 
 ## 6. Send（动态 fan-out）
 
-- `Command.sends` 非空 → 路由 = 仅 sends（覆盖 goto 与出边）；`goto` 优先于 `sends`。
+- `Command.sends` 非空（且 `goto_nodes` 为空）→ 路由 = 仅 sends（覆盖出边）；`goto` 优先于 `sends`。
 - 每个 `Send(node, partial_state)` 展开为一个**独立包**：节点输入 = `*pkt.state`（局部视图，
   见 §3），结果照常经 per-key reducer 归约回主 state。
 - `send.node` 未注册 / 为 `kEnd` → `UnknownNode`。
