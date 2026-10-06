@@ -89,9 +89,10 @@ void CompiledGraph::emit(StreamEvent ev) {
 // 节点自报流式事件（模型 delta 等）。sink 空 / mode 无 Deltas / 无序列 → 静默。
 void NodeContext::emit(std::string_view type, Json payload) {
   if (!sink || (mode & EventMode::Deltas) == EventMode::Off || !seq) return;
-  (*sink)(
-      StreamEvent{.type = std::string(type), .node = node_name, .step = step,
-                  .payload = std::move(payload), .ok = true, .status = "ok"});
+  StreamEvent ev{.type = std::string(type), .node = node_name, .step = step,
+                 .payload = std::move(payload), .ok = true, .status = "ok"};
+  ev.seq = ++(*seq);  // 与引擎事件共用同一单调序列
+  (*sink)(ev);
 }
 
 std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,

@@ -20,7 +20,7 @@ set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
-set(GRAPH_EXAMPLE_TARGETS graph_basics)
+set(GRAPH_EXAMPLE_TARGETS graph_basics m10_streaming m10_interrupt m10_send)
 # 主动智能 workflow 生成端到端验收（真机 LLM）
 set(WF_EXAMPLE_TARGETS wf_eval proactive workflow_cli)
 # 需要 agent 库（真机）的 demo
@@ -36,7 +36,8 @@ set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop con
 
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard
                             tools_frontline tools_files tools_arxiv tools_approval
-                            m9_hybrid m9_approval m9_artifact)
+                            m9_hybrid m9_approval m9_artifact
+                            m10_streaming m10_interrupt m10_send)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)

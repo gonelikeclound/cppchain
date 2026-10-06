@@ -36,6 +36,9 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `structured_output` | M4：结构化抽取、classify 路由/评判、**两策略遵循度对照**（需 LLM 端点） | `with_structured_output` |
 | `state_basics` | M5：状态归约（含**同 id 覆盖=压缩改写**）、快照链与回放、跨线程 Store | State/Reducer、Checkpointer、Store |
 | `graph_basics` | M6：线性 workflow、条件路由、循环上限、**中途快照恢复续跑** | LangGraph StateGraph |
+| `m10_streaming` | **M10 graph Streaming（离线）**：引擎在包边界吐 `node_start`/`node_end`/`values`，节点内经 `ctx.emit` 自报流式事件；`seq` 单调、零 sink 零开销 | LangGraph `stream_mode`（updates/values/messages） |
+| `m10_interrupt` | **M10 interrupt 原语（离线）**：审批节点悬挂 → checkpoint 落盘 → 外部 `resume` → **节点从头重跑**、`interrupt()`返回答复；演示「副作用在 interrupt 之前会重复」的幂等契约 | LangGraph `interrupt()` / `Command(resume)` |
+| `m10_send` | **M10 Send 动态 fan-out（离线）**：map-reduce——`Send(node, partial_state)` 展开独立包（局部输入）、结果经 reducer 归约回主 state（顺序执行，接口按可并行设计） | LangGraph `Send(node, state)` 动态 fan-out |
 | `agent_loop` | M7（真机）：多步工具调用、**超长返回截断**、**副作用审批拒绝**、**LLM 摘要压缩** | `create_agent(model, tools, middleware)` |
 | `context_budget` | M7（真机）：用真实 usage 量化「工具输出 token 成本」与「压缩前后历史增长」 | — |
 | `side_effect_guard` | M7 收口（离线）：**副作用防重放**——重启后不重复扣款、结果未知拒跑 | 幂等键 + 执行日志 |
