@@ -146,8 +146,9 @@ const layer = {};            // node id → 深度
 const pos = {};              // node id → {x,y}
 const NODES = {}; G.nodes.forEach(n => NODES[n.id] = n);
 function layout(){
-  layer[NODES[0].id]=0;  // 入口 nodes[0]；稳妥起见取 G.nodes[0]
-  let cur=[G.nodes[0].id];
+  const first = G.nodes[0].id;         // 入口 = 展开后 nodes[0]
+  layer[first]=0;
+  let cur=[first];
   while(cur.length){
     const next=[];
     for(const id of cur){
@@ -282,8 +283,14 @@ function renderGotoTabs(){
 /* ---------- 启动 ---------- */
 const sel=document.getElementById('runSel');
 sel.addEventListener('change',()=>{ curRun=Number(sel.value); curNode='';curGoto='';curIt=''; renderLog(); renderNodeList(); renderGotoTabs(); });
-layout(); renderSVG(); renderRunSel(); renderNodeList(); renderGotoTabs(); renderLog();
-if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
+try {
+  layout(); renderSVG(); renderRunSel(); renderNodeList(); renderGotoTabs(); renderLog();
+  if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
+} catch (e) {
+  const box=document.getElementById('loglist');
+  box.innerHTML='<b>初始化失败</b><br>'+String(e && (e.message||e))+'<br>（打开控制台看堆栈）';
+  throw e;
+}
 </script>
 </body></html>)html";
 
