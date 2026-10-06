@@ -83,7 +83,9 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
   if (cp_ != nullptr && !thread_id.empty()) {
     if (auto snap = cp_->get_tuple(thread_id, "", std::nullopt); snap.has_value()) {
       state = snap->values;
-      current = snap->next.empty() ? std::vector<std::string>{} : snap->next;
+      current.clear();
+      for (auto const& p : snap->next)
+        current.push_back(p.node);  // P0 过渡：M10 前 next 均为"全局状态包"，先取回名字
       parent = snap->config.value("checkpoint_id", "");
       if (current.empty()) return state;  // 上次已跑完
     }
@@ -121,7 +123,10 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
     // 每步落一个快照：values + next（恢复语义 = 回到该步边界继续）
     if (cp_ != nullptr && !thread_id.empty()) {
       Json meta = {{"step", last_steps_}, {"node", node}};
-      last_checkpoint_ = cp_->put(thread_id, "", parent, state, *next, meta);
+      std::vector<state::Packet> pkts;  // M10 前 next 仍是节点名 → 等价于"全局状态包"
+      pkts.reserve(next->size());
+      for (auto const& n : *next) pkts.emplace_back(n);
+      last_checkpoint_ = cp_->put(thread_id, "", parent, state, pkts, meta);
       parent = last_checkpoint_;
     }
 

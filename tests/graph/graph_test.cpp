@@ -219,7 +219,7 @@ TEST(Graph, checkpoints_every_step_with_next) {
   auto const snaps = cp.list("thread-1", "", 0);
   ASSERT_EQ(snaps.size(), 2u);  // 每步一个快照
   EXPECT_EQ(snaps[1].metadata.at("node").get<std::string>(), "a");
-  EXPECT_EQ(snaps[1].next, std::vector<std::string>{"b"});  // next 已记录
+  EXPECT_EQ(snaps[1].next, std::vector<state::Packet>{{"b"}});  // next 已记录
   EXPECT_EQ(snaps[0].metadata.at("node").get<std::string>(), "b");
   EXPECT_TRUE(snaps[0].next.empty());
 }
@@ -251,7 +251,7 @@ TEST(Graph, resumes_from_latest_checkpoint) {
 
   auto const snaps = cp.list("t-resume", "", 0);
   ASSERT_EQ(snaps.size(), 1u);
-  EXPECT_EQ(snaps[0].next, std::vector<std::string>{"b"});
+  EXPECT_EQ(snaps[0].next, std::vector<state::Packet>{{"b"}});
 
   // 换一个不限制步数的编译产物，从快照续跑（input 被忽略）
   auto full = g.compile(&cp);

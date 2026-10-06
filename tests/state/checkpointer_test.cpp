@@ -127,7 +127,7 @@ TEST(FileCheckpointer, survives_across_independent_instances) {
     FileCheckpointer cp(tmp.file());
     EXPECT_EQ(cp.saves(), 0u);  // 首次使用：文件还不存在是正常的，不算落盘
     ckpt_id = cp.put("cli", "", std::nullopt,
-                     Json{{"messages", Json::array({"你好", "在吗"})}}, {"model"},
+                     Json{{"messages", Json::array({"你好", "在吗"})}}, std::vector<Packet>{{"model"}},
                      Json{{"step", 0}});
     EXPECT_EQ(cp.saves(), 1u);
   }  // 析构 = 进程退出
@@ -141,7 +141,7 @@ TEST(FileCheckpointer, survives_across_independent_instances) {
     ASSERT_TRUE(snap.has_value()) << "第二次调用没能从文件恢复历史";
     EXPECT_EQ(snap->values.at("messages").size(), 2u);  // ← 上一次留下的消息还在
     EXPECT_EQ(snap->values.at("messages")[0].get<std::string>(), "你好");
-    EXPECT_EQ(snap->next, std::vector<std::string>{"model"});
+    EXPECT_EQ(snap->next, std::vector<Packet>{{"model"}});
     EXPECT_EQ(snap->config.value("checkpoint_id", ""), ckpt_id);
 
     // 续写一轮：链要接上（parent = 上一次的 id），而不是另起炉灶
@@ -221,4 +221,51 @@ TEST(FileCheckpointer, creates_missing_parent_directory) {
   FileCheckpointer cp(nested);
   cp.put("cli", "", std::nullopt, Json{{"v", 1}}, {}, Json::object());
   EXPECT_TRUE(std::filesystem::exists(nested));
+}
+
+// M10 契约升级：next 从「节点名字符串数组」(v1) 升级为「包对象数组」(v2)。
+// 旧快照必须**直接兼容**（读回后是全局状态包），不迁移、不丢弃。
+TEST(FileCheckpointer, legacy_v1_next_string_array_loads_as_packets) {
+  TempDir tmp;
+  {  // 手写一份 v1 格式的落盘（next 为纯字符串数组）
+    nlohmann::json snap_j;
+    snap_j["values"] = {{"step", 1}};
+    snap_j["next"] = nlohmann::json::array({"b", "c"});
+    snap_j["config"] = {{"thread_id", "t1"}, {"checkpoint_ns", ""}, {"checkpoint_id", "ckpt-1"}};
+    snap_j["metadata"] = {{"step", 0}, {"node", "a"}};
+    snap_j["parent_checkpoint_id"] = nullptr;
+
+    nlohmann::json bucket = nlohmann::json::array();
+    bucket.push_back(snap_j);
+    nlohmann::json j;
+    j["version"] = 1;
+    j["counter"] = 1;
+    j["snapshots"] = {{"t1|", bucket}};
+    j["writes"] = nlohmann::json::object();
+    std::ofstream out(tmp.file());
+    out << j.dump(2);
+  }
+  FileCheckpointer cp(tmp.file());  // v1 文件照常打开（fail-closed 语义不受影响）
+  auto const snap = cp.get_tuple("t1", "", std::nullopt);
+  ASSERT_TRUE(snap.has_value());
+  // 旧版字符串 next 兼容为「全局状态包」：node 保留、state 为空
+  EXPECT_EQ(snap->next, (std::vector<Packet>{{"b"}, {"c"}}));
+  ASSERT_FALSE(snap->next.empty());
+  EXPECT_FALSE(snap->next[0].state.has_value());
+  EXPECT_EQ(snap->metadata.value("node", ""), "a");
+}
+
+// v2 dump/load 往返要保留 Send 包的局部 state（M10 落盘基础，P3 用到）。
+TEST(Checkpointer, packet_state_survives_dump_load_round_trip) {
+  MemoryCheckpointer cp;
+  cp.put("t1", "", std::nullopt, Json{{"step", 1}},
+         std::vector<Packet>{{"worker", Json{{"item", 1}}}}, Json::object());
+  MemoryCheckpointer cp2;
+  cp2.load(cp.dump());
+  auto const snap = cp2.get_tuple("t1", "", std::nullopt);
+  ASSERT_TRUE(snap.has_value());
+  ASSERT_EQ(snap->next.size(), 1u);
+  EXPECT_EQ(snap->next[0].node, "worker");
+  ASSERT_TRUE(snap->next[0].state.has_value());
+  EXPECT_EQ(snap->next[0].state->at("item"), 1);
 }

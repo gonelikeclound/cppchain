@@ -57,7 +57,7 @@ void FileCheckpointer::persist() {
 
 std::string FileCheckpointer::put(std::string const& thread_id, std::string const& checkpoint_ns,
                                   std::optional<std::string> parent_checkpoint_id, Json values,
-                                  std::vector<std::string> next, Json metadata) {
+                                  std::vector<Packet> next, Json metadata) {
   std::string const id = inner_.put(thread_id, checkpoint_ns, std::move(parent_checkpoint_id),
                                     std::move(values), std::move(next), std::move(metadata));
   persist();

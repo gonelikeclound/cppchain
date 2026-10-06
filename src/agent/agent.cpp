@@ -335,7 +335,7 @@ std::expected<Message, model::ModelError> Agent::invoke(std::vector<Message> inp
       if (opts_.checkpointer != nullptr && !opts_.thread_id.empty()) {
         Json values = {{"messages", msgs_}};
         last_checkpoint_ = opts_.checkpointer->put(opts_.thread_id, "", std::nullopt,
-                                                   std::move(values), std::vector<std::string>{},
+                                                   std::move(values), std::vector<state::Packet>{},
                                                    Json{{"step", iter}, {"phase", "final"}});
       }
       return *reply;
@@ -382,7 +382,8 @@ std::expected<Message, model::ModelError> Agent::invoke(std::vector<Message> inp
     if (opts_.checkpointer != nullptr && !opts_.thread_id.empty()) {
       Json values = {{"messages", msgs_}};
       last_checkpoint_ = opts_.checkpointer->put(opts_.thread_id, "", std::nullopt,
-                                                 std::move(values), std::vector<std::string>{"model"},
+                                                 std::move(values),
+                                                 std::vector<state::Packet>{{"model"}},
                                                  Json{{"step", iter}, {"phase", "after_tools"}});
     }
   }

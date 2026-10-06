@@ -30,6 +30,28 @@ bool starts_with(std::vector<std::string> const& ns, std::vector<std::string> co
   return true;
 }
 
+// 包队列的落盘表示（v2 起）：`{"node":..., "state":...}`；state 为 null = 全局状态包。
+// optional 显式写 null —— 与下方 parent_checkpoint_id 同一纪律（nlohmann 对 optional 无内建支持）。
+nlohmann::json packet_to_json(Packet const& p) {
+  return nlohmann::json{{"node", p.node},
+                        {"state", p.state ? nlohmann::json(*p.state) : nlohmann::json(nullptr)}};
+}
+
+Packet packet_from_json(nlohmann::json const& j) {
+  // 兼容 v1：next 元素可能是纯字符串（旧版节点名数组）
+  if (j.is_string()) return Packet{j.get<std::string>()};
+  return Packet{j.value("node", ""),
+                j.contains("state") && !j["state"].is_null()
+                    ? std::optional<Json>{j["state"]}
+                    : std::nullopt};
+}
+
+nlohmann::json packets_to_json(std::vector<Packet> const& packets) {
+  nlohmann::json a = nlohmann::json::array();
+  for (Packet const& p : packets) a.push_back(packet_to_json(p));
+  return a;
+}
+
 }  // namespace
 
 // ---------------- MemoryCheckpointer ----------------
@@ -40,7 +62,7 @@ std::string MemoryCheckpointer::key_of(std::string const& thread_id, std::string
 
 std::string MemoryCheckpointer::put(std::string const& thread_id, std::string const& checkpoint_ns,
                                     std::optional<std::string> parent_checkpoint_id, Json values,
-                                    std::vector<std::string> next, Json metadata) {
+                                    std::vector<Packet> next, Json metadata) {
   std::string const id = "ckpt-" + std::to_string(++counter_);
   StateSnapshot snap;
   snap.values = std::move(values);
@@ -106,7 +128,7 @@ nlohmann::json MemoryCheckpointer::dump() const {
       // （实测：跨文件往返后快照链的 parent 全部消失）。
       arr.push_back(nlohmann::json{
           {"values", s.values},
-          {"next", s.next},
+          {"next", packets_to_json(s.next)},
           {"config", s.config},
           {"metadata", s.metadata},
           {"parent_checkpoint_id",
@@ -123,7 +145,7 @@ nlohmann::json MemoryCheckpointer::dump() const {
                                    {"value", w.value}});
     wr[key] = std::move(arr);
   }
-  return nlohmann::json{{"version", 1}, {"counter", counter_}, {"snapshots", std::move(snaps)},
+  return nlohmann::json{{"version", 2}, {"counter", counter_}, {"snapshots", std::move(snaps)},
                         {"writes", std::move(wr)}};
 }
 
@@ -138,8 +160,7 @@ void MemoryCheckpointer::load(nlohmann::json const& j) {
         StateSnapshot s;
         s.values = e.value("values", nlohmann::json::object());
         if (e.contains("next") && e["next"].is_array())
-          for (nlohmann::json const& n : e["next"])
-            if (n.is_string()) s.next.push_back(n.get<std::string>());
+          for (nlohmann::json const& n : e["next"]) s.next.push_back(packet_from_json(n));
         s.config = e.value("config", nlohmann::json::object());
         s.metadata = e.value("metadata", nlohmann::json::object());
         if (auto const& p = e.find("parent_checkpoint_id");

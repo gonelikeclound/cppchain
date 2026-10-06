@@ -22,9 +22,23 @@ struct WriteRecord {
   Json value;
 };
 
+// 待执行单元（M10 起 next 从「节点名列表」升级为「包队列」）：
+//   · 普通包（全局状态包）：state 为空，节点读主 state；
+//   · Send 扇出包：state 为该包独立的局部输入（节点读 *state），结果仍经 reducer 写回主 state。
+struct Packet {
+  std::string node;
+  std::optional<Json> state;
+
+  Packet() = default;
+  Packet(std::string n) : node(std::move(n)) {}
+  Packet(std::string n, std::optional<Json> s) : node(std::move(n)), state(std::move(s)) {}
+
+  friend bool operator==(Packet const&, Packet const&) = default;
+};
+
 struct StateSnapshot {
   Json values;                                  // 通道值（含 messages）
-  std::vector<std::string> next;                // 下一批节点（M6 用）
+  std::vector<Packet> next;                     // 下一批待执行包（M6 为节点名，M10 为包队列）
   Json config = Json::object();                 // thread_id / checkpoint_id / checkpoint_ns
   Json metadata = Json::object();               // source(input/loop/update) / step
   std::optional<std::string> parent_checkpoint_id;
@@ -35,10 +49,10 @@ class Checkpointer {
   virtual ~Checkpointer() = default;
 
   // 写入一个快照，返回新 checkpoint_id（并记录 parent 形成链）。
-  // next = 该步之后待执行的节点（恢复语义："回到该步边界继续"）
+  // next = 该步之后待执行的包队列（恢复语义："回到该步边界继续"）
   virtual std::string put(std::string const& thread_id, std::string const& checkpoint_ns,
                           std::optional<std::string> parent_checkpoint_id, Json values,
-                          std::vector<std::string> next, Json metadata) = 0;
+                          std::vector<Packet> next, Json metadata) = 0;
 
   virtual void put_writes(std::string const& thread_id, std::string const& checkpoint_ns,
                           std::string const& checkpoint_id, std::vector<WriteRecord> writes) = 0;
@@ -63,7 +77,7 @@ class MemoryCheckpointer final : public Checkpointer {
  public:
   std::string put(std::string const& thread_id, std::string const& checkpoint_ns,
                   std::optional<std::string> parent_checkpoint_id, Json values,
-                  std::vector<std::string> next, Json metadata) override;
+                  std::vector<Packet> next, Json metadata) override;
 
   void put_writes(std::string const& thread_id, std::string const& checkpoint_ns,
                   std::string const& checkpoint_id, std::vector<WriteRecord> writes) override;
@@ -109,7 +123,7 @@ class FileCheckpointer final : public Checkpointer {
 
   std::string put(std::string const& thread_id, std::string const& checkpoint_ns,
                   std::optional<std::string> parent_checkpoint_id, Json values,
-                  std::vector<std::string> next, Json metadata) override;
+                  std::vector<Packet> next, Json metadata) override;
 
   void put_writes(std::string const& thread_id, std::string const& checkpoint_ns,
                   std::string const& checkpoint_id, std::vector<WriteRecord> writes) override;

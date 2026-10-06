@@ -139,8 +139,10 @@ int main() {
                  cp.list("thread-42", "", 0).size());
 
     auto const snap = cp.get_tuple("thread-42", "", std::nullopt);
+    std::vector<std::string> names;  // next 已升级为包队列（M10）；这里打印的是待跑节点名
+    for (auto const& p : snap->next) names.push_back(p.node);
     std::println("  最新快照: step={} next={}", snap->metadata.at("step").get<int>(),
-                 Json(snap->next).dump());
+                 Json(names).dump());
 
     // 第二次：同一 thread 续跑（input 被忽略，从快照的 next 继续）
     auto full = g.compile(&cp);
