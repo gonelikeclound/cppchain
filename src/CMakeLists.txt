@@ -173,6 +173,7 @@ add_library(cppchain_workflow STATIC
   workflow/node_types.cpp
   workflow/plugin.cpp
   workflow/import.cpp
+  workflow/debug_view.cpp
   workflow/generator.cpp)
 
 target_include_directories(cppchain_workflow PUBLIC

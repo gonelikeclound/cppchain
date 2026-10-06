@@ -16,6 +16,7 @@
 #include <cppchain/model/openai/openai_chat_model.hpp>
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/components.hpp>
+#include <cppchain/workflow/debug_view.hpp>
 #include <cppchain/workflow/import.hpp>
 #include <cppchain/workflow/ir.hpp>
 #include <cppchain/workflow/session_log.hpp>
@@ -24,6 +25,7 @@
 #include <support/dotenv.hpp>
 #include <support/fakes.hpp>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -112,8 +114,98 @@ int main(int argc, char** argv) {
     usage();
     return 0;
   }
+
+  // ================= 子命令：debug（可视化调试台，wfr-⑤） =================
   if (cmd == "debug") {
-    std::println("wfr debug：可视化调试台在 wfr-⑤ 阶段接入");
+    std::string session_arg, out_file;
+    bool all = false, open = false;
+    if (argc < 3) {
+      usage();
+      return 2;
+    }
+    std::string const dname = argv[2];
+    for (int j = 3; j < argc; ++j) {
+      std::string const a = argv[j];
+      if (a == "--workdir" && j + 1 < argc) workdir = argv[++j];
+      else if (a == "--session" && j + 1 < argc) session_arg = argv[++j];
+      else if (a == "--all") all = true;
+      else if (a == "--out" && j + 1 < argc) out_file = argv[++j];
+      else if (a == "--open") open = true;
+      else if (a == "-h" || a == "--help") {
+        usage();
+        return 0;
+      } else {
+        std::println("未知 debug 选项: {}", a);
+        return 2;
+      }
+    }
+    if (session_arg.empty() && !all) all = true;  // 缺省看全部会话
+
+    // 定位 + 展开 + 解析（与主流程同源；debug 展示展开后的扁平图）
+    std::string const dpath = resolve_workflow(workdir, dname);
+    std::ifstream din(dpath);
+    if (!din) {
+      std::println("找不到 workflow '{}'（searched: {}）", dname, dpath);
+      return 2;
+    }
+    Json dir_json;
+    try {
+      din >> dir_json;
+    } catch (std::exception const& e) {
+      std::println("workflow JSON 解析失败: {}", e.what());
+      return 2;
+    }
+    if (dir_json.contains("imports"))
+      if (!load_workflow_imports(dir_json, true, nullptr)) {
+        std::println("动态库 import 失败");
+        return 2;
+      }
+    if (dir_json.contains("import")) {
+      auto expanded = expand_workflow_imports(dir_json, workdir);
+      if (!expanded) {
+        std::println("workflow import 展开失败: {}", expanded.error());
+        return 2;
+      }
+    }
+    auto dir_ir = WorkflowIR::parse(dir_json);
+    if (!dir_ir) {
+      std::println("IR 解析失败: {}", dir_ir.error());
+      return 2;
+    }
+
+    // 会话日志（--session 单会话 / --all 合并 .wfr/sessions/*.log.jsonl）
+    std::vector<Json> recs;
+    if (all) {
+      std::error_code ec;
+      for (std::filesystem::directory_iterator it(wfr_root(workdir) / "sessions", ec), end;
+           it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec) ||
+          !it->path().filename().string().ends_with(".log.jsonl"))
+          continue;
+        SessionLog slog(it->path().string());
+        auto r = slog.records();
+        recs.insert(recs.end(), r.begin(), r.end());
+      }
+    } else {
+      SessionLog slog(session_path(workdir, session_arg));
+      recs = slog.records();
+    }
+
+    Json const payload = build_debug_payload(*dir_ir, recs);
+    std::string const html = render_debug_html(payload);
+    std::string const out =
+        out_file.empty() ? (wfr_root(workdir) / "debug" / (dname + ".html")).string() : out_file;
+    {
+      std::filesystem::create_directories(std::filesystem::path(out).parent_path());
+      std::ofstream o(out, std::ios::trunc);
+      o << html;
+    }
+    std::println("调试台已生成: {}  ({} bytes, {} 条日志记录)", out, html.size(), recs.size());
+    if (open) [[unlikely]] {
+      std::string const cmdline = "xdg-open \"" + out + "\" >/dev/null 2>&1 &";
+      std::system(cmdline.c_str());
+    }
     return 0;
   }
 
