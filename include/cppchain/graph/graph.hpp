@@ -45,7 +45,7 @@ inline EventMode operator&(EventMode a, EventMode b) {
 // workflow 的投影适配器据此直投既有日志，不改其内部编码。
 struct StreamEvent {
   std::uint64_t seq = 0;          // 引擎内单调（node_delta 与引擎事件共用同一序列）
-  std::string type;               // "node_start"/"node_end"/"values"/"interrupt"/"resume"/节点自定
+  std::string type;               // "node_start"/"node_end"/"values"/"interrupt" + 节点自定（delta 等）
   std::string node;               // 空 = 全局事件（values）
   std::string node_kind;          // workflow 层注入；graph 引擎默认空
   int step = 0;                   // 包执行计数

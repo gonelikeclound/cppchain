@@ -69,9 +69,9 @@ TEST(WfM10, fire_once_stream_collects_events) {
   ASSERT_TRUE(wf) << wf.error().message;
 
   std::vector<graph::StreamEvent> evs;
-  auto r = fire_once(*wf, Json{{"product_id", "P1"}}, FireOptions{.stream = [&evs](auto const& e) {
-                                                                evs.push_back(e);
-                                                              }});
+  auto r = fire_once(*wf, Json{{"product_id", "P1"}},
+                    FireOptions{.log = nullptr, .input_messages = {}, .thread_id = "",
+                                .stream = [&evs](auto const& e) { evs.push_back(e); }});
   ASSERT_TRUE(r) << r.error().message;
   // EventMode::All = updates + snapshot + deltas → 每节点 (node_start, node_end, values)
   ASSERT_EQ(evs.size(), 9u) << "3 个节点 × (node_start+node_end+values)";
@@ -99,7 +99,8 @@ TEST(WfM10, stream_mode_skips_wrapper_structure_log) {
 
   SessionLog slog(tmp.file());
   (void)fire_once(*wf, Json{{"product_id", "P1"}},
-                  FireOptions{.log = &slog, .stream = [](graph::StreamEvent const&) {}});
+                  FireOptions{.log = &slog, .input_messages = {}, .thread_id = "",
+                              .stream = [](graph::StreamEvent const&) {}});
 
   for (auto const& rec : slog.records()) {
     if (rec.value("source", "") == "engine") {
@@ -116,18 +117,23 @@ TEST(WfM10, project_stream_to_log_writes_same_envelope) {
   TempDir tmp;
   SessionLog slog(tmp.file());
 
-  project_stream_to_log(slog, "r-1", graph::StreamEvent{.type = "node_start", .node = "a"},
+  project_stream_to_log(slog, "r-1",
+                        graph::StreamEvent{.type = "node_start", .node = "a", .node_kind = "",
+                                           .ok = true, .status = "ok"},
                         "tool");
   project_stream_to_log(slog, "r-1",
-                        graph::StreamEvent{.type = "node_end", .node = "a",
-                                           .payload = Json{{"x", 1}}},
+                        graph::StreamEvent{.type = "node_end", .node = "a", .node_kind = "",
+                                           .payload = Json{{"x", 1}}, .ok = true,
+                                           .status = "ok"},
                         "tool");
   project_stream_to_log(slog, "r-1",
-                        graph::StreamEvent{.type = "node_end", .node = "b", .ok = false,
-                                           .status = "error"},
+                        graph::StreamEvent{.type = "node_end", .node = "b", .node_kind = "",
+                                           .ok = false, .status = "error"},
                         "tool");
   project_stream_to_log(slog, "r-1",
-                        graph::StreamEvent{.type = "interrupt", .node = "a"}, "tool");
+                        graph::StreamEvent{.type = "interrupt", .node = "a", .node_kind = "",
+                                           .ok = true, .status = "interrupt"},
+                        "tool");
 
   auto const recs = slog.records();
   ASSERT_EQ(recs.size(), 4u);
@@ -169,4 +175,55 @@ TEST(WfM10, engine_interrupt_record_ignored_by_replay) {
   EXPECT_EQ(recs[3].value("phase", ""), "interrupt");
   EXPECT_EQ(recs[3].value("status", ""), "interrupt");
   EXPECT_EQ(recs[3].value("source", ""), "engine");
+}
+
+// 回归：宿主 stream sink 抛**非 std 异常**（int）直接逃逸 invoke 时，fire_once 也必须清掉
+// 注入的 sink 句柄（RAII guard），否则该 CompiledWorkflow 永久进入 reentrant 拒绝
+TEST(WfM10, fire_once_cleans_sink_on_throwing_stream) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  auto ir = WorkflowIR::parse(price_ir());
+  ASSERT_TRUE(ir);
+  auto wf = compile_workflow(*ir, reg);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  EXPECT_THROW(
+      (void)fire_once(*wf, Json{{"product_id", "P1"}},
+                      FireOptions{nullptr, {}, "",
+                                  [](graph::StreamEvent const&) { throw 1; }}),
+      int);
+  // 句柄已被 guard 清掉：不再 reentrant 拒绝，可继续 fire
+  auto ok = fire_once(*wf, Json{{"product_id", "P1"}});
+  ASSERT_TRUE(ok) << ok.error().message;
+  EXPECT_EQ(wf->sink->log, nullptr);
+}
+
+// 回归：续跑触发（thread 已有快照）时引擎忽略 input —— fire_once 不得照写 __input__（否则
+// 下一个 run 的 replay 会引入幻影消息）
+TEST(WfM10, skips_phantom_input_on_resume) {
+  TempDir tmp;
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  auto ir = WorkflowIR::parse(price_ir());
+  ASSERT_TRUE(ir);
+  state::MemoryCheckpointer cp;
+  auto wf = compile_workflow(*ir, reg, &cp);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  SessionLog slog(tmp.file());
+  auto const hi1 = Json{message::human_message("第一轮")};
+  auto const hi2 = Json{message::human_message("第二轮")};
+  // 第一轮：全新线程 → 写 __input__
+  auto r1 = fire_once(*wf, Json{{"product_id", "P1"}},
+                      FireOptions{&slog, std::vector<Json>{hi1}, "cli"});
+  ASSERT_TRUE(r1) << r1.error().message;
+  // 第二轮：同线程续跑（引擎忽略 input）→ 不应再写 __input__
+  auto r2 = fire_once(*wf, Json{{"product_id", "P1"}},
+                      FireOptions{&slog, std::vector<Json>{hi2}, "cli"});
+  ASSERT_TRUE(r2) << r2.error().message;
+
+  std::size_t input_exits = 0;
+  for (auto const& rec : slog.records())
+    if (rec.value("node", "") == "__input__" && rec.value("phase", "") == "exit") ++input_exits;
+  EXPECT_EQ(input_exits, 1u) << "续跑触发不应写 __input__（input 被引擎忽略，写了会 replay 幻影）";
 }

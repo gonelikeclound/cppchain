@@ -188,9 +188,11 @@ TEST(WfHistoryNodes, second_run_sees_first_run_history) {
     EXPECT_EQ((*input_exit)["source"], "engine");
     EXPECT_EQ((*input_exit)["update"]["messages"].size(), 1u);
     // load_history 的 update 是回声 → 不落 update 键（否则 replay 重复追加整段消息）
-    for (Json const& e : engine_ok_exits(recs))
-      if (e.value("node_kind", "") == "load_history")
+    for (Json const& e : engine_ok_exits(recs)) {
+      if (e.value("node_kind", "") == "load_history") {
         EXPECT_FALSE(e.contains("update")) << "load_history 的 update 不应落盘";
+      }
+    }
     // 节点自报（source=node）：load_history 至少写了一条诊断
     auto node_log = std::find_if(recs.begin(), recs.end(),
                                  [](Json const& r) { return r.value("source", "") == "node"; });

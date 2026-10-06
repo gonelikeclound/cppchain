@@ -88,9 +88,9 @@ void CompiledGraph::emit(StreamEvent ev) {
 
 // 节点自报流式事件（模型 delta 等）。sink 空 / mode 无 Deltas / 无序列 → 静默。
 void NodeContext::emit(std::string_view type, Json payload) {
-  if (!sink || (mode & EventMode::Deltas) == EventMode::Off || !seq) return;
-  StreamEvent ev{.type = std::string(type), .node = node_name, .step = step,
-                 .payload = std::move(payload), .ok = true, .status = "ok"};
+  if (!sink || !(*sink) || (mode & EventMode::Deltas) == EventMode::Off || !seq) return;
+  StreamEvent ev{.type = std::string(type), .node = node_name, .node_kind = "",
+                 .step = step, .payload = std::move(payload), .ok = true, .status = "ok"};
   ev.seq = ++(*seq);  // 与引擎事件共用同一单调序列
   (*sink)(ev);
 }
@@ -124,8 +124,11 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
   //    （原线程轨迹不污染），分叉点即新链的 parent。
   if (cp_ != nullptr && !thread_id.empty()) {
     std::string const src = opts.fork ? opts.fork->source_thread : thread_id;
+    // fork.checkpoint_id 为空 = 该线程最新快照（文档语义）；空串不得包成 engaged 去精确查
     std::optional<std::string> const ckpt =
-        opts.fork ? std::make_optional(opts.fork->checkpoint_id) : std::nullopt;
+        (opts.fork && !opts.fork->checkpoint_id.empty())
+            ? std::make_optional(opts.fork->checkpoint_id)
+            : std::nullopt;
     auto snap = cp_->get_tuple(src, "", ckpt);
     if (opts.fork && !snap.has_value()) {
       // 分叉点找不到：fail-closed（不默默退回"最新 / 全新开跑"，防走错轨迹）
@@ -150,12 +153,14 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
             break;
           }
         last_interrupt_ = InterruptStatus{true, interrupt_node, std::move(payload)};
-        emit(StreamEvent{.type = "interrupt", .node = interrupt_node, .step = 0,
-                         .payload = last_interrupt_.payload, .ok = true, .status = "interrupt"});
-        if (!opts.resume) {   // 无答复：保持挂着，不动
+        if (!opts.resume) {   // 无答复：保持挂着，不动（只此时才重放 interrupt 事件告知挂着）
+          emit(StreamEvent{.type = "interrupt", .node = interrupt_node, .node_kind = "",
+                           .step = 0, .payload = last_interrupt_.payload, .ok = true,
+                           .status = "interrupt"});
           finish();
           return state;
         }
+        // 有 resume：续跑，不必重放旧的 interrupt（否则投影会出现幽灵 engine_interrupt 记录）
         resuming_interrupt = true;
       } else {
         if (opts.resume.has_value()) {
@@ -203,7 +208,7 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
     ctx.seq = &last_seq_;
     if (resuming_interrupt && node == interrupt_node) ctx.pending_resume = opts.resume;
 
-    emit(StreamEvent{.type = "node_start", .node = node, .step = ctx.step,
+    emit(StreamEvent{.type = "node_start", .node = node, .node_kind = "", .step = ctx.step,
                      .payload = Json::object(), .ok = true, .status = "ok"});
 
     Command cmd;
@@ -227,12 +232,12 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
       cp_->put_writes(thread_id, "", last_checkpoint_,
                       {state::WriteRecord{node, "interrupt", last_interrupt_.payload}});
       parent = last_checkpoint_;
-      emit(StreamEvent{.type = "interrupt", .node = node, .step = ctx.step,
+      emit(StreamEvent{.type = "interrupt", .node = node, .node_kind = "", .step = ctx.step,
                        .payload = last_interrupt_.payload, .ok = true, .status = "interrupt"});
       finish();
       return state;  // 以"挂着"返回完整 state；调用方用 last_interrupt() 区分
     } catch (std::exception const& e) {
-      emit(StreamEvent{.type = "node_end", .node = node, .step = ctx.step,
+      emit(StreamEvent{.type = "node_end", .node = node, .node_kind = "", .step = ctx.step,
                        .payload = Json{{"error", e.what()}}, .ok = false, .status = "error"});
       finish();
       return std::unexpected(GraphError{GraphError::Kind::NodeError,
@@ -240,10 +245,10 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
     }
 
     state = schema_.apply(state, cmd.update);  // 包结果经 per-key reducer 归约回主 state
-    emit(StreamEvent{.type = "node_end", .node = node, .step = ctx.step,
+    emit(StreamEvent{.type = "node_end", .node = node, .node_kind = "", .step = ctx.step,
                      .payload = cmd.update, .ok = true, .status = "ok"});
     if ((mode_ & EventMode::Snapshot) != EventMode::Off)
-      emit(StreamEvent{.type = "values", .node = "", .step = ctx.step,
+      emit(StreamEvent{.type = "values", .node = "", .node_kind = "", .step = ctx.step,
                        .payload = state, .ok = true, .status = "ok"});
 
     // ③ 路由态：goto > sends > 静态边 > 条件边

@@ -53,6 +53,10 @@ struct CompiledWorkflow {
   TriggerIR trigger;  // 元数据透传（非调度用）
   std::size_t graph_node_count_ = 0;  // 实际注册进图的节点数（label 不注册）
 
+  // 编译期注入的 checkpointer（可空）。fire_once 用它预判"本次触发是否走恢复
+  //（thread 有快照 / fork）"：恢复时引擎会忽略 input，`__input__` 事件不应照写。
+  state::Checkpointer* cp = nullptr;
+
   // 触发期注入的会话日志句柄（节点 wrapper 共享同一份；fire_once 写 log/run）。
   std::shared_ptr<SessionSink> sink;
 

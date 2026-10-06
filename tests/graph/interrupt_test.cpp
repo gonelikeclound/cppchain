@@ -192,6 +192,25 @@ TEST(Interrupt, does_not_leak_into_generic_catch) {
   EXPECT_TRUE(compiled->last_interrupt().interrupted);
 }
 
+// 回归：带 resume 续跑时**不得重放**旧的 interrupt 事件（否则 stream 投影会落幽灵记录）
+TEST(Interrupt, resume_does_not_reemit_stale_interrupt) {
+  MemoryCheckpointer cp;
+  auto compiled = make_approval_graph().compile(&cp);
+  ASSERT_TRUE(compiled.has_value());
+  (void)compiled->invoke(Json::object(), "t-1");  // 先挂起
+
+  std::vector<StreamEvent> evs;
+  auto const resumed = compiled->invoke(
+      Json::object(), "t-1",
+      InvokeOptions{[&evs](StreamEvent const& e) { evs.push_back(e); },
+                    EventMode::Updates, Json{{"ok", true}}, std::nullopt});
+  ASSERT_TRUE(resumed.has_value());
+  ASSERT_EQ(evs.size(), 2u);  // 只有 node_start + node_end（重跑成功）
+  EXPECT_EQ(evs[0].type, "node_start");
+  EXPECT_EQ(evs[1].type, "node_end");
+  for (auto const& e : evs) EXPECT_NE(e.type, "interrupt");
+}
+
 // 新进程/新 FileCheckpointer 实例能从落盘快照重建 last_interrupt（挂起状态持久化）
 TEST(Interrupt, recover_interrupt_status_from_checkpoint) {
   TempDir tmp;

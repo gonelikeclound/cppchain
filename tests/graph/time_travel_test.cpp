@@ -106,6 +106,32 @@ TEST(Fork, forkUnknownSourceThreadIsFailClosed) {
   EXPECT_EQ(out.error().kind, GraphError::Kind::CheckpointNotFound);
 }
 
+// 回归：fork 的空 checkpoint_id（文档语义 = 该线程最新快照）不得被当作字面 id 精确查
+TEST(Fork, emptyCheckpointMeansLatest) {
+  MemoryCheckpointer cp;
+  StateGraph g(trace_schema());
+  g.add_node("a", [](Json const& st, NodeContext&) { return Command::with_update(append_visited(st, "a")); })
+      .add_node("b", [](Json const& st, NodeContext&) { return Command::with_update(append_visited(st, "b")); })
+      .add_node("c", [](Json const& st, NodeContext&) { return Command::with_update(append_visited(st, "c")); })
+      .add_edge("a", "b")
+      .add_edge("b", "c")
+      .add_edge("c", kEnd)
+      .set_entry_point("a");
+  auto full = g.compile(&cp);
+  ASSERT_TRUE(full.has_value());
+  ASSERT_TRUE(full->invoke(Json::object(), "thread-A").has_value());
+
+  // 最新快照 = c 跑完（next 空）→ 分叉到新线程立即返回该终态，不报 CheckpointNotFound
+  auto out = full->invoke(Json::object(), "thread-B",
+                          InvokeOptions{nullptr, EventMode::Updates, std::nullopt,
+                                        std::optional<ForkSpec>{ForkSpec{"thread-A", ""}}});
+  ASSERT_TRUE(out.has_value()) << out.error().message;
+  auto const& v = out->at("visited");
+  ASSERT_EQ(v.size(), 3u);
+  EXPECT_EQ(v[0], "a");
+  EXPECT_EQ(v[2], "c");
+}
+
 // 分叉点若正站在 interrupt 上：语义与普通恢复一致（无 resume 保持挂着、有 resume 继续）
 TEST(Fork, interruptedForkPointRequiresResume) {
   MemoryCheckpointer cp;

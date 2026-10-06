@@ -197,7 +197,8 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   if (!compiled)
     return std::unexpected(WorkflowError{WorkflowError::Kind::Compile, compiled.error().message});
 
-  CompiledWorkflow out{std::move(*compiled), ir.id, ir.trigger, cctx.registered, std::move(sink)};
+  CompiledWorkflow out{std::move(*compiled), ir.id, ir.trigger, cctx.registered, cp,
+                         std::move(sink)};
   return out;
 }
 
@@ -222,10 +223,26 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   wf.sink->run = run;
   wf.sink->log = opts.log;
 
+  // 异常安全：invoke 可能**抛出**（非 std 异常 / 存储失败 / 宿主 sink 抛），裸代码收尾会
+  // 让 sink->log 残留 → 该 CompiledWorkflow 永久进入 reentrant 拒绝。用 RAII guard 兜底。
+  struct SinkGuard {
+    CompiledWorkflow& wf;
+    ~SinkGuard() {
+      wf.sink->streaming = false;
+      wf.sink->log = nullptr;
+      wf.sink->run.clear();
+    }
+  } guard{wf};
+
   // 本轮输入由**引擎**写成 input 事件（docs/12 §6.3 + §7）：它在 run 开头、历史之后、
   // 本 run 节点之前 —— 下一个 run 的 load_history 会把它 replay 回来。
-  // D 阶段"宿主先写进会话文件"不再需要；且宿主写不了带 update 的记录（replay 铁律）。
-  if (opts.log != nullptr && !opts.input_messages.empty()) {
+  // **只有真正会消费 input 的触发才写**：续跑（thread 已有快照）与分叉（fork）走恢复
+  // 语义、引擎忽略 input，此时仍写 __input__ 会在下一次 replay 引入幻影消息。
+  bool const recreates_state =
+      !opts.fork.has_value() &&
+      (opts.thread_id.empty() || wf.cp == nullptr ||
+       !wf.cp->get_tuple(opts.thread_id, "", std::nullopt).has_value());
+  if (recreates_state && opts.log != nullptr && !opts.input_messages.empty()) {
     opts.log->engine_enter(run, "__input__", "input");
     opts.log->engine_exit(run, "__input__", "input", true, "ok", 0,
                           std::optional<Json>(Json{{kMessagesKey, opts.input_messages}}));
@@ -235,14 +252,11 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   wf.sink->streaming = opts.stream != nullptr;
   graph::InvokeOptions iopts;
   iopts.sink = opts.stream;
-  // 全模式事件：host 要的是事件流本身；没传 stream 时 sink=null → 零开销
+  // 全模式事件：host 要的是事件流本身；没传 stream 时 sink=null → 零事件（仅构造无磨损）
   iopts.mode = graph::EventMode::All;
   iopts.fork = opts.fork;
   auto const r = wf.graph.invoke(input, opts.thread_id, iopts);
 
-  wf.sink->streaming = false;
-  wf.sink->log = nullptr;
-  wf.sink->run.clear();
   if (!r) return std::unexpected(WorkflowError{WorkflowError::Kind::Runtime, r.error().message});
   return *r;
 }

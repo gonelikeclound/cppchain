@@ -162,7 +162,7 @@ TEST(Streaming, error_emits_node_end_not_ok) {
   std::vector<StreamEvent> evs;
   auto const out = compiled->invoke(Json::object(), "",
                                     InvokeOptions{[&evs](StreamEvent const& e) { evs.push_back(e); },
-                                                  EventMode::Updates, std::nullopt});
+                                                  EventMode::Updates, std::nullopt, std::nullopt});
   ASSERT_FALSE(out.has_value());
   EXPECT_EQ(out.error().kind, GraphError::Kind::NodeError);
   ASSERT_EQ(evs.size(), 2u);
@@ -172,4 +172,24 @@ TEST(Streaming, error_emits_node_end_not_ok) {
   EXPECT_FALSE(evs[1].ok);
   ASSERT_TRUE(evs[1].status.has_value());
   EXPECT_EQ(*evs[1].status, "error");
+}
+
+// 回归：sink=nullptr + Deltas 时节点 emit 必须静默，不得因空 std::function 崩溃
+TEST(Streaming, node_emit_with_null_sink_is_silent) {
+  StateGraph g(StateSchema{});
+  g.add_node("a", [](Json const&, NodeContext& ctx) {
+     for (int i = 0; i < 3; ++i) ctx.emit("delta", Json{{"c", i}});
+     return Command::with_update({{"done", true}});
+   })
+      .add_edge("a", kEnd)
+      .set_entry_point("a");
+  auto compiled = g.compile();
+  ASSERT_TRUE(compiled.has_value());
+
+  // 有 Deltas 位但 sink 是空 function —— 之前这里会 bad_function_call
+  auto const out = compiled->invoke(Json::object(), "",
+                                    InvokeOptions{nullptr, EventMode::Deltas, std::nullopt,
+                                                  std::nullopt});
+  ASSERT_TRUE(out.has_value()) << out.error().message;
+  EXPECT_EQ(out->at("done"), true);
 }
