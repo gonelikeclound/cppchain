@@ -198,7 +198,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     return std::unexpected(WorkflowError{WorkflowError::Kind::Compile, compiled.error().message});
 
   CompiledWorkflow out{std::move(*compiled), ir.id, ir.trigger, cctx.registered, cp,
-                         std::move(sink)};
+                         std::move(g.kinds), std::move(sink)};
   return out;
 }
 
@@ -251,10 +251,20 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   Json input = Json{{kConfigKey, config}};
   wf.sink->streaming = opts.stream != nullptr;
   graph::InvokeOptions iopts;
-  iopts.sink = opts.stream;
   // 全模式事件：host 要的是事件流本身；没传 stream 时 sink=null → 零事件（仅构造无磨损）
   iopts.mode = graph::EventMode::All;
   iopts.fork = opts.fork;
+  // 包装 host 的 stream sink：给事件填 node_kind（引擎不默认图内 kind，kinds 表编译期建立；
+  // 投影据此识别 load_history 之类的回声 update 并抑制 —— 与 wrapper 路径一致）
+  if (opts.stream) {
+    auto host = opts.stream;
+    auto kinds = wf.node_kinds;
+    iopts.sink = [host = std::move(host), kinds = std::move(kinds)](graph::StreamEvent const& e) {
+      graph::StreamEvent ev = e;  // sink 回调签名是 const&，按值填字段后再投递
+      if (auto it = kinds.find(ev.node); it != kinds.end()) ev.node_kind = it->second;
+      host(ev);
+    };
+  }
   auto const r = wf.graph.invoke(input, opts.thread_id, iopts);
 
   if (!r) return std::unexpected(WorkflowError{WorkflowError::Kind::Runtime, r.error().message});
@@ -270,10 +280,13 @@ void project_stream_to_log(SessionLog& log, std::string const& run, graph::Strea
     log.engine_enter(run, ev.node, kind);
   } else if (ev.type == "node_end") {
     if (ev.ok)
-      log.engine_exit(run, ev.node, kind, true, "ok", 0,
-                      ev.payload.is_object() && !ev.payload.empty()
-                          ? std::optional<Json>{ev.payload}
-                          : std::nullopt);
+      log.engine_exit(
+          run, ev.node, kind, true, "ok", 0,
+          (kind == "load_history")
+              ? std::nullopt  // 回声 update 不落（与 wrapper 一致）：否则 replay 双写整段历史
+              : (ev.payload.is_object() && !ev.payload.empty()
+                     ? std::optional<Json>{ev.payload}
+                     : std::nullopt));
     else
       log.engine_exit(run, ev.node, kind, false, "error", 0, std::nullopt);
   } else if (ev.type == "interrupt") {

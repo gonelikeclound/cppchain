@@ -84,6 +84,11 @@ TEST(WfM10, fire_once_stream_collects_events) {
   EXPECT_EQ(evs[0].node, "fetch_p");
   EXPECT_EQ(evs[3].node, "check_p");
   EXPECT_EQ(evs[6].node, "notify");
+  // stream sink 包装应填入 node_kind（引擎不知图内 kind，compiler 从 kinds 表补）——
+  // 否则投影无法识别 load_history 之类做回声抑制
+  EXPECT_EQ(evs[0].node_kind, "tool");  // fetch_p
+  EXPECT_EQ(evs[3].node_kind, "expr");  // check_p
+  EXPECT_EQ(evs[6].node_kind, "tool");  // notify
   EXPECT_EQ(sinks.notifications.size(), 1u);
 }
 
@@ -175,6 +180,22 @@ TEST(WfM10, engine_interrupt_record_ignored_by_replay) {
   EXPECT_EQ(recs[3].value("phase", ""), "interrupt");
   EXPECT_EQ(recs[3].value("status", ""), "interrupt");
   EXPECT_EQ(recs[3].value("source", ""), "engine");
+}
+
+// 回归：投影遇到 load_history 的回声 update 必须抑制（与 wrapper 一致，防 replay 双写历史）
+TEST(WfM10, project_stream_to_log_suppresses_load_history_echo) {
+  TempDir tmp;
+  SessionLog slog(tmp.file());
+  Json echo = {{"messages", Json::array({message::human_message("历史")})}};
+  project_stream_to_log(slog, "r-1",
+                        graph::StreamEvent{.type = "node_end", .node = "hist",
+                                           .node_kind = "load_history", .payload = echo,
+                                           .ok = true, .status = "ok"},
+                        "");
+  auto const recs = slog.records();
+  ASSERT_EQ(recs.size(), 1u);
+  EXPECT_EQ(recs[0].value("phase", ""), "exit");
+  EXPECT_FALSE(recs[0].contains("update")) << "load_history 的回声 update 不应落盘";
 }
 
 // 回归：宿主 stream sink 抛**非 std 异常**（int）直接逃逸 invoke 时，fire_once 也必须清掉

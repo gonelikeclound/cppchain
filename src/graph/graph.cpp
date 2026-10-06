@@ -206,7 +206,9 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
     ctx.sink = &sink_;
     ctx.mode = mode_;
     ctx.seq = &last_seq_;
-    if (resuming_interrupt && node == interrupt_node) ctx.pending_resume = opts.resume;
+    // resume 只注入**重跑包**（is_restart 标记），避免误给同节点的其它 Send 包
+    if (resuming_interrupt && node == interrupt_node && pkt.is_restart)
+      ctx.pending_resume = opts.resume;
 
     emit(StreamEvent{.type = "node_start", .node = node, .node_kind = "", .step = ctx.step,
                      .payload = Json::object(), .ok = true, .status = "ok"});
@@ -226,7 +228,8 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
       // 首次悬挂：节点无 update 落盘 → 快照取节点入口的完整 state；
       // next = 剩余包 + 重跑包（放最后，**保留本包的局部输入视图**）；payload 随 writes 落盘
       last_interrupt_ = InterruptStatus{true, node, sig.payload()};
-      current.push_back(state::Packet{node, pkt.state});
+      // 重跑包打 is_restart 标记：resume 只注入这个包（同节点扇入的其它包不得误拿）
+      current.push_back(state::Packet{node, pkt.state, /*is_restart=*/true});
       Json meta = {{"step", last_steps_}, {"node", node}, {"interrupted", true}};
       last_checkpoint_ = cp_->put(thread_id, "", parent, state, to_packets(current), meta);
       cp_->put_writes(thread_id, "", last_checkpoint_,

@@ -255,11 +255,14 @@ TEST(FileCheckpointer, legacy_v1_next_string_array_loads_as_packets) {
   EXPECT_EQ(snap->metadata.value("node", ""), "a");
 }
 
-// v2 dump/load 往返要保留 Send 包的局部 state（M10 落盘基础，P3 用到）。
+// v2 dump/load 往返要保留 Send 包的局部 state 与中断重跑标记（M10 落盘基础，P3/P6 用到）。
 TEST(Checkpointer, packet_state_survives_dump_load_round_trip) {
   MemoryCheckpointer cp;
+  Packet restart{"worker"};
+  restart.state = Json{{"item", 1}};
+  restart.is_restart = true;  // 中断重跑包标记
   cp.put("t1", "", std::nullopt, Json{{"step", 1}},
-         std::vector<Packet>{{"worker", Json{{"item", 1}}}}, Json::object());
+         std::vector<Packet>{restart}, Json::object());
   MemoryCheckpointer cp2;
   cp2.load(cp.dump());
   auto const snap = cp2.get_tuple("t1", "", std::nullopt);
@@ -268,4 +271,5 @@ TEST(Checkpointer, packet_state_survives_dump_load_round_trip) {
   EXPECT_EQ(snap->next[0].node, "worker");
   ASSERT_TRUE(snap->next[0].state.has_value());
   EXPECT_EQ(snap->next[0].state->at("item"), 1);
+  EXPECT_TRUE(snap->next[0].is_restart) << "is_restart 标记应随落盘往返保留";
 }

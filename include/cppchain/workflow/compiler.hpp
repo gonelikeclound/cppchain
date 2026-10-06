@@ -16,6 +16,7 @@
 #include <expected>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "cppchain/graph/graph.hpp"
@@ -56,6 +57,11 @@ struct CompiledWorkflow {
   // 编译期注入的 checkpointer（可空）。fire_once 用它预判"本次触发是否走恢复
   //（thread 有快照 / fork）"：恢复时引擎会忽略 input，`__input__` 事件不应照写。
   state::Checkpointer* cp = nullptr;
+
+  // 图节点 id → node_kind 字面量（docs/12 §6.3）。stream 模式包装 sink 时填充事件的
+  // node_kind，让投影（project_stream_to_log）能拿到逐节点 kind —— 含 load_history
+  // 的回声 update 抑制（与 wrapper 路径一致）。
+  std::unordered_map<std::string, std::string> node_kinds;
 
   // 触发期注入的会话日志句柄（节点 wrapper 共享同一份；fire_once 写 log/run）。
   std::shared_ptr<SessionSink> sink;

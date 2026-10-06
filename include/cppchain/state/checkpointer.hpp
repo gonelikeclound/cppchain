@@ -25,13 +25,18 @@ struct WriteRecord {
 // 待执行单元（M10 起 next 从「节点名列表」升级为「包队列」）：
 //   · 普通包（全局状态包）：state 为空，节点读主 state；
 //   · Send 扇出包：state 为该包独立的局部输入（节点读 *state），结果仍经 reducer 写回主 state。
+//   · is_restart：悬挂中断点的「重跑包」标记 —— resume 值**只注入给这一个包**，
+//     避免按节点名匹配时误给队列里同节点的其它包。
 struct Packet {
   std::string node;
   std::optional<Json> state;
+  bool is_restart = false;
 
   Packet() = default;
   Packet(std::string n) : node(std::move(n)) {}
   Packet(std::string n, std::optional<Json> s) : node(std::move(n)), state(std::move(s)) {}
+  Packet(std::string n, std::optional<Json> s, bool restart)
+      : node(std::move(n)), state(std::move(s)), is_restart(restart) {}
 
   friend bool operator==(Packet const&, Packet const&) = default;
 };

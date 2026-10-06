@@ -213,6 +213,54 @@ TEST(Send, checkpoint_next_carries_packets) {
   EXPECT_EQ(resumed->at("results").size(), 2u);
 }
 
+// 回归修复：Send 扇入**同一节点**时，resume 只注入「重跑包」（is_restart 标记）；
+// 队列里同节点的其它包调 interrupt 时应**再次悬挂**，而不是被上一个 resume 值误穿过。
+TEST(Send, resume_marker_targets_only_restart_packet) {
+  MemoryCheckpointer cp;
+  std::vector<std::string> done;                           // interrupt 返回后（resume 生效）
+  std::vector<std::string> pending;                        // 首见即被悬挂
+  StateGraph g(StateSchema{});
+  g.add_node("o", [](Json const& st, NodeContext&) {
+     std::vector<Send> sends;
+     for (auto const& item : st.at("items")) sends.push_back(Send{"w", Json{{"item", item}}});
+     return Command::with_sends(std::move(sends));
+   })
+      .add_node("w", [&](Json const& input, NodeContext& ctx) {
+        std::string const tag = input.at("item").get<std::string>();
+        if (!ctx.pending_resume) pending.push_back(tag);   // 首见：即将被悬挂
+        auto const v = interrupt(Json{{"tag", tag}}, ctx);  // 首调抛、重跑返回注入值
+        done.push_back(tag);
+        return Command::with_update(Json{{"done", tag}, {"resume", v}});
+      })
+      .set_entry_point("o");
+  auto compiled = g.compile(&cp);
+  ASSERT_TRUE(compiled.has_value());
+
+  // ① 首次：w(X) 悬挂，w(Y) 还在队列
+  (void)compiled->invoke(Json{{"items", Json::array({"X", "Y"})}}, "t-fan");
+  ASSERT_TRUE(compiled->last_interrupt().interrupted);
+  EXPECT_EQ(compiled->last_interrupt().payload.at("tag"), "X");
+  EXPECT_EQ(pending, (std::vector<std::string>{"X"}));
+
+  // ② resume：w(Y)【不是】重跑包 → 不注入 → 自己再次悬挂（旧实现会误注入让它穿过）
+  (void)compiled->invoke(Json::object(), "t-fan",
+                         InvokeOptions{nullptr, EventMode::Updates, Json{{"v", "r"}},
+                                       std::nullopt});
+  EXPECT_TRUE(compiled->last_interrupt().interrupted);
+  EXPECT_EQ(compiled->last_interrupt().payload.at("tag"), "Y") << "w(Y) 应自身悬挂，而非被误注入";
+  EXPECT_EQ(pending, (std::vector<std::string>{"X", "Y"}));
+  EXPECT_TRUE(done.empty());
+
+  // ③ 再 resume：两个重跑包依次拿到注入值完成
+  auto out = compiled->invoke(Json::object(), "t-fan",
+                              InvokeOptions{nullptr, EventMode::Updates, Json{{"v", "r2"}},
+                                            std::nullopt});
+  ASSERT_TRUE(out.has_value());
+  EXPECT_FALSE(compiled->last_interrupt().interrupted);
+  EXPECT_EQ(done, (std::vector<std::string>{"X", "Y"}));
+  EXPECT_EQ((*out)["done"], "Y");
+}
+
 // super-step 内第二个包 interrupt：恢复后剩余包先跑、中断节点最后重跑
 TEST(Send, resume_after_partial_super_step) {
   MemoryCheckpointer cp;

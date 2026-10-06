@@ -32,9 +32,11 @@ bool starts_with(std::vector<std::string> const& ns, std::vector<std::string> co
 
 // 包队列的落盘表示（v2 起）：`{"node":..., "state":...}`；state 为 null = 全局状态包。
 // optional 显式写 null —— 与下方 parent_checkpoint_id 同一纪律（nlohmann 对 optional 无内建支持）。
+// `resume` 为中断重跑包标记（v1/v2 旧记录没有该字段 → 读回默认 false）。
 nlohmann::json packet_to_json(Packet const& p) {
   return nlohmann::json{{"node", p.node},
-                        {"state", p.state ? nlohmann::json(*p.state) : nlohmann::json(nullptr)}};
+                        {"state", p.state ? nlohmann::json(*p.state) : nlohmann::json(nullptr)},
+                        {"resume", p.is_restart}};
 }
 
 Packet packet_from_json(nlohmann::json const& j) {
@@ -43,7 +45,8 @@ Packet packet_from_json(nlohmann::json const& j) {
   return Packet{j.value("node", ""),
                 j.contains("state") && !j["state"].is_null()
                     ? std::optional<Json>{j["state"]}
-                    : std::nullopt};
+                    : std::nullopt,
+                j.value("resume", false)};
 }
 
 nlohmann::json packets_to_json(std::vector<Packet> const& packets) {
