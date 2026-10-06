@@ -218,7 +218,7 @@ function filtered(){
 function renderLog(){
   const box=document.getElementById('loglist');
   const R=filtered();
-  if(!curNode&&!(curGoto&&curIt)&&R.length>0&&curRun<0){ box.textContent='（请在下拉选择 run）'; return; }
+  if(curRun<0){ box.textContent='↓ 下拉选择一个 run 查看日志'; return; }
   if(R.length===0){ box.textContent='（无记录）'; return; }
   box.innerHTML='';
   R.forEach((r,i)=>{
@@ -300,9 +300,12 @@ try {
   std::string const ir_id = payload["ir"].value("id", "");
   std::string const ir_escaped = script_data_escape(ir_id);
   out.replace(idx, 8, data);
-  std::size_t pos = 0;
-  while ((pos = out.find("__IR_ID__", pos)) != std::string::npos)
-    out.replace(pos, 10, ir_escaped);  // "__IR_ID__" == 10 字符（title + h1 各一处）
+  // 两处 marker（<title> 与 <h1>）各自显式替换。注意 "__IR_ID__" 是 **9** 个字符
+  //（过替换 10 会把紧跟的 `</title>` 左尖括号一并吃掉 → title 永不闭合、head 崩）。
+  std::size_t const pTitle = out.find("__IR_ID__");
+  if (pTitle != std::string::npos) out.replace(pTitle, 9, ir_escaped);
+  std::size_t const pH1 = out.find("__IR_ID__");
+  if (pH1 != std::string::npos) out.replace(pH1, 9, ir_escaped);
   return out;
 }
 

@@ -93,7 +93,7 @@ TEST(DebugView, render_html_is_self_contained_and_escaped) {
   Json payload = build_debug_payload(*ir, records);
   std::string html = render_debug_html(payload);
 
-  EXPECT_NE(html.find("<title>wfr debug — loop_wf"), std::string::npos);
+  EXPECT_NE(html.find("<title>wfr debug — loop_wf</title>"), std::string::npos) << html.substr(0, 160);
   EXPECT_NE(html.find("const P = "), std::string::npos);
   // 数据里的 </script 必须被转义（浏览器端不执行注入的脚本）
   EXPECT_EQ(html.find("</script><script>alert"), std::string::npos);
