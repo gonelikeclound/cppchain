@@ -378,7 +378,7 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
   auto sink_p = ctx.sink;  // 触发期注入的 NodeLog（docs/12 §6.4：source=node 的诊断日志）
 
   ctx.graph.add_node(n.id, [m, tools_json, sys, model_name, sink_p](Json const& state,
-                                                                    NodeContext&) {
+                                                                    NodeContext& nc) {
     std::vector<message::Message> msgs = messages_from_state(state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
     model::CallOptions co;
@@ -386,9 +386,8 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     auto r = m->invoke(msgs, co);
     if (!r) throw tool::ToolException("model 节点调用失败：" + r.error().message);
     // **只发一次**：回复追加进 messages，循环由 route + 回边负责
-    if (NodeLog* l = sink_p->nlog())
-      l->log("info", "model '" + model_name + "' 完成一次调用",
-             Json{{"in_msg", msgs.size()}, {"tool_calls", !r->tool_calls.empty()}});
+    sink_p->log_node(nc.node_name, "info", "model '" + model_name + "' 完成一次调用",
+                     Json{{"in_msg", msgs.size()}, {"tool_calls", !r->tool_calls.empty()}});
     return Command::with_update(Json{{kMessagesKey, Json::array({*r})}});
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
@@ -435,13 +434,13 @@ void c_load_history(NodeIR const& n, NodeType::CompileContext& ctx) {
   // ④：history = 日志的投影 —— 读本会话日志 → replay → 取 messages（docs/12 §7）。
   // 与 D 阶段的"读 history 文件"差别：文件是 append-only 日志，宿主不再单独 save；
   // 本轮输入也已由 fire_once 写成 input 事件排在日志里，replay 天然含它。
-  ctx.graph.add_node(n.id, [path_expr, sess_expr, sink_p](Json const& state, NodeContext&) {
+  ctx.graph.add_node(n.id, [path_expr, sess_expr, sink_p](Json const& state, NodeContext& nc) {
     std::string const ws = as_string(resolve_parameter(path_expr, state));
     std::string const sess = as_string(resolve_parameter(sess_expr, state));
     auto const hist = replay_session_messages(session_path(ws, sess));
-    if (NodeLog* l = sink_p->nlog())
-      l->log("info", "load_history: replay " + std::to_string(hist.size()) + " messages",
-             Json{{"workspace", ws}, {"session", sess}});
+    sink_p->log_node(nc.node_name, "info",
+                     "load_history: replay " + std::to_string(hist.size()) + " messages",
+                     Json{{"workspace", ws}, {"session", sess}});
     Json arr = Json::array();
     for (message::Message const& m : hist) arr.push_back(m);
     // 走 messages 通道 → add_messages 与本次输入合并（同 id 覆盖、无 id 追加）

@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <generator>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -305,8 +306,8 @@ TEST(WfHistoryNodes, config_keys_inside_history_fields_are_validated) {
 TEST(WfSessionLog, append_seq_continues_across_reopen) {
   TempDir tmp;
   std::string const p = session_path(tmp.str(), "s1");
-  EXPECT_EQ(p, (tmp.dir / ".cppchain" / "session-s1.log.jsonl").string());
-  EXPECT_FALSE(std::filesystem::exists(p));  // 首次使用：文件还不存在
+  EXPECT_EQ(p, (tmp.dir / ".wfr" / "sessions" / "session-s1.log.jsonl").string());
+  EXPECT_FALSE(std::filesystem::exists(p));  // 首次使用：sessions 文件还没写（.wfr 根已建）
 
   {
     SessionLog slog(p);
@@ -383,4 +384,25 @@ TEST(WfSessionLog, replay_ignores_non_engine_records) {
   auto const msgs = replay_session_messages(p);
   ASSERT_EQ(msgs.size(), 1u);
   EXPECT_EQ(msgs[0].text(), "嗨");  // 只有那条 status=ok 的 engine exit 进了 replay
+}
+// wfr 工具：会话日志统一落在 <ws>/.wfr/sessions/（从 .cppchain 迁移）；.wfr/.gitignore
+// 忽略运行态（sessions/checkpoints/）、保留 workflows/ 源
+TEST(WfHistoryNodes, session_log_path_migrated_to_wfr_root) {
+  TempDir tmp;
+  std::string const p = session_path(tmp.str(), "s1");
+  EXPECT_TRUE(p.find("/.wfr/sessions/session-s1.log.jsonl") != std::string::npos);
+
+  SessionLog slog(p);  // 构造即建目录
+  EXPECT_TRUE(std::filesystem::exists(p));
+  // .wfr/.gitignore 内容 = sessions/ + checkpoints/（workflows 源不被忽略，不再是全忽略 `*`）
+  std::string gi;
+  {
+    std::ifstream in(tmp.str() + "/.wfr/.gitignore");
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    gi = buf.str();
+  }
+  EXPECT_NE(gi, "*\n") << "不能再是 .cppchain 时代的通配全忽略";
+  EXPECT_TRUE(gi.find("sessions/") != std::string::npos);
+  EXPECT_TRUE(gi.find("checkpoints/") != std::string::npos);
 }

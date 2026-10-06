@@ -16,6 +16,7 @@
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/state/state.hpp"
 #include "cppchain/workflow/refs.hpp"  // kMessagesKey
+#include "cppchain/workflow/wfr.hpp"   // .wfr 元数据目录约定
 
 namespace cppchain::workflow {
 
@@ -55,7 +56,8 @@ void write_all(std::string const& path, std::string const& content) {
   if (!out) throw std::runtime_error("session log: 重写失败 " + path);
 }
 
-// 让会话目录不会被误提交：.cppchain/.gitignore 内容 `*` + `!.gitignore`。
+// 让 .wfr 根目录的**运行态**（sessions/checkpoints）不会被误提交；
+// workflows/ 源要提交，因此忽略项是这两个目录而不是通配 `*`。
 // 只在缺失时写、写不了就算了（便利不是正事）。
 void ensure_dir_ignored(std::filesystem::path const& dir) {
   auto const gi = dir / ".gitignore";
@@ -63,7 +65,7 @@ void ensure_dir_ignored(std::filesystem::path const& dir) {
   if (std::filesystem::exists(gi, ec)) return;
   std::ofstream out(gi, std::ios::trunc);
   if (!out) return;
-  out << "*\n!.gitignore\n";
+  out << "sessions/\ncheckpoints/\n";
 }
 
 std::vector<message::Message> messages_from_json(Json const& j) {
@@ -81,18 +83,25 @@ std::vector<message::Message> messages_from_json(Json const& j) {
 }  // namespace
 
 std::string session_path(std::string const& workspace, std::string const& session) {
+  // .cppchain → .wfr（wfr 工具统一元数据目录）：日志落在 <ws>/.wfr/sessions/。
+  // 顺带建立 .wfr 根与 .gitignore（忽略运行态、保留 workflows/ 源）。
+  std::filesystem::path const root = wfr_root(workspace);
+  {  // 建根 + gitignore；失败不致命（目录由 SessionLog 构造兜底再建）
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    if (!ec) ensure_dir_ignored(root);
+  }
   std::string const name = session.empty() ? "session" : "session-" + session;
-  return (std::filesystem::path(workspace) / ".cppchain" / (name + ".log.jsonl")).string();
+  return (root / "sessions" / (name + ".log.jsonl")).string();
 }
 
 SessionLog::SessionLog(std::string path) : path_(std::move(path)) {
-  // 1) 父目录 + .gitignore
+  // 1) 父目录（.wfr 根与 .gitignore 已由 session_path 保证；这里兜底直接构造的场景）
   if (auto const parent = std::filesystem::path(path_).parent_path(); !parent.empty()) {
     std::error_code ec;
     std::filesystem::create_directories(parent, ec);
     if (ec)
       throw std::runtime_error("session log: 无法创建目录 " + parent.string() + ": " + ec.message());
-    ensure_dir_ignored(parent);
   }
 
   // 2) 打开时修复：末尾半行（崩溃残迹）截掉；完整但缺换行的记录补上换行
@@ -186,6 +195,16 @@ void SessionLog::engine_interrupt(std::string const& run, std::string const& nod
 
 void SessionLog::log(std::string_view level, std::string_view msg, Json const& data) {
   write(Json{{"source", "node"}, {"level", std::string(level)}, {"msg", std::string(msg)},
+             {"data", data}});
+}
+
+void SessionLog::node_log(std::string const& run, std::string const& node,
+                          std::string_view level, std::string_view msg, Json const& data) {
+  write(Json{{"source", "node"},
+             {"run", run},
+             {"node", node},
+             {"level", std::string(level)},
+             {"msg", std::string(msg)},
              {"data", data}});
 }
 

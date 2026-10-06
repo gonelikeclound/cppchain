@@ -71,6 +71,10 @@ class SessionLog : public NodeLog {
   // ---- 节点自报（source=node，不参与 replay）----
   void log(std::string_view level, std::string_view msg,
            nlohmann::json const& data = nlohmann::json::object()) override;
+  // 带 run/node 的节点自报：日志记录含 `run`/`node` 字段，供 wfr 调试台把诊断挂到图上对应
+  // 节点（NodeLog::log 无 run/node，无法定位）。调用点：node_types.cpp 的 model/load_history。
+  void node_log(std::string const& run, std::string const& node, std::string_view level,
+                std::string_view msg, nlohmann::json const& data = nlohmann::json::object());
 
   // ---- 宿主（source=host，不参与 replay）----
   void host_log(std::string_view msg, nlohmann::json const& data = {});
@@ -100,6 +104,12 @@ struct SessionSink {
   // wrapper 让位不再直接写结构事件 —— 双源互斥，防止同一节点被记两遍。
   bool streaming = false;
   [[nodiscard]] NodeLog* nlog() const { return log; }  // SessionLog IS-A NodeLog
+
+  // 带 run/node 的节点自报（NLog 之上加定位字段；null log 时静默）
+  void log_node(std::string const& node, std::string_view level, std::string_view msg,
+                nlohmann::json const& data = nlohmann::json::object()) {
+    if (log) log->node_log(run, node, level, msg, data);
+  }
 };
 
 // ---- 读取端（replay，§7.1）----
