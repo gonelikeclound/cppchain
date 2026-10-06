@@ -201,6 +201,11 @@ target_link_libraries(wfr PRIVATE
   cppchain_http_curl)
 target_include_directories(wfr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(wfr PRIVATE -Wall -Wextra -Wpedantic)
+# 发布构建：静态链接 libstdc++/libgcc —— 产物不依赖本机 GCC runtime（无 GLIBCXX 版本问题）
+if(CPPCHAIN_WFR_STATIC_RUNTIME)
+  target_link_options(wfr PRIVATE -static-libstdc++ -static-libgcc)
+  message(STATUS "wfr: 静态链接 libstdc++/libgcc（发布构建）")
+endif()
 # 发布自带的固定 workflow 目录（编译期注入；开发构建 = 源码 share/wfr/workflows，安装后 = <prefix>/share/wfr/workflows）
 target_compile_definitions(wfr PRIVATE
   WFR_SHARE_WORKFLOWS_DIR="${PROJECT_SOURCE_DIR}/share/wfr/workflows")

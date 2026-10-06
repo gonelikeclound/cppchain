@@ -19,6 +19,8 @@ endif()
 # 选项
 option(CPPCHAIN_BUILD_HTTP       "是否启用 HTTP 传输层（依赖 libcurl）" OFF)
 option(CPPCHAIN_BUILD_TESTS      "是否构建测试（FetchContent 拉取 GTest）" OFF)
+# 发布构建：wfr 静态链接 libstdc++/libgcc，脱离本机 GCC runtime（默认动态便于开发）
+option(CPPCHAIN_WFR_STATIC_RUNTIME "wfr 静态链接 libstdc++/libgcc（发布用）" OFF)
 option(CPPCHAIN_BUILD_EXAMPLES   "是否构建 examples/（demo 与问题验证）" ON)
 
 # 基础依赖：nlohmann/json（header-only，M1 序列化契约就用它）

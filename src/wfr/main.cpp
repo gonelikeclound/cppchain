@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
     std::println("调试台已生成: {}  ({} bytes, {} 条日志记录)", out, html.size(), recs.size());
     if (open) [[unlikely]] {
       std::string const cmdline = "xdg-open \"" + out + "\" >/dev/null 2>&1 &";
-      std::system(cmdline.c_str());
+      [[maybe_unused]] int const sys_rc = std::system(cmdline.c_str());
     }
     return 0;
   }
