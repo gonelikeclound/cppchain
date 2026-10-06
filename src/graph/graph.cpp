@@ -111,6 +111,13 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
     mode_ = EventMode::Off;
   };
 
+  // 全主体包进 try：无论异常还是 return，注入设施都在收尾被清掉。
+  //   - return 路径各自显式 finish()；
+  //   - throw 路径（非 std 异常的节点 / schema.apply / checkpoint 落盘 / 宿主 sink）由
+  //     catch(...) 兜底 finish() 后继续传播 —— 否则 sink_/mode_ 残留到下次 invoke（自愈但
+  //     调用方若 catch 后立刻读 getter 会拿到脏态）。
+  try {
+
   Json state = input;
   std::deque<state::Packet> current;
   current.push_back(state::Packet{entry_});
@@ -295,6 +302,12 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
   last_interrupt_ = {};  // 正常跑完：不再挂着（resume 已消费）
   finish();
   return state;
+
+  } catch (...) {
+    finish();  // 异常兜底：非 std 节点异常 / schema.apply / 落盘失败 / 宿主 sink 抛 ——
+               // 保证注入设施不残留（不吞异常，继续传播给调用方）
+    throw;
+  }
 }
 
 // 便捷收集：跑一遍并把事件全收下来（供测试/demo 观察；唯一执行通道仍是 invoke）

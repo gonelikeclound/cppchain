@@ -101,10 +101,12 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
   是约定）。副作用写 interrupt 之后、或做成幂等。测试与 demo 均锁住该行为。
 - 约束：
   - `interrupt` 需 `checkpointer != null && thread_id 非空`，否则 `InterruptUnavailable`
-    （挂起来没地方存、没法恢复）；
+    （挂起来没地方存、没法恢复）；此时日志可能留 `enter + interrupt`（无 exit）的"假悬挂"
+    审计痕迹 —— 是使用错误路径，replay 不受影响（铁律只读 exit+ok）
   - 线程未悬挂但有 resume → `ResumeNotInterrupted`；
   - `InterruptSignal` 不继承 `std::exception` → 节点的 `catch(std::exception)` 拦不到它；
-  - **resume 按 index** 本轮简化为"悬挂节点名"（单活跃中断）；并行多中断的按 index 分发押后。
+  - **resume 按 index** 本轮简化为"悬挂节点名 vs 重跑包（`is_restart` 标记）"匹配，
+    Send 扇入同节点的其它包不会被误注入；并行多中断的按 index 分发押后。
 - 新增错误档：`InterruptUnavailable` / `ResumeNotInterrupted`（`graph_error_kind` 同步）。
 
 ## 6. Send（动态 fan-out）
@@ -143,6 +145,9 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
   （`FileCheckpointer.legacy_v1_next_string_array_loads_as_packets` 锁住）。
 - `optional<Json>` 显式写 null（继承 memory_backends 的既有纪律，见其 dump 注释）。
 - recovery 语义不变："回到该步边界继续"——now restores `current = snap->next`。
+- **`step` 是本次 invoke 内包计数**（恢复/分叉后从 0 重编，事件与 checkpoint 的 `step`
+  字段会在线程历史里重复）。真实排序/定位靠 `seq` 与 `checkpoint_id`，不靠 step ——
+  这是为保护 `max_steps`（本次包数上限）语义而有意为之。
 
 ## 9. 测试与验证
 

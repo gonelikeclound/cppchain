@@ -284,7 +284,7 @@ void project_stream_to_log(SessionLog& log, std::string const& run, graph::Strea
           run, ev.node, kind, true, "ok", 0,
           (kind == "load_history")
               ? std::nullopt  // 回声 update 不落（与 wrapper 一致）：否则 replay 双写整段历史
-              : (ev.payload.is_object() && !ev.payload.empty()
+              : (ev.payload.is_object()  // 与 wrapper 一致：空对象也落 "update":{}（replay 等价）
                      ? std::optional<Json>{ev.payload}
                      : std::nullopt));
     else

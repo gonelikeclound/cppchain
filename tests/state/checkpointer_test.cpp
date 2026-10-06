@@ -256,20 +256,28 @@ TEST(FileCheckpointer, legacy_v1_next_string_array_loads_as_packets) {
 }
 
 // v2 dump/load 往返要保留 Send 包的局部 state 与中断重跑标记（M10 落盘基础，P3/P6 用到）。
+// engaged-null（Send 显式 null 局部输入）不得退化为 nullopt「全局包」。
 TEST(Checkpointer, packet_state_survives_dump_load_round_trip) {
   MemoryCheckpointer cp;
   Packet restart{"worker"};
   restart.state = Json{{"item", 1}};
   restart.is_restart = true;  // 中断重跑包标记
+  Packet null_local{"other"};
+  null_local.state = Json(nullptr);  // Send 显式 null 局部输入
   cp.put("t1", "", std::nullopt, Json{{"step", 1}},
-         std::vector<Packet>{restart}, Json::object());
+         std::vector<Packet>{restart, null_local}, Json::object());
   MemoryCheckpointer cp2;
   cp2.load(cp.dump());
   auto const snap = cp2.get_tuple("t1", "", std::nullopt);
   ASSERT_TRUE(snap.has_value());
-  ASSERT_EQ(snap->next.size(), 1u);
+  ASSERT_EQ(snap->next.size(), 2u);
+
   EXPECT_EQ(snap->next[0].node, "worker");
   ASSERT_TRUE(snap->next[0].state.has_value());
   EXPECT_EQ(snap->next[0].state->at("item"), 1);
   EXPECT_TRUE(snap->next[0].is_restart) << "is_restart 标记应随落盘往返保留";
+
+  EXPECT_EQ(snap->next[1].node, "other");
+  ASSERT_TRUE(snap->next[1].state.has_value()) << "engaged null 不得退化为全局包（nullopt）";
+  EXPECT_TRUE(snap->next[1].state->is_null());
 }

@@ -30,23 +30,28 @@ bool starts_with(std::vector<std::string> const& ns, std::vector<std::string> co
   return true;
 }
 
-// 包队列的落盘表示（v2 起）：`{"node":..., "state":...}`；state 为 null = 全局状态包。
+// 包队列的落盘表示（v2 起）：`{"node":..., "state":..., "has_state":..., "resume":...}`。
 // optional 显式写 null —— 与下方 parent_checkpoint_id 同一纪律（nlohmann 对 optional 无内建支持）。
-// `resume` 为中断重跑包标记（v1/v2 旧记录没有该字段 → 读回默认 false）。
+// `has_state` = state 是否 engaged（Send 可以显式传 null 作局部输入：engaged-null 与
+// nullopt「全局包」必须可区分，否则恢复后该包从读局部 null 漂移成读全局 state）。
+// 旧记录没有 has_state → 读回沿用「state==null ⇒ nullopt」的旧语义。
 nlohmann::json packet_to_json(Packet const& p) {
   return nlohmann::json{{"node", p.node},
                         {"state", p.state ? nlohmann::json(*p.state) : nlohmann::json(nullptr)},
+                        {"has_state", p.state.has_value()},
                         {"resume", p.is_restart}};
 }
 
 Packet packet_from_json(nlohmann::json const& j) {
   // 兼容 v1：next 元素可能是纯字符串（旧版节点名数组）
   if (j.is_string()) return Packet{j.get<std::string>()};
-  return Packet{j.value("node", ""),
-                j.contains("state") && !j["state"].is_null()
-                    ? std::optional<Json>{j["state"]}
-                    : std::nullopt,
-                j.value("resume", false)};
+  std::optional<Json> state;
+  if (j.contains("has_state")) {                            // 新格式：显式 engaged 判定
+    if (j["has_state"].get<bool>()) state = j.at("state");
+  } else if (j.contains("state") && !j["state"].is_null()) {  // 旧格式：null ⇒ 全局包
+    state = j["state"];
+  }
+  return Packet{j.value("node", ""), std::move(state), j.value("resume", false)};
 }
 
 nlohmann::json packets_to_json(std::vector<Packet> const& packets) {

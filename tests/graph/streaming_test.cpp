@@ -193,3 +193,31 @@ TEST(Streaming, node_emit_with_null_sink_is_silent) {
   ASSERT_TRUE(out.has_value()) << out.error().message;
   EXPECT_EQ(out->at("done"), true);
 }
+
+// 非 std 异常从节点穿出 invoke：原样传播（不吞、不转 NodeError），且引擎对象仍可复用
+//（invoke 尾部的 catch(...) 兜底了注入设施清理，不影响下一次调用）
+TEST(Streaming, non_std_exception_propagates_and_engine_reusable) {
+  StateGraph g(StateSchema{});
+  bool first = true;
+  g.add_node("a", [&](Json const&, NodeContext&) -> Command {
+     if (first) {
+       first = false;
+       throw 42;  // 非 std 异常：不匹配 catch(InterruptSignal)/catch(std::exception)
+     }
+     return Command::with_update({{"done", true}});
+   })
+      .add_edge("a", kEnd)
+      .set_entry_point("a");
+  auto compiled = g.compile();
+  ASSERT_TRUE(compiled.has_value());
+
+  EXPECT_THROW(
+      (void)compiled->invoke(Json::object(), "",
+                             InvokeOptions{nullptr, EventMode::Updates, std::nullopt,
+                                           std::nullopt}),
+      int);
+  // 对象可复用、状态干净
+  auto const out = compiled->invoke(Json::object());
+  ASSERT_TRUE(out.has_value());
+  EXPECT_EQ(out->at("done"), true);
+}
