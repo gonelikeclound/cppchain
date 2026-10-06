@@ -62,20 +62,24 @@ std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
   auto err = [](std::string m) { return std::unexpected(std::move(m)); };
   if (!j.is_object()) return err("root is not an object");
   if (!j.contains("id") || !j["id"].is_string()) return err("missing id (string)");
-  if (!j.contains("trigger") || !j["trigger"].is_object())
-    return err("missing trigger (object)");
   if (!j.contains("nodes") || !j["nodes"].is_array())
     return err("missing nodes (array)");
 
   WorkflowIR out;
   out.id = j["id"].get<std::string>();
-  Json const& trig = j["trigger"];
-  out.trigger.raw = trig;
-  if (trig.contains("source") && trig["source"].is_string())
-    out.trigger.source = trig["source"].get<std::string>();
-  if (trig.contains("enabled") && trig["enabled"].is_boolean())
-    out.trigger.enabled = trig["enabled"].get<bool>();
-  fill_timing(out.trigger, trig);
+  // trigger 可选：给出必须是 object（形状在 fill_timing 收一遍），省略 = 宿主手工触发
+  if (j.contains("trigger")) {
+    if (!j["trigger"].is_object()) return err("trigger 若给出必须是 object");
+    Json const& trig = j["trigger"];
+    TriggerIR t;
+    t.raw = trig;
+    if (trig.contains("source") && trig["source"].is_string())
+      t.source = trig["source"].get<std::string>();
+    if (trig.contains("enabled") && trig["enabled"].is_boolean())
+      t.enabled = trig["enabled"].get<bool>();
+    fill_timing(t, trig);
+    out.trigger = std::move(t);
+  }
 
   // ⑤ imports：动态库导入声明（形状先收一遍，真正 dlopen/校验在 load_workflow_imports）
   if (j.contains("imports")) {
@@ -123,13 +127,6 @@ std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
 }
 
 Json WorkflowIR::to_json() const {
-  Json t = Json::object();
-  t["source"] = trigger.source;
-  t["timing"] = Json{{"kind", trigger.kind}};
-  if (!trigger.schedule.empty()) t["timing"]["schedule"] = trigger.schedule;
-  if (trigger.timezone) t["timing"]["timezone"] = *trigger.timezone;
-  if (!trigger.enabled) t["enabled"] = false;
-
   Json nodes = Json::array();
   for (NodeIR const& n : this->nodes) {
     Json node{{"id", n.id}};
@@ -139,7 +136,16 @@ Json WorkflowIR::to_json() const {
     nodes.push_back(std::move(node));
   }
 
-  Json out{{"id", id}, {"trigger", std::move(t)}, {"nodes", std::move(nodes)}};
+  Json out{{"id", id}, {"nodes", std::move(nodes)}};
+  if (trigger) {  // 无 trigger 时省略键（= 手工触发）
+    Json t = Json::object();
+    t["source"] = trigger->source;
+    t["timing"] = Json{{"kind", trigger->kind}};
+    if (!trigger->schedule.empty()) t["timing"]["schedule"] = trigger->schedule;
+    if (trigger->timezone) t["timing"]["timezone"] = *trigger->timezone;
+    if (!trigger->enabled) t["enabled"] = false;
+    out["trigger"] = std::move(t);
+  }
   if (!imports.empty()) {
     Json arr = Json::array();
     for (ImportIR const& im : imports) {

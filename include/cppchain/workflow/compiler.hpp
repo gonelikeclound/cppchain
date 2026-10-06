@@ -51,7 +51,7 @@ struct CompileOptions {
 struct CompiledWorkflow {
   graph::CompiledGraph graph;
   std::string ir_id;
-  TriggerIR trigger;  // 元数据透传（非调度用）
+  std::optional<TriggerIR> trigger;  // 元数据透传（非调度用）；无 trigger = 手工触发
   std::size_t graph_node_count_ = 0;  // 实际注册进图的节点数（label 不注册）
 
   // 编译期注入的 checkpointer（可空）。fire_once 用它预判"本次触发是否走恢复

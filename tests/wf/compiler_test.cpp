@@ -223,7 +223,7 @@ TEST(WfCompiler, invalid_ir_rejected) {
   tool::ToolRegistry reg = make_fake_tools(sinks);
   auto ir = WorkflowIR::parse(price_ir());
   ASSERT_TRUE(ir);
-  ir->trigger.raw["condition"] = true;  // 违反 VT3 → compile 必须 fail-closed
+  ir->trigger->raw["condition"] = true;  // 违反 VT3 → compile 必须 fail-closed
   auto wf = compile_workflow(*ir, reg);
   EXPECT_FALSE(wf.has_value());
   EXPECT_EQ(wf.error().kind, WorkflowError::Kind::Invalid);
@@ -372,4 +372,24 @@ TEST(WfCompiler, compile_enforces_config_contract) {
 
   // 不声明 → 不检查（向后兼容）
   EXPECT_TRUE(compile_workflow(*ir, reg).has_value());
+}
+
+// trigger 可选：无 trigger 的 IR 也能编译 + fire（wfr 手工拉起路径，D1 语义）
+TEST(WfCompiler, no_trigger_compiles_and_fires) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  Json j = price_ir();
+  ASSERT_TRUE(j.contains("trigger"));
+  j.erase("trigger");  // 手工触发：去掉调度元数据
+  auto ir = WorkflowIR::parse(j);
+  ASSERT_TRUE(ir) << ir.error();
+  EXPECT_FALSE(ir->trigger.has_value());
+
+  auto wf = compile_workflow(*ir, reg);
+  ASSERT_TRUE(wf) << wf.error().message;
+  EXPECT_FALSE(wf->trigger.has_value());
+
+  auto r = fire_once(*wf, Json{{"product_id", "P1"}});
+  ASSERT_TRUE(r) << r.error().message;
+  EXPECT_EQ(sinks.notifications.size(), 1u);  // 默认价 799 < 800 → 发通知
 }

@@ -51,19 +51,33 @@ TEST(WfIr, parse_minimal) {
   auto ir = WorkflowIR::parse(minimal_price_ir());
   ASSERT_TRUE(ir) << ir.error();
   EXPECT_EQ(ir->id, "wf_t");
-  EXPECT_EQ(ir->trigger.source, "time");
-  EXPECT_EQ(ir->trigger.schedule, "0 8,20 * * *");
+  ASSERT_TRUE(ir->trigger.has_value());
+  EXPECT_EQ(ir->trigger->source, "time");
+  EXPECT_EQ(ir->trigger->schedule, "0 8,20 * * *");
   ASSERT_EQ(ir->nodes.size(), 3u);
   EXPECT_EQ(ir->nodes[0].kind, NodeKind::Tool);
   EXPECT_EQ(ir->nodes[1].kind, NodeKind::Expr);
   EXPECT_EQ(ir->nodes[1].then, "notify");
 }
 
+TEST(WfIr, parse_minimal_no_trigger) {
+  // trigger 可选：省略 = 宿主手工触发；to_json 也随之省略该键
+  auto ir = WorkflowIR::parse(Json{{"id", "wt"}, {"nodes", Json::array()}});
+  ASSERT_TRUE(ir) << ir.error();
+  EXPECT_FALSE(ir->trigger.has_value());
+  EXPECT_FALSE(ir->to_json().contains("trigger"));
+}
+
 TEST(WfIr, parse_errors) {
   EXPECT_FALSE(WorkflowIR::parse(Json{{"trigger", Json{{"source", "time"}}},
                                      {"nodes", Json::array()}})
                    .has_value());  // 缺 id
-  EXPECT_FALSE(WorkflowIR::parse(Json{{"id", "x"}}).has_value());  // 缺 trigger/nodes
+  EXPECT_FALSE(WorkflowIR::parse(Json{{"trigger", Json{{"source", "time"}}}}).has_value());  // 缺 nodes
+  EXPECT_FALSE(WorkflowIR::parse(Json{{"id", "x"}}).has_value());  // 缺 nodes（trigger 可省）
+  // trigger 给出但形状不对 → 报错（省略是合法，给了必须 object）
+  EXPECT_FALSE(WorkflowIR::parse(Json{{"id", "x"}, {"trigger", Json::array()},
+                                      {"nodes", Json::array()}})
+                   .has_value());
 }
 
 TEST(WfIr, classify_precedence) {

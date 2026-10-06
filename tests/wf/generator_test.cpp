@@ -94,7 +94,8 @@ TEST(WfGenerator, plan_then_ir_generate) {
   ASSERT_EQ(r.kind, WorkflowGenerationResult::Kind::Generated);
   ASSERT_TRUE(r.generated);
   EXPECT_EQ(r.generated->ir.id, "wf_t");
-  EXPECT_EQ(r.generated->ir.trigger.schedule, "0 8 * * *");
+  ASSERT_TRUE(r.generated->ir.trigger.has_value());
+  EXPECT_EQ(r.generated->ir.trigger->schedule, "0 8 * * *");
   // 生成的 IR 必须过校验器（污防线：fail 上游也 fail 下游）
   EXPECT_TRUE(validate(r.generated->ir, ValidatorOptions{&reg}).ok());
   // 计量：各一次调用，总计 30 token

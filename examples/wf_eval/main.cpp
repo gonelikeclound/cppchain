@@ -168,7 +168,10 @@ int main() {
       auto wf = compile_workflow(*ir, registry, nullptr, compile_opts());
       if (wf) {
         std::println("\n=== 调度模拟（D1：手动触发，不做 OS 调度）===");
-        std::println("触发器元数据：schedule = {}", ir->trigger.schedule);
+        if (ir->trigger)
+          std::println("触发器元数据：schedule = {}", ir->trigger->schedule);
+        else
+          std::println("触发器元数据：无（手工触发）");
         std::size_t before = 0;
         for (int i = 0; i < 3; ++i) {
           before = sinks.notifications.size();

@@ -65,7 +65,10 @@ std::shared_ptr<openai::OpenAIChatModel> make_model(
 
 void print_readable_ir(WorkflowIR const& ir) {
   std::println("Workflow IR: {}", ir.id);
-  std::println("  trigger: time + schedule \"{}\"", ir.trigger.schedule);
+  if (ir.trigger)
+    std::println("  trigger: time + schedule \"{}\"", ir.trigger->schedule);
+  else
+    std::println("  trigger: (手动触发,无调度 —— 由宿主拉起)");
   for (NodeIR const& n : ir.nodes) {
     // 展示也走注册表：加一种节点不必再改 demo 的 switch（见 02-arch-design/12）
     NodeType const* type = node_type_of_name(type_name_of(n));

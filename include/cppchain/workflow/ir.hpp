@@ -119,7 +119,8 @@ struct NodeIR {
 
 struct WorkflowIR {
   std::string id;
-  TriggerIR trigger;
+  // 可选：无 trigger 即「宿主手工触发」（wfr 直接拉起），调度语义由宿主决定（D1 无 OS 调度）
+  std::optional<TriggerIR> trigger;
   std::vector<NodeIR> nodes;                 // nodes[0] = 入口（隐式，§3）
   std::vector<ImportIR> imports;             // ⑤：动态库导入声明（顶层"imports"键）
 

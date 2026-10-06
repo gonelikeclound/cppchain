@@ -247,39 +247,42 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     c.kind[n.id] = n.kind;
   }
 
-  // ---- VT：trigger ----
-  if (ir.trigger.source != "time")
-    c.err("VT1", "trigger.source 必须是 'time'（当前实现只放行 time 触发；实际是 '" +
-                     ir.trigger.source + "'）");
-  if (ir.trigger.kind != "schedule")
-    c.err("VT2", "trigger 必须是 timing.kind == 'schedule'（当前实现只放行 schedule；实际是 '" +
-                     ir.trigger.kind + "'）");
-  if (has_key_anywhere(ir.trigger.raw, "condition"))
-    c.err("VT3", "trigger 不允许带 condition —— 业务条件必须下沉到 expr 节点");
-  if (has_top_key(ir.trigger.raw, "filter"))
-    c.err("VT4", "trigger 不允许带 filter（过滤/STRICT_3V 层未实现）—— 匹配条件必须用 expr 节点");
-  if (!valid_cron(ir.trigger.schedule))
-    c.err("VT5", "schedule 必须是合法 5 字段 cron（分 时 日 月 周；拒绝秒字段/@宏/L/W/#/步进）/，收到: '" +
-                     ir.trigger.schedule + "'");
-  if (ir.trigger.timezone && ir.trigger.timezone->empty())
-    c.err("VT6", "timezone 若给出必须非空");
-  // VT7：trigger 未知键
-  {
-    Json const& t = ir.trigger.raw;
-    const std::string known[] = {"source", "timing", "kind", "args", "enabled"};
-    if (t.is_object())
-      for (auto it = t.begin(); it != t.end(); ++it) {
-        bool ok = false;
-        for (std::string const& k : known)
-          if (it.key() == k) {
-            ok = true;
-            break;
-          }
-        if (!ok)
-          c.err("VT7", "trigger 含未知键 '" + it.key() + "'（当前实现只支持 source/timing 简写形）");
-      }
-    if (t.contains("enabled") && !t["enabled"].is_boolean())
-      c.err("VT7", "trigger.enabled 必须是布尔");
+  // ---- VT：trigger（可选；省略 = 宿主手工触发，wfr 直接拉起）----
+  if (ir.trigger) {
+    TriggerIR const& tr = *ir.trigger;
+    if (tr.source != "time")
+      c.err("VT1", "trigger.source 必须是 'time'（当前实现只放行 time 触发；实际是 '" + tr.source +
+                       "'）");
+    if (tr.kind != "schedule")
+      c.err("VT2", "trigger 必须是 timing.kind == 'schedule'（当前实现只放行 schedule；实际是 '" +
+                       tr.kind + "'）");
+    if (has_key_anywhere(tr.raw, "condition"))
+      c.err("VT3", "trigger 不允许带 condition —— 业务条件必须下沉到 expr 节点");
+    if (has_top_key(tr.raw, "filter"))
+      c.err("VT4", "trigger 不允许带 filter（过滤/STRICT_3V 层未实现）—— 匹配条件必须用 expr 节点");
+    if (!valid_cron(tr.schedule))
+      c.err("VT5", "schedule 必须是合法 5 字段 cron（分 时 日 月 周；拒绝秒字段/@宏/L/W/#/步进）/，收到: '" +
+                       tr.schedule + "'");
+    if (tr.timezone && tr.timezone->empty())
+      c.err("VT6", "timezone 若给出必须非空");
+    // VT7：trigger 未知键
+    {
+      Json const& t = tr.raw;
+      const std::string known[] = {"source", "timing", "kind", "args", "enabled"};
+      if (t.is_object())
+        for (auto it = t.begin(); it != t.end(); ++it) {
+          bool ok = false;
+          for (std::string const& k : known)
+            if (it.key() == k) {
+              ok = true;
+              break;
+            }
+          if (!ok)
+            c.err("VT7", "trigger 含未知键 '" + it.key() + "'（当前实现只支持 source/timing 简写形）");
+        }
+      if (t.contains("enabled") && !t["enabled"].is_boolean())
+        c.err("VT7", "trigger.enabled 必须是布尔");
+    }
   }
 
   // ---- VN：节点 ----

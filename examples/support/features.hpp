@@ -121,13 +121,15 @@ inline bool check(WorkflowIR const& ir, std::string_view name) {
   if (name == "通知节点")
     return detail::any_tool(ir, [](std::string_view t) { return t == "send_notification"; });
   if (name == "time触发+schedule")
-    return ir.trigger.source == "time" && ir.trigger.kind == "schedule";
+    return ir.trigger.has_value() && ir.trigger->source == "time" &&
+           ir.trigger->kind == "schedule";
   if (name == "trigger.condition") {
     // 出现在 must_not_have：要求 check == false（触发器不得带业务条件）
-    return detail::has_key_anywhere(ir.trigger.raw, "condition");
+    return ir.trigger.has_value() && detail::has_key_anywhere(ir.trigger->raw, "condition");
   }
   if (name == "无trigger.condition")
-    return !detail::has_key_anywhere(ir.trigger.raw, "condition");
+    return !ir.trigger.has_value() ||
+           !detail::has_key_anywhere(ir.trigger->raw, "condition");
   if (name == "llm_extract提取")
     return detail::any_tool(ir, [](std::string_view t) { return t == "llm_extract"; });
   if (name == "label/goto结构") {

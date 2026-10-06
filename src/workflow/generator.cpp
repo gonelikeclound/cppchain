@@ -159,7 +159,8 @@ struct WorkflowGenerator::Impl {
     return
         "你是主动智能 Workflow 生成器：把用户意图转成可执行 Workflow 的规划（plan）。\n"
         "硬规则：\n"
-        "· trigger 只表达『何时醒』：只能 time 源 + schedule 形态 + 5 字段 cron"
+        "· trigger **可省略**：省略表示『由宿主手工触发』（wfr 直接拉起），不做调度唤醒。"
+        "给出时只表达『何时醒』：只能 time 源 + schedule 形态 + 5 字段 cron"
         "（分 时 日 月 周，如 \"0 8,20 * * *\"）。业务条件（价格高低/库存有无/结果非空）"
         "绝不进 trigger，一律下沉为一个 expr 判断节点。\n"
         "· 节点：tool（调目录工具，成功出口 next）、expr（条件 then/else）、"
@@ -189,8 +190,10 @@ struct WorkflowGenerator::Impl {
                         Json const& plan) const {
     std::string s =
         "根据意图和已确认计划，一次性生成整段可执行 Workflow（顶层 JSON，不包围栏、不调工具）。\n"
-        "顶层形状：{\"id\":\"wf_xxx\", \"trigger\":{\"source\":\"time\","
-        " \"timing\":{\"kind\":\"schedule\",\"schedule\":\"5字段cron\"}}, \"nodes\":[...]}\n"
+        "顶层形状：{\"id\":\"wf_xxx\", [\"trigger\":{...} 可省略], \"nodes\":[...]}；"
+        "trigger 省略 = 宿主手工触发（wfr 直接拉起），不做调度唤醒。\n"
+        "给出 trigger 时：{\"source\":\"time\","
+        " \"timing\":{\"kind\":\"schedule\",\"schedule\":\"5字段cron\"}}\n"
         "节点写法：\n"
         "· tool：{\"id\":\"fetch\",\"tool\":\"fetch_price\",\"parameters\":{...},"
         " \"output_schema\":{\"price\":\"number\",\"in_stock\":\"boolean\"},"
@@ -200,7 +203,8 @@ struct WorkflowGenerator::Impl {
         "· label：{\"id\":\"poll_start\",\"kind\":\"label\"}；"
         "goto：{\"id\":\"goto_poll\",\"goto\":\"poll_start\",\"max\":4}\n"
         "规则：id 字母开头（不以下划线开头、不叫 result）；循环只能用 label+goto；"
-        "_turn_end 只出现在 next/then/else 里（不写节点）；trigger 不带 condition；"
+        "_turn_end 只出现在 next/then/else 里（不写节点）；trigger 可省略（省略 = 手工触发），"
+        "给定时不带 condition；"
         "节点 id 即 tool 输出帧名（下游用 $<id>.result.<字段> 引用，字段必须已被 output_schema 声明）。\n"
         "诚实性：无下单工具就写『提醒用户确认下单』，绝不写『已自动下单』。\n";
     // B3：把宿主真正会提供的 config 键写进提示词。不说的话模型会自己发明键名
@@ -223,7 +227,7 @@ struct WorkflowGenerator::Impl {
     }
     s += "【已确认计划】\n" + plan.dump(2) + "\n";
     s += "【可用工具目录】\n" + tool_catalog(*registry) +
-         "\n输出：只输出一个 JSON 对象（{id, trigger, nodes}），不要任何解释。";
+         "\n输出：只输出一个 JSON 对象（{id, 可选 trigger, nodes}），不要任何解释。";
     return s;
   }
 

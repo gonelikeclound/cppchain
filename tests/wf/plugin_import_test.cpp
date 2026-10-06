@@ -189,9 +189,11 @@ TEST(WfPlugin, imports_shape_violates_vi1) {
   // 程序化构造的 IR（不经 parse）→ validator 的 VI1 兜底形状（缺 lib）
   WorkflowIR ir;
   ir.id = "x";
-  ir.trigger.source = "time";
-  ir.trigger.kind = "schedule";
-  ir.trigger.schedule = "0 8 * * *";
+  TriggerIR trig;
+  trig.source = "time";
+  trig.kind = "schedule";
+  trig.schedule = "0 8 * * *";
+  ir.trigger = trig;
   ir.imports.push_back(ImportIR{/*lib=*/"", /*nodes=*/{"ultra"}});
   NodeIR node;  // 逐字段赋值（designated 初始化会触发 -Wmissing-field-initializers）
   node.id = "L";
