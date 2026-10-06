@@ -138,7 +138,7 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 | `e2c781e` | **wfr-④** 命令行运行器 —— 按名执行 + list/reset/set + `wfr_demo` |
 | `053a637` | **wfr-⑤** 调试可视化 —— 单 HTML 调试台（debug_view，+4 测试） |
 | `84222cf` | **wfr-⑪** 正式 CLI —— wfr 移出 examples（src/wfr + bin/wfr）+ 内置 chat workflow |
-| `b4dd36d` | **wfr-⑭** 发布结构 —— workflow 存储/查找（share/wfr 内置目录 + ~/.wfr 全局 + settings.workflow_dirs，ws 不可覆盖；wfr_lookup +8 单测） |
+| `9719fbd` | **wfr-⑭** 发布结构 —— workflow 存储/查找（share/wfr 内置目录 + ~/.wfr 全局 + settings.workflow_dirs，ws 不可覆盖；wfr_lookup +8 单测） |
 
 ### 收官日量化底座
 
