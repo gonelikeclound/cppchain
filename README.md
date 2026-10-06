@@ -15,7 +15,7 @@ source ~/opt/gcc16/env.sh
 
 cmake --preset dev            # 配置（首次会 FetchContent 拉 nlohmann/gtest）
 cmake --build --preset dev    # 编译
-ctest --preset dev            # 全部测试（420 项）
+ctest --preset dev            # 全部测试（422 项）
 
 ./run-demo.sh                 # 编译并运行全部 demo
 ./run-demo.sh --list          # 列出 demo

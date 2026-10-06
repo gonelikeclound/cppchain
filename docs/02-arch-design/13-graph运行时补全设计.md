@@ -93,7 +93,8 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
 
 - **语义**（LangGraph 对齐）：`interrupt(payload)` 首次调用抛 `InterruptSignal` →
   引擎捕获 → 该节点**无 update 落盘**（快照存节点入口完整 state），`next` = 剩余包 +
-  重跑包（放最后、**保留原包输入视图**），payload 随 `put_writes` 落盘 → invoke 以
+  重跑包（放最后、**保留原包输入视图** + `is_restart` 标记），payload 随 `put_writes` 落盘 →
+  invoke 以
   "挂着"返回（调用方用 `last_interrupt()` 区分）→ 外部 `resume` 再 invoke → 恢复快照，
   对重跑包注入 `ctx.pending_resume` → `interrupt()` 返回该值 → 节点继续。
 - **幂等契约**：重跑 = 节点从头执行，**interrupt 之前的副作用必然重复**（不是默认，
@@ -136,7 +137,8 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
 ## 8. Checkpoint 契约升级：`next` 从名字列表 → 包队列
 
 - `StateSnapshot::next` 由 `vector<string>` 升为 `vector<Packet>`；`Checkpointer::put` 签名同步。
-- 落盘格式 v1→v2：v2 的 next 为 `{"node":…, "state": …}` 对象数组（state 为空 = 全局包）；
+- 落盘格式 v1→v2：v2 的 next 为 `{"node":…, "state": …, "resume": …}` 对象数组
+  （state 为空 = 全局包；resume = 中断重跑包标记，v1/v2 旧记录读回默认 false）；
   **load 兼容 v1**（字符串数组 → `Packet{node, nullopt}`），旧快照直接可读，不迁移不丢弃
   （`FileCheckpointer.legacy_v1_next_string_array_loads_as_packets` 锁住）。
 - `optional<Json>` 显式写 null（继承 memory_backends 的既有纪律，见其 dump 注释）。
