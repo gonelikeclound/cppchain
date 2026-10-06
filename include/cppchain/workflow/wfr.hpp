@@ -13,6 +13,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -34,6 +35,18 @@ namespace cppchain::workflow {
 [[nodiscard]] inline std::string wfr_checkpoint_path(std::string const& workdir,
                                                      std::string const& session) {
   return (wfr_root(workdir) / "checkpoints" / (session + ".json")).string();
+}
+
+// 全局用户目录（~/.wfr）：发布后每用户共享一份（跨工作区复用 workflow）
+[[nodiscard]] inline std::string wfr_home_root() {
+  std::filesystem::path home = ".";
+  if (char const* h = std::getenv("HOME")) home = h;
+  return (home / ".wfr").string();
+}
+
+// ~/.wfr/workflows/<name>.json
+[[nodiscard]] inline std::string wfr_global_workflow_path(std::string const& name) {
+  return (std::filesystem::path(wfr_home_root()) / "workflows" / (name + ".json")).string();
 }
 
 // 遍历 <workdir>/.wfr/workflows/*.json，返回去掉扩展名的名字（供 `wfr list`；按文件名排序）。

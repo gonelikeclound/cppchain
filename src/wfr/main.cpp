@@ -27,11 +27,12 @@
 #include <cppchain/workflow/ir.hpp>
 #include <cppchain/workflow/session_log.hpp>
 #include <cppchain/workflow/wfr.hpp>
+#include <cppchain/workflow/wfr_lookup.hpp>
 #include <cppchain/workflow/plugin_node.hpp>  // load_workflow_imports（动态库，v1 仅顶层）
 
-#include "builtin_workflows.hpp"
 #include "util.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -70,14 +71,25 @@ std::string last_ai_text(Json const& state) {
 
 // 内置名（chat…）优先；否则路径/按名。
 // 返回 {kind: builtin|file, ir/路径} —— 现仅内置直接命中返回；文件走 resolve_workflow_path。
-std::string resolve_workflow_path(std::string const& workdir, std::string const& spec) {
+// 发布自带的固定 workflow 目录（排在查找末尾）：WFR_WORKFLOWS_DIR 环境 或 编译期 share 路径。
+std::vector<std::string> publish_workflow_dirs() {
+  std::vector<std::string> out;
+  if (char const* env = std::getenv("WFR_WORKFLOWS_DIR"); env && *env) out.push_back(env);
+  out.push_back(WFR_SHARE_WORKFLOWS_DIR);
+  return out;
+}
+
+// 按名/路径定位 workflow 文件：显式路径存在 → 之；否则按 lookup 约定
+//（settings.workflow_dirs → ws → 全局 → 发布自带）名字查找。找不到 → nullopt。
+std::optional<std::string> locate(std::string const& workdir, std::string const& spec,
+                                  Json const& settings) {
   std::filesystem::path maybe(spec);
   bool const looks_path = spec.find('/') != std::string::npos || spec.ends_with(".json");
-  if (looks_path && !maybe.is_absolute() &&
-      std::filesystem::exists(std::filesystem::path(workdir) / maybe))
-    return (std::filesystem::path(workdir) / maybe).string();
-  if (maybe.is_absolute() && std::filesystem::exists(maybe)) return maybe.string();
-  return wfr_workflow_path(workdir, spec);
+  std::string cand;
+  if (looks_path) cand = (maybe.is_absolute() ? maybe : std::filesystem::path(workdir) / maybe).string();
+  if (maybe.is_absolute()) cand = maybe.string();
+  if (!cand.empty() && std::filesystem::exists(cand)) return cand;
+  return wfr_lookup_workflow(workdir, spec, settings, publish_workflow_dirs());
 }
 
 bool has_model_node(Json const& ir_json) {
@@ -101,9 +113,11 @@ int main(int argc, char** argv) {
         "  wfr list [--workdir DIR]\n"
         "  wfr debug <name-or-path> [--session N|--all] [--out F] [--open]\n"
         "  wfr -h | --help\n"
-        "内置 workflow：chat（最简单聊天，多轮续聊；需 LLM key，见 .env.example）。\n"
-        "<name> 内置名优先；否则按 .wfr/workflows/<name>.json 解析；含 / 或 *.json 且存在"
-        "则当文件。\n"
+        "内置（发布自带 share/wfr/workflows）：chat（最简单聊天，多轮续聊；需 LLM key，"
+        "见 .env.example）。\n"
+        "<name> 查找顺序：显式路径 → <ws>/.wfr/settings.json 的 workflow_dirs → "
+        "<ws>/.wfr/workflows → ~/.wfr/workflows → 发布自带。\n"
+        "workspace 的 .wfr 路径本身不可被覆盖；settings 只能追加 workflow_dirs。\n"
         "--set 注入 @config.* 的额外键；保留名 debug/list/help 作为首参时为子命令。");
   };
   if (argc < 2) {
@@ -143,13 +157,17 @@ int main(int argc, char** argv) {
     if (session_arg.empty() && !all) all = true;
 
     Json dir_json;
-    if (auto b = cppchain::wfr::resolve_builtin(dname)) {
-      dir_json = std::move(*b);
-    } else {
-      std::string const dpath = resolve_workflow_path(workdir, dname);
-      std::ifstream din(dpath);
+    Json const settings = wfr_read_settings(workdir);
+    auto dpath = locate(workdir, dname, settings);
+    if (!dpath) {
+      std::println("找不到 workflow '{}'（按 settings.workflow_dirs → <ws>/.wfr/workflows → "
+                   "~/.wfr/workflows → 发布自带 查找）", dname);
+      return 2;
+    }
+    {
+      std::ifstream din(*dpath);
       if (!din) {
-        std::println("找不到 workflow '{}'（searched: {}）", dname, dpath);
+        std::println("找不到 workflow '{}'（searched: {}）", dname, *dpath);
         return 2;
       }
       try {
@@ -232,22 +250,32 @@ int main(int argc, char** argv) {
       input = input.empty() ? a : input + " " + a;
   }
 
-  // ---- list：内置 + 文件 ----
+  // ---- list：按查找约定列出各来源目录的 workflow ----
   if (cmd == "list") {
-    std::println("内置 workflow:");
-    for (std::string const& n : cppchain::wfr::builtin_names())
-      std::println("  {:<12} (内置)", n);
-    auto const names = wfr_list_workflows(workdir);
-    if (!names.empty()) {
-      std::println("\n<workdir>/.wfr/workflows/:");
+    Json const settings = wfr_read_settings(workdir);
+    std::vector<std::string> dirs = publish_workflow_dirs();  // 发布自带（内置/固定）
+    auto base = wfr_lookup_dirs(workdir, settings);           // settings → ws → 全局
+    dirs.insert(dirs.end(), base.begin(), base.end());
+    // 去重（按绝对规整路径）
+    std::vector<std::string> seen, unique;
+    for (auto const& d : dirs) {
+      std::string const a = std::filesystem::absolute(d).lexically_normal().string();
+      if (std::find(seen.begin(), seen.end(), a) == seen.end()) {
+        seen.push_back(a);
+        unique.push_back(d);
+      }
+    }
+    for (auto const& d : unique) {
+      auto names = wfr_list_workflows_in(d);
+      if (names.empty()) continue;
+      std::println("{}:", d);
       for (std::string const& n : names) {
-        std::string const p = wfr_workflow_path(workdir, n);
-        std::ifstream in(p);
+        std::ifstream in(std::filesystem::path(d) / (n + ".json"));
         Json j;
         try {
           in >> j;
         } catch (...) {
-          std::println("  {:<12} （读不到/坏 JSON）", n);
+          std::println("  {:<14} （读不到/坏 JSON）", n);
           continue;
         }
         std::string trig;
@@ -257,24 +285,28 @@ int main(int argc, char** argv) {
         } else {
           trig = "manual（手工触发）";
         }
-        std::println("  {:<12} nodes={}  trigger={}", n,
+        std::println("  {:<14} nodes={}  trigger={}", n,
                      j.value("nodes", Json::array()).size(), trig);
       }
     }
     return 0;
   }
 
-  // ---- 定位 workflow：内置优先；否则 文件/.wfr ----
+  // ---- 定位 workflow（settings.workflow_dirs → ws → 全局 → 发布自带）----
   Json ir_json;
   bool model_needed_key = false;
-  if (auto b = cppchain::wfr::resolve_builtin(name_or_path)) {
-    ir_json = std::move(*b);
-    model_needed_key = true;  // 聊天即 model
-  } else {
-    std::string const path = resolve_workflow_path(workdir, name_or_path);
-    std::ifstream in(path);
+  Json const settings = wfr_read_settings(workdir);
+  auto const path = locate(workdir, name_or_path, settings);
+  if (!path) {
+    std::println("找不到 workflow '{}'（按 settings.workflow_dirs → <ws>/.wfr/workflows → "
+                 "~/.wfr/workflows → 发布自带 查找）",
+                 name_or_path);
+    return 2;
+  }
+  {
+    std::ifstream in(*path);
     if (!in) {
-      std::println("找不到 workflow '{}'（searched: {}）", name_or_path, path);
+      std::println("找不到 workflow '{}'（searched: {}）", name_or_path, *path);
       return 2;
     }
     try {

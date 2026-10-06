@@ -1,0 +1,8 @@
+{
+  "id": "builtin_chat",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "think" },
+    { "id": "think", "kind": "model", "model": "main", "next": "_turn_end" }
+  ]
+}

@@ -174,6 +174,7 @@ add_library(cppchain_workflow STATIC
   workflow/plugin.cpp
   workflow/import.cpp
   workflow/debug_view.cpp
+  workflow/wfr_lookup.cpp
   workflow/generator.cpp)
 
 target_include_directories(cppchain_workflow PUBLIC
@@ -200,5 +201,13 @@ target_link_libraries(wfr PRIVATE
   cppchain_http_curl)
 target_include_directories(wfr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(wfr PRIVATE -Wall -Wextra -Wpedantic)
+# 发布自带的固定 workflow 目录（编译期注入；开发构建 = 源码 share/wfr/workflows，安装后 = <prefix>/share/wfr/workflows）
+target_compile_definitions(wfr PRIVATE
+  WFR_SHARE_WORKFLOWS_DIR="${PROJECT_SOURCE_DIR}/share/wfr/workflows")
 set_target_properties(wfr PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# 发布：二进制 → <prefix>/bin；固定 workflow → <prefix>/share/wfr/workflows
+install(TARGETS wfr RUNTIME DESTINATION bin)
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/share/wfr DESTINATION share/wfr
+  FILES_MATCHING PATTERN "*.json")

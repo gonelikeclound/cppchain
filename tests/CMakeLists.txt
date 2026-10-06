@@ -138,7 +138,8 @@ add_executable(workflow_tests
   wf/plugin_import_test.cpp
   wf/m10_runtime_test.cpp
   wf/import_workflow_test.cpp
-  wf/debug_view_test.cpp)
+  wf/debug_view_test.cpp
+  wf/wfr_lookup_test.cpp)
 
 target_include_directories(workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)
 

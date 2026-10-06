@@ -24,12 +24,20 @@
 - 退出码：0 成功 / 2 用法・找不到・解析校验编译失败 / 1 fire 运行时错误。
 - 骨架复用：`examples/workflow_cli`（argv 手写、读 IR→load imports→expand→parse→compile→fire）。
 
-### 2.1 内置 workflow（`src/wfr/builtin_workflows.hpp`）
+### 2.1 内置/固定 workflow 与查找约定（发布结构）
 
-`wfr chat`：**buildin——最简单聊天**（load_history + model，无 trigger manual）。
-同一 `--session` 下连续 `wfr chat "…"` 即多轮续聊（load_history 对会话日志 replay 带上历史）。
-命中内置名即用，不读 `.wfr/workflows/`；`wfr list` 单列内置。正式工具目录 =
-tool 库内建 `make_datetime_tool` + `make_calculator_tool`（不依赖 demo fakes）。
+- **发布自带目录** `share/wfr/workflows/*.json`（源码随仓库维护，安装分发到
+  `<prefix>/share/wfr/workflows`；开发构建经编译宏 `WFR_SHARE_WORKFLOWS_DIR` 指向源码目录，
+  `WFR_WORKFLOWS_DIR` 环境可覆盖此兜底层）。内置 `chat`（load_history + model 的最简单聊天，
+  多轮续聊）即以文件归档于此，可看可改。
+- **查找顺序**（名字命中即停）：
+  显式路径 > `<ws>/.wfr/settings.json` 的 `"workflow_dirs"`（数组、相对 ws 解析、顺序即优先级）>
+  `<ws>/.wfr/workflows` > `~/.wfr/workflows`（全局用户，发布后每用户共享）> 发布自带。
+  **workspace 的 `.wfr` 路径本身不可被覆盖** —— settings 只能**追加** `workflow_dirs`。
+- 实现：`workflow/wfr_lookup.{hpp,cpp}`（`wfr_read_settings` / `wfr_lookup_dirs` /
+  `wfr_lookup_workflow` / `wfr_list_workflows_in`，8 项单测：顺序 / 相对路径 / 坏 settings
+  fail-open / 找不到）。CLI 的 `list` 按来源目录列出。
+- 正式工具目录 = tool 库内建 `make_datetime_tool` + `make_calculator_tool`（不依赖 demo fakes）。
 
 ## 3. workflow 增强（本系列在 workflow 库的改动）
 
