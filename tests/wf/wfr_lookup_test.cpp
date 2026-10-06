@@ -102,6 +102,29 @@ TEST(WfrLookup, missing_returns_nullopt) {
   EXPECT_FALSE(wfr_lookup_workflow(b.ws(), "ghost", Json::object(), {b.dir / "share"}).has_value());
 }
 
+// 全局 settings.workflow_dirs（~/.wfr/settings.json，相对 ~ 解析）优先于全局默认目录
+TEST(WfrLookup, global_settings_dirs_take_precedence_over_global_default) {
+  TempBox b;
+  write_file(b.dir / "home" / "gd" / "g.json");  // 全局自定义目录 ./gd（相对 ~ → <home>/gd）
+  write_file(b.home_wf() + "/g.json");           // 全局默认目录也有同名
+  write_file(b.dir / "home" / ".wfr" / "settings.json", R"({"workflow_dirs":["./gd"]})");
+  auto found = wfr_lookup_workflow(b.ws(), "g", Json::object(), {});
+  ASSERT_TRUE(found);
+  EXPECT_TRUE(found->find("/home/gd/g.json") != std::string::npos) << *found;
+}
+
+// 全局 settings 目录仍排在 ws 之后：同名 ws 有 → ws 赢
+TEST(WfrLookup, workspace_wins_over_global_settings_dir) {
+  TempBox b;
+  write_file(b.dir / "home" / "gd" / "z.json");
+  write_file(b.home_wf() + "/z.json");
+  write_file(b.dir / "home" / ".wfr" / "settings.json", R"({"workflow_dirs":["./gd"]})");
+  write_file(b.ws() + "/.wfr/workflows/z.json");
+  auto found = wfr_lookup_workflow(b.ws(), "z", Json::object(), {});
+  ASSERT_TRUE(found);
+  EXPECT_TRUE(found->find("/ws/.wfr/workflows/z.json") != std::string::npos);
+}
+
 // 坏 settings.json → 空对象（不阻断，走默认 ws/global/share）
 TEST(WfrLookup, corrupt_settings_is_fail_open) {
   TempBox b;

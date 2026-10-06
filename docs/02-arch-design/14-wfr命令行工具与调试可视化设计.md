@@ -32,8 +32,9 @@
   多轮续聊）即以文件归档于此，可看可改。
 - **查找顺序**（名字命中即停）：
   显式路径 > `<ws>/.wfr/settings.json` 的 `"workflow_dirs"`（数组、相对 ws 解析、顺序即优先级）>
-  `<ws>/.wfr/workflows` > `~/.wfr/workflows`（全局用户，发布后每用户共享）> 发布自带。
-  **workspace 的 `.wfr` 路径本身不可被覆盖** —— settings 只能**追加** `workflow_dirs`。
+  `<ws>/.wfr/workflows` > `~/.wfr/settings.json` 的 `"workflow_dirs"`（相对 ~ 解析）>
+  `~/.wfr/workflows`（全局用户，发布后每用户共享）> 发布自带。
+  **workspace 的 `.wfr` 路径本身不可被覆盖** —— 两个 settings 都只能**追加** `workflow_dirs`。
 - 实现：`workflow/wfr_lookup.{hpp,cpp}`（`wfr_read_settings` / `wfr_lookup_dirs` /
   `wfr_lookup_workflow` / `wfr_list_workflows_in`，8 项单测：顺序 / 相对路径 / 坏 settings
   fail-open / 找不到）。CLI 的 `list` 按来源目录列出。

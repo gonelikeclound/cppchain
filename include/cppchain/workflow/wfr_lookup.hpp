@@ -5,12 +5,14 @@
 //     1. 显式路径（含 / 或 *.json 且存在）
 //     2. <ws>/.wfr/settings.json 的 "workflow_dirs"（数组，顺序即优先级；相对 ws 解析）
 //     3. <ws>/.wfr/workflows/<name>.json        ← workspace 自带（此路径不可被覆盖）
-//     4. ~/.wfr/workflows/<name>.json           ← 全局用户 workflow
-//     5. 发布自带 share/wfr/workflows/<name>.json（内置/固定 workflow；可由调用方经 extra_dirs
-//        传入，顺序在全局之后）
+//     4. ~/.wfr/settings.json 的 "workflow_dirs"（相对 ~ 解析；优先于全局默认目录）
+//     5. ~/.wfr/workflows/<name>.json           ← 全局用户 workflow
+//     6. 发布自带 share/wfr/workflows/<name>.json（内置/固定；可由调用方经 extra_dirs
+//        传入，排在全局之后）
 //
 // 注意：workspace 的 `.wfr/` 路径本身不参与"可覆盖" —— settings 只能**追加**
-// workflow_dirs 到查找集合（插在 ws 之前），不能改 ws 路径。
+// workflow_dirs 到查找集合（插在本层默认目录之前），不能改 ws 路径。
+// ws 与全局 settings 的 workflow_dirs 语义一致，只是相对基准不同（ws / ~）。
 // settings 形状：{ "workflow_dirs": ["/abs", "相对路径", ...] }
 #pragma once
 
