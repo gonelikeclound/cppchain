@@ -111,7 +111,8 @@ Message/ContentBlock（无 provider 依赖的领域模型）
   截断 `max_tokens` 预算模式、审批记忆化 `ToolApproval.memo`）+ 收官件（`HybridSelector` 混合召回、
   `Message::artifact` + `ArtifactToolResults` 落盘）；`04-problems/10` 横向对照总表；
   +24 单测（283 全绿）、4 个 m9_* demo
-- [ ] **M10**：运行时补全（弹性）——Streaming / Interrupt / Send / 时间旅行（fork）
+- [x] **M10**：运行时补全——**Streaming / Interrupt / Send** 已落地（时间旅行 fork 押后，
+  见 arch 13 与 `04-problems/13`）
 
 ---
 
@@ -125,6 +126,10 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 |--------|------|
 | `ea16c69` | **M8** 子代理/多智能体：subagent-as-tool + orchestrator-worker(串行) + handoff（21 文件 / +1894 行） |
 | `df05be2` | **M9** 五大问题集中收官：三中间件做深 + 混合检索 + artifact 落盘（31 文件 / +1807 行） |
+| `931fab0` | **M10-①** next 升级为包队列契约 + v1/v2 快照兼容 |
+| `22b60dc` | **M10-②** 引擎四态包队列 —— Streaming / Interrupt / Send 运行时（+21 测试） |
+| `eafb85a` | **M10-③** 引擎事件接入 workflow —— 投影适配器 + interrupt 记录 + 双源互斥（+4 测试） |
+| `a73aa42` | **M10-④** 三个纯离线 demo（streaming / interrupt / send） |
 
 ### 收官日量化底座
 
@@ -146,10 +151,11 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 
 ### 状态与「从哪继续」
 
-- **主线闭口**：M0–M9 全部 ✅，langchain/langgraph 核心抽象（Message/Model/Tool/State/Graph/Agent/
-  多智能体）+ 五大问题解法已跑通验证。M10 为弹性项，**是否推进交由后续讨论，非欠债**。
+- **主线闭口+推进**：M0–M10 全部 ✅，langchain/langgraph 核心抽象（Message/Model/Tool/State/Graph/
+  Agent/多智能体 + 运行时补全）+ 五大问题解法已跑通验证。M10 三项（Streaming/Interrupt/Send）
+  已落地（`04-problems/13`），**时间旅行(fork) 押后**（存储地基已就绪，缺图层分叉入口）。
 - **暂缓备选**：
-  - M10：Interrupt（真 HITL 审批，价值最高）/ Streaming / Send fan-out / 时间旅行(fork)
+  - M10 剩余：时间旅行(fork)、真并行（包队列已按可并行设计）、Send × workflow IR、`c_model` 切流
   - M9 开放点：动作级评测集、精确 tokenizer、Journal 持久层、`tool_search` 元工具
 - **继续入口**：读本文件「下一步」与「路线图 B1」；增量需求按对应层的 arch/详细设计追加。
 

@@ -15,7 +15,7 @@ source ~/opt/gcc16/env.sh
 
 cmake --preset dev            # 配置（首次会 FetchContent 拉 nlohmann/gtest）
 cmake --build --preset dev    # 编译
-ctest --preset dev            # 全部测试（348 项）
+ctest --preset dev            # 全部测试（411 项）
 
 ./run-demo.sh                 # 编译并运行全部 demo
 ./run-demo.sh --list          # 列出 demo
@@ -60,7 +60,7 @@ message/  消息层（M1）：Message/ContentBlock/**JSON 序列化契约**
 | M7 | Agent 循环 + 三中间件（压缩/截断/审批） | ✅ |
 | M8 | Subagent（ask_expert / orchestrator-worker / handoff） | ✅ |
 | M9 | 五大问题收官（混合召回 / artifact 落盘 / 审批记忆化 / token 预算） | ✅ |
-| M10 | 运行时补全（Streaming·Interrupt·Send） | ⬜ |
+| M10 | 运行时补全（Streaming·Interrupt·Send） | ✅ |
 | M11 | 主动智能 Workflow（IR → 图 → 生成端 + proactive CLI） | ✅ |
 
 ## 几条实测结论（省得再踩）
