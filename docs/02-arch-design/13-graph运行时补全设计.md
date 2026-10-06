@@ -1,7 +1,7 @@
-# 13 · Graph 运行时补全设计（M10：Streaming / Interrupt / Send）
+# 13 · Graph 运行时补全设计（M10：Streaming / Interrupt / Send / 时间旅行）
 
 > 对应路线图 M10（弹性的运行时补全）。参照 langchain LangGraph 的 stream /
-> interrupt / Command(sends)。时间旅行（fork）**押后**（存储层地基已就绪，见 §9）。
+> interrupt / Command(sends) / 时间旅行（fork）。
 > 写实文档：接口与执行语义均按 `src/graph/graph.cpp` / `include/cppchain/graph/graph.hpp` 的实现陈述。
 
 ---
@@ -16,7 +16,8 @@
   | **Streaming** | 注入事件 sink，逐"包"吐 `node_start` / `node_end` / `values`，节点内经 `ctx.emit` 自报流式事件 |
   | **Interrupt** | 节点内 `interrupt(payload)` 悬挂 → 落 checkpoint → 外部 `resume` → **该节点从头重跑**，调用点返回答复 |
   | **Send** | `Send(node, partial_state)` 动态 fan-out：独立包 + 局部输入，结果经 reducer 归约回主 state（顺序执行，接口按可并行设计） |
-- **不做**（押后或明确不做）：时间旅行/fork、真并行线程池、agent 层审批改造、把 Send/Interrupt 接入 workflow IR、`c_model` 切流（模型层 stream 与事件通道已就绪，接入 = 改 node_types 一处，见 §9 开放点）。
+  | **时间旅行** | `invoke(thread, {fork: {source_thread, checkpoint_id}})`：从**历史 checkpoint** 恢复（state + next）并继续，新轨迹落新线程、原轨迹不污染；分叉点即新链的 parent |
+- **不做**（押后或明确不做）：真并行线程池、agent 层审批改造、把 Send/Interrupt 接入 workflow IR、`c_model` 切流（模型层 stream 与事件通道已就绪，接入 = 改 node_types 一处，见 §10 开放点）。
 
 ## 2. 问题：极简引擎（M6）的三个缺口
 
@@ -26,7 +27,7 @@
 | 没有"暂停等外部" | 审批只能是同步回调，无真 HITL | `interrupt()` 原语 + resume |
 | 只能单路径 | `current` 每步只跑 front 且被整条替换，**多节点 fan-out 会被丢弃** | `current` 升级为**包队列** |
 
-## 3. 设计：一个执行通道，三个特性共用
+## 3. 设计：一个执行通道，四个特性共用
 
 ```cpp
 // graph.hpp 新增（§4 列出全部类型；此处为骨架）
@@ -34,7 +35,9 @@ struct InvokeOptions {
   EventSink sink = nullptr;                       // 注入即流；null = 零开销
   EventMode mode = EventMode::Updates;            // Updates|Snapshot|Deltas
   std::optional<Json> resume;                     // 对上次 interrupt 的答复
+  std::optional<ForkSpec> fork;                   // 时间旅行分叉（§7）
 };
+struct ForkSpec { std::string source_thread; std::string checkpoint_id; };
 
 enum class EventMode : std::uint32_t { Off, Updates, Snapshot, Deltas, All };
 
@@ -115,7 +118,22 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
 - **顺序执行**：同一批包 FIFO 顺序推进；`Packet`/`deque` 结构天然可并行，`max_parallel`
   线程池押后（用户确认"先顺序，留并行接口"）。
 
-## 7. Checkpoint 契约升级：`next` 从名字列表 → 包队列
+## 7. 时间旅行分叉（fork）
+
+- **API**：`InvokeOptions.fork = ForkSpec{source_thread, checkpoint_id}`。
+  `checkpoint_id` 为空 = 该线程最新快照；通常指定历史 id。
+- **执行语义**：恢复该快照的 `values + next` 并继续跑（input 被忽略，与普通恢复一致）；
+  新快照落到**本次的 thread_id**（可不同于来源线程），原线程轨迹不污染；
+  **分叉点即新链的 parent**（`parent_checkpoint_id` 跨线程可追溯）。
+- **fail-closed**：分叉点（线程/checkpoint id）不存在 → `CheckpointNotFound`，不默默
+  退回"最新/全新开跑"（防走错轨迹）。
+- **与 interrupt 的叠加**：分叉点若正站在 interrupt 上 → 语义与普通恢复一致
+  （无 resume 保持挂着、有 resume 继续），`get_writes` 从来源线程取 payload。
+- **workflow 接入**：`FireOptions.fork` 透传至 invoke（需编译期注入 checkpointer）。
+- 测试：`tests/graph/time_travel_test.cpp`（4 项，含线程隔离 / fail-closed / 悬挂分叉点）；
+  demo：`examples/m10_fork`（先跑完整轨迹 → 改环境 → 从中间 checkpoint 分叉得不同未来）。
+
+## 8. Checkpoint 契约升级：`next` 从名字列表 → 包队列
 
 - `StateSnapshot::next` 由 `vector<string>` 升为 `vector<Packet>`；`Checkpointer::put` 签名同步。
 - 落盘格式 v1→v2：v2 的 next 为 `{"node":…, "state": …}` 对象数组（state 为空 = 全局包）；
@@ -124,19 +142,20 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
 - `optional<Json>` 显式写 null（继承 memory_backends 的既有纪律，见其 dump 注释）。
 - recovery 语义不变："回到该步边界继续"——now restores `current = snap->next`。
 
-## 8. 测试与验证
+## 9. 测试与验证
 
 - **graph 层新增 21 项**：Streaming 5（边界事件/快照开关/delta 转发/零 sink 等价/错误事件）、
   Interrupt 8（悬挂与完整 state/resume 重跑与副作用重复/无 resume 保持挂/已跑完带 resume 报错/
   需 checkpointer/不被泛 catch 吞/跨实例恢复）、Send 8（fan-out 归约/局部输入视图/目标未知/
-  goto 优先/send 覆盖静态边/多级扇出/checkpoint 承载包/super-step 部分悬挂恢复）。
+  goto 优先/send 覆盖静态边/多级扇出/checkpoint 承载包/super-step 部分悬挂恢复）+ **Fork 4**
+  （新线程继续/未知分叉点 fail-closed/未知来源线程 fail-closed/悬挂分叉点需 resume）。
 - **workflow 层新增 4 项**（WfM10）：fire_once 收集事件（All=每节点 3 事件）、stream
   模式 wrapper 让位（双源互斥）、project_stream_to_log 信封映射、interrupt 记录不参与 replay。
-- **既有 386 项逐条仍绿**（普通图 = 全局包特例的行为位等价证据）；全仓 **411 全绿**、零告警。
-- **demo ×3（离线）**：`m10_streaming`（事件时间线 + delta）、`m10_interrupt`（审批悬挂/
-  resume/幂等计数）、`m10_send`（map-reduce fan-out）。
+- **既有 386 项逐条仍绿**（普通图 = 全局包特例的行为位等价证据）；全仓 **415 全绿**、零告警。
+- **demo ×4（离线）**：`m10_streaming`（事件时间线 + delta）、`m10_interrupt`（审批悬挂/
+  resume/幂等计数）、`m10_send`（map-reduce fan-out）、`m10_fork`（从中间 checkpoint 分叉得不同未来）。
 
-## 9. DoD 与开放点
+## 10. DoD 与开放点
 
 ### DoD
 - [x] `Packet` 化 next + v1/v2 兼容加载（P0）
@@ -145,12 +164,13 @@ Json interrupt(Json const& payload, NodeContext& ctx);  // 首调抛 / 重跑返
 - [x] `Command.sends` / Send 独立包 + reducer 归约 + checkpoint 承载（P3）
 - [x] workflow 接入：`FireOptions.stream` + wrapper 让位 + `project_stream_to_log` +
       `session_log.engine_interrupt`（P4）
-- [x] 3 个纯离线 demo（P6）
-- [x] 既有测试逐条仍绿 + 新增 25 项；全仓 411 全绿、零告警
+- [x] 时间旅行分叉：`InvokeOptions.fork` + 新错误档 + 线程隔离测试 + demo（P6-⑦）
+- [x] 4 个纯离线 demo（P6）
+- [x] 既有测试逐条仍绿 + 新增 29 项；全仓 415 全绿、零告警
 
 ### 开放点
-1. **时间旅行（fork）**：存储地基已就绪（全链快照 + list + 按 id get_tuple + parent 链），
-   缺"从任意 checkpoint 重建并重新 invoke"的图层入口 —— 用户明确押后。
+1. **分叉后改写分叉点 state**（`update_state`）：目前 fork 用快照原样继续；LangGraph 允许
+   在分叉点改写部分 state 再跑（"改一个字段探新路"），需 `get_state/update_state` 类接口。
 2. **真并行**：同批包并行线程池（`max_parallel`）——接口与数据结构已就绪，且需配套 barrier。
 3. **`c_model` 切流**：模型层 `stream` + delta 事件通道已就绪；node_types.cpp 的 `c_model`
    默认走阻塞 invoke，Deltas 模式切流留作开放项（需可流式测试模型基建）。
