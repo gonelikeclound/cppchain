@@ -190,3 +190,15 @@ target_link_libraries(cppchain_workflow PUBLIC
   nlohmann_json::nlohmann_json)
 
 target_compile_options(cppchain_workflow PRIVATE -Wall -Wextra -Wpedantic)
+
+# ---- wfr：正式 CLI（按名执行 workflow + 内置 workflow + 调试台）----
+# 输出到 <build>/bin（正式产物，区别于 examples/ 的演示二进制）
+add_executable(wfr wfr/main.cpp)
+target_link_libraries(wfr PRIVATE
+  cppchain_workflow
+  cppchain_tool
+  cppchain_http_curl)
+target_include_directories(wfr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(wfr PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(wfr PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
