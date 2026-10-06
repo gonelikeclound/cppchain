@@ -25,6 +25,7 @@
 namespace cppchain::workflow {
 
 using cppchain::graph::Command;
+using cppchain::graph::InterruptSignal;
 using cppchain::graph::NodeContext;
 
 namespace {
@@ -57,7 +58,9 @@ graph::StateGraph& LoggingStateGraph::add_node(std::string name, graph::NodeFn f
       node_id, [node_id, kind, sink_p, fn = std::move(fn)](Json const& state,
                                                            NodeContext& nc) -> Command {
         SessionLog* slog = sink_p->log;
-        if (slog == nullptr) return fn(state, nc);
+        // 双源互斥（M10）：host 经 FireOptions.stream 走引擎事件通道时 wrapper 让位，
+        // 结构日志由宿主用 project_stream_to_log 投影，避免同一节点被记两遍。
+        if (slog == nullptr || sink_p->streaming) return fn(state, nc);
 
         auto const t0 = std::chrono::steady_clock::now();
         slog->engine_enter(sink_p->run, node_id, kind);
@@ -75,6 +78,10 @@ graph::StateGraph& LoggingStateGraph::add_node(std::string name, graph::NodeFn f
               (kind == "load_history") ? std::nullopt : std::optional<Json>(c.update);
           slog->engine_exit(sink_p->run, node_id, kind, true, "ok", ms(), update);
           return c;
+        } catch (InterruptSignal const&) {
+          // 悬挂不是失败：与 enter 配对写 interrupt，不误记 error（replay 铁律天然忽略）
+          slog->engine_interrupt(sink_p->run, node_id, kind, ms());
+          throw;
         } catch (...) {
           slog->engine_exit(sink_p->run, node_id, kind, false, "error", ms(), std::nullopt);
           throw;
@@ -225,12 +232,39 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   }
 
   Json input = Json{{kConfigKey, config}};
-  auto const r = wf.graph.invoke(input, opts.thread_id);
+  wf.sink->streaming = opts.stream != nullptr;
+  graph::InvokeOptions iopts;
+  iopts.sink = opts.stream;
+  // 全模式事件：host 要的是事件流本身；没传 stream 时 sink=null → 零开销
+  iopts.mode = graph::EventMode::All;
+  auto const r = wf.graph.invoke(input, opts.thread_id, iopts);
 
+  wf.sink->streaming = false;
   wf.sink->log = nullptr;
   wf.sink->run.clear();
   if (!r) return std::unexpected(WorkflowError{WorkflowError::Kind::Runtime, r.error().message});
   return *r;
+}
+
+// 把 graph 运行期事件投影成会话日志记录（信封与默认 wrapper 一致；docs/12 §6.3 形状）。
+// 默认宿主用 wrapper 直接写结构事件；传了 FireOptions.stream 时由本函数从事件通道落地。
+void project_stream_to_log(SessionLog& log, std::string const& run, graph::StreamEvent const& ev,
+                           std::string_view fallback_kind) {
+  std::string const kind = ev.node_kind.empty() ? std::string(fallback_kind) : ev.node_kind;
+  if (ev.type == "node_start") {
+    log.engine_enter(run, ev.node, kind);
+  } else if (ev.type == "node_end") {
+    if (ev.ok)
+      log.engine_exit(run, ev.node, kind, true, "ok", 0,
+                      ev.payload.is_object() && !ev.payload.empty()
+                          ? std::optional<Json>{ev.payload}
+                          : std::nullopt);
+    else
+      log.engine_exit(run, ev.node, kind, false, "error", 0, std::nullopt);
+  } else if (ev.type == "interrupt") {
+    log.engine_interrupt(run, ev.node, kind, 0);
+  }
+  // "values"/节点自定 delta 事件 → 不落结构日志（values 是状态快照，node 日志走 nlog()）
 }
 
 std::vector<Json> simulate_fires(CompiledWorkflow& wf, std::vector<Json> const& configs) {

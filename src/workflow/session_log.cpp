@@ -173,6 +173,17 @@ void SessionLog::engine_exit(std::string const& run, std::string const& node,
   write(std::move(rec));
 }
 
+void SessionLog::engine_interrupt(std::string const& run, std::string const& node,
+                                  std::string const& node_kind, std::int64_t ms) {
+  write(Json{{"run", run},
+             {"source", "engine"},
+             {"node", node},
+             {"node_kind", node_kind},
+             {"phase", "interrupt"},
+             {"status", "interrupt"},
+             {"ms", ms}});
+}
+
 void SessionLog::log(std::string_view level, std::string_view msg, Json const& data) {
   write(Json{{"source", "node"}, {"level", std::string(level)}, {"msg", std::string(msg)},
              {"data", data}});

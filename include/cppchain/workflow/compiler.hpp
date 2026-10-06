@@ -87,7 +87,17 @@ struct FireOptions {
   std::vector<Json> input_messages = {};
   // 恢复续跑（与旧的 thread_id 重载等价的统一入口）。
   std::string thread_id;
+  // M10: 引擎级事件通道（Streaming/Interrupt 的图事件）。非空 → fire_once 把它作为
+  // invoke 的 sink（逐包吐 node_start/node_end/…），且 wrapper 结构日志**让位**
+  // （SessionSink.streaming=true，防双源重复记录）；宿主用 project_stream_to_log 落地。
+  graph::EventSink stream = nullptr;
 };
+
+// 把 graph 运行期事件投影成会话日志记录（供宿主在 FireOptions.stream 里自选落地）。
+// 与默认 wrapper 写的信封相同：node_start→engine_enter，node_end(ok)→engine_exit(update)，
+// node_end(!ok)→engine_exit(error)，interrupt→engine_interrupt。node_kind 为空时用 fallback。
+void project_stream_to_log(SessionLog& log, std::string const& run, graph::StreamEvent const& ev,
+                           std::string_view fallback_kind);
 // 带 FireOptions 的触发：日志 + 输入 + （可选）线程恢复一次给齐。
 [[nodiscard]] std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf,
                                                            Json const& config,

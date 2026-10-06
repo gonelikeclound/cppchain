@@ -63,6 +63,10 @@ class SessionLog : public NodeLog {
   void engine_exit(std::string const& run, std::string const& node, std::string const& node_kind,
                    bool ok, std::string_view status, std::int64_t ms,
                    std::optional<nlohmann::json> const& update = std::nullopt);
+  // M10: 节点调 interrupt 悬挂时写一条 phase:"interrupt" 记录（与 enter 配对，不误记 error）。
+  // replay 铁律只读 exit+ok，本记录天然不参与状态重建。
+  void engine_interrupt(std::string const& run, std::string const& node,
+                        std::string const& node_kind, std::int64_t ms);
 
   // ---- 节点自报（source=node，不参与 replay）----
   void log(std::string_view level, std::string_view msg,
@@ -92,6 +96,9 @@ class SessionLog : public NodeLog {
 struct SessionSink {
   SessionLog* log = nullptr;  // 本次触发期的会话日志；null = 本次不落日志（引擎也不写 input）
   std::string run;            // 本次触发 id（如 "r-1"），fire_once 生成
+  // M10: host 选择把引擎事件经 FireOptions.stream 走 graph 事件通道（由宿主投影为日志）时，
+  // wrapper 让位不再直接写结构事件 —— 双源互斥，防止同一节点被记两遍。
+  bool streaming = false;
   [[nodiscard]] NodeLog* nlog() const { return log; }  // SessionLog IS-A NodeLog
 };
 
