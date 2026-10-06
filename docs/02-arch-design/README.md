@@ -20,4 +20,5 @@
 | 10 | [10-m9收官设计.md](10-m9收官设计.md) | M9 收官：三中间件做深（token 阈值/成本量化/审批记忆化）+ 混合检索 + artifact 落盘 | ✅ 已实现 |
 | 11 | [11-组件化与命令行agent.md](11-组件化与命令行agent.md) | 拟定 M12：**agent 循环 = 图上的回边**（对齐 langgraph ReAct）+ history 节点 + 组件按名引用 + 工作路径续跑 | 🟡 设计（落盘机制已验证）|
 | 12 | [12-节点接口与注册表.md](12-节点接口与注册表.md) | 节点接口 `NodeType` + 工厂动态注册（内置 / 动态库 import）+ **统一日志**（history 改为日志投影）| ✅ ①–⑤ 全部实现（注册表 / `edges()` / `session_log` / replay 投影 / A0+A1 导入枚举） |
-| 13 | [13-graph运行时补全设计.md](13-graph运行时补全设计.md) | **M10 运行时补全**：包队列执行器 + Streaming / Interrupt / Send / 时间旅行；checkpoint 的 next 升为包队列 | ✅ 已实现（422 全绿 + 4 离线 demo） |
+| 13 | [13-graph运行时补全设计.md](13-graph运行时补全设计.md) | **M10 运行时补全**：包队列执行器 + Streaming / Interrupt / Send / 时间旅行；checkpoint 的 next 升为包队列 | ✅ 已实现（438 全绿 + 4 离线 demo） |
+| 14 | [14-wfr命令行工具与调试可视化设计.md](14-wfr命令行工具与调试可视化设计.md) | **wfr 系列**：命令行运行器（按名执行）+ trigger 可选 / import 复用 + 单 HTML 调试台；`.wfr/` 统一元数据目录 | ✅ 已实现（438 全绿 + `wfr_demo`） |

@@ -59,6 +59,8 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `m9_budget` | **M9 压缩成本/收益量化（真机）**：`TrimHistory.max_tokens` 阈值触发 + 摘要真实 usage（~360 输出 tok 换 ~10k 输入 tok） | token 预算压缩 |
 | `wf_eval` | **主动智能生成端验收（真机）**：对 12 例评测固件跑完整管线（PlanStage → IRStage → compile → fire），按特征断言打矩阵（golden 8 例须 Generated + must_have 全中 + 能编译能跑）；含调度模拟 | 工作流生成（generate → validate → run） |
 | `proactive` | **主动智能交互演示（真机）**：`ask_user` 编号菜单澄清 → 易读 IR；`--intent` 单条 / `--question-answer` 批量自动作答 / `--cases` 并入 12 例矩阵（`./run-proactive.sh` 是它的便捷入口） | 澄清循环（human-in-the-loop 的离线替身） |
+| `wfr` | **wfr 命令行运行器（工具）**：`wfr <name> [options] <query>` 按名执行 workflow（`.wfr/workflows/<name>.json`）；支持 `list` / `debug` / `--set key=value` / trigger 可省略（manual）/ workflow import | LangGraph 运行时入口 |
+| `wfr_demo` | **wfr 离线演示**：`loop_wf`（import `notify_wf` + label→goto 循环、无 trigger）跑一遍 → `wfr debug loop_wf --all` 生成单 HTML 调试台（图含 import 节点、循环 1,2,3.. 分组、节点↔日志联动） | 调试可视化 |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。

@@ -132,6 +132,11 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 | `a73aa42` | **M10-④** 三个纯离线 demo（streaming / interrupt / send） |
 | `cda36e9` | **M10-⑤** 收官打勾 —— arch 13 + 验收记录 + README/路线图同步（411 全绿） |
 | `7ef02ff` | **M10-⑥** 时间旅行分叉（fork）——`InvokeOptions.fork` + 新线程隔离 + demo（+4 测试，415 全绿） |
+| `8ec4128` | **wfr-①** `.wfr/` 元数据目录 —— session 迁移 + 节点诊断补 run/node |
+| `da5c9cd` | **wfr-②** trigger 可选 —— 省略 = 宿主手工触发 |
+| `c7f9c50` | **wfr-③** import 其他 workflow —— 展开式跨文件复用（+8 测试） |
+| `e2c781e` | **wfr-④** 命令行运行器 —— 按名执行 + list/reset/set + `wfr_demo` |
+| `053a637` | **wfr-⑤** 调试可视化 —— 单 HTML 调试台（debug_view，+4 测试） |
 
 ### 收官日量化底座
 
@@ -155,10 +160,13 @@ Message/ContentBlock（无 provider 依赖的领域模型）
 
 - **主线闭口+推进**：M0–M10 全部 ✅，langchain/langgraph 核心抽象（Message/Model/Tool/State/Graph/
   Agent/多智能体 + 运行时补全）+ 五大问题解法已跑通验证。M10 四项（Streaming/Interrupt/Send/
-  **时间旅行 fork**）已落地（`04-problems/13`，415 全绿），**真并行**仍押后。
+  **时间旅行 fork**）已落地（`04-problems/13`）。**wfr 系列**跟进（arch 14）：命令行运行器
+  （按名执行 + `.wfr/` 目录）+ trigger 可选 + workflow import + 单 HTML 调试台（438 全绿）。
+  **真并行**仍押后。
 - **暂缓备选**：
-  - M10 剩余：真并行（包/队列已按可并行设计 + 需 barrier）、fork 的分叉点改写（update_state）、
+  - 运行时剩余：真并行（包/队列已按可并行设计 + 需 barrier）、fork 的分叉点改写（update_state）、
     Send × workflow IR、`c_model` 切流
+  - wfr 剩余：cron 常驻调度、调试台大图布局/体验增强
   - M9 开放点：动作级评测集、精确 tokenizer、Journal 持久层、`tool_search` 元工具
 - **继续入口**：读本文件「下一步」与「路线图 B1」；增量需求按对应层的 arch/详细设计追加。
 
