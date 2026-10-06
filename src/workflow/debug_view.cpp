@@ -117,7 +117,8 @@ svg text{font:12px system-ui}
 .n .t{stroke-width:0}.n .lbl{font:11px monospace}
 .n.active{stroke:var(--acc);stroke-width:2.5;filter:drop-shadow(0 0 3px #1a73e855)}
 .n.hit{stroke:#d93025;stroke-width:2.5}
-line{} .e{stroke:#666;stroke-width:1.3} .e.goto{stroke:#d93025;stroke-width:1.8} .e.term{stroke:#aaa}
+path.e{fill:none;stroke:#666;stroke-width:1.3} path.e.goto{fill:none;stroke:#d93025;stroke-width:1.8} path.e.term{fill:none;stroke:#aaa}
+.elabel{font:10px system-ui;fill:#999;pointer-events:none}
 .nodeitem{padding:2px 4px;cursor:pointer;border-radius:3px;white-space:nowrap;overflow:hidden}
 .nodeitem:hover,.nodeitem.on{background:var(--hl)}
 .gototab{margin-top:4px}
@@ -141,66 +142,80 @@ line{} .e{stroke:#666;stroke-width:1.3} .e.goto{stroke:#d93025;stroke-width:1.8}
 <script>
 const P = __DATA__;
 const G = P.graph, RUNS = P.runs;
-/* ---------- 布局：入口 BFS 分层（goto 回边不推层） ---------- */
-const layer = {};            // node id → 深度
-const pos = {};              // node id → {x,y}
+/* ---------- 布局 v2：BFS 分层 → 行排布；回边不推层；孤立节点单独末行 ---------- */
+const layer = {};
+const pos = {};
 const NODES = {}; G.nodes.forEach(n => NODES[n.id] = n);
+const NODE_W=138, NODE_H=48, GAP=20, LEVEL_Y=130;
+function kindColor(k){
+  if(k==='label') return '#f4f4f4';
+  if(k==='tool') return '#e7f4ff';
+  if(k==='expr') return '#fff5e0';
+  if(k==='goto') return '#ffecec';
+  if(k==='model') return '#eef0ff';
+  if(k==='route') return '#ecf9ec';
+  if(k==='run_tools') return '#f3edff';
+  return '#f7f7f7';
+}
 function layout(){
-  const first = G.nodes[0].id;         // 入口 = 展开后 nodes[0]
-  layer[first]=0;
-  let cur=[first];
-  while(cur.length){
-    const next=[];
-    for(const id of cur){
-      for(const e of G.edges.filter(x=>x.from===id && x.forward && !x.terminal)){
-        if(layer[e.to]===undefined){ layer[e.to]=layer[id]+1; next.push(e.to); }
-      }
-    } cur=next;
-  }
+  const first = G.nodes[0] && G.nodes[0].id; if(!first) return {w:400,h:200};
+  const indeg={}; G.nodes.forEach(n=>indeg[n.id]=0);
+  const froms={}; G.edges.forEach(e=>{ (froms[e.from]=froms[e.from]||[]).push(e); if(e.to in indeg) indeg[e.to]++; });
+  layer[first]=0; let cur=[first];
+  while(cur.length){ const nx=[];
+    for(const id of cur) for(const e of (froms[id]||[]))
+      if(e.forward && !e.terminal && layer[e.to]===undefined){ layer[e.to]=layer[id]+1; nx.push(e.to); }
+    cur=nx; }
+  // 孤立节点（无入边、非入口）→ 末尾新行，避免与入口挤
+  const isolated=G.nodes.map(n=>n.id).filter(id=>!(indeg[id]>0 || id===first));
+  if(isolated.length){ const base=Math.max(0,...Object.values(layer)); isolated.forEach(id=>layer[id]=base+1); }
   G.nodes.forEach(n=>{ if(layer[n.id]===undefined) layer[n.id]=0; });
-  // 分行排布
-  const rows={};
-  G.nodes.forEach(n=>{ const l=layer[n.id]; (rows[l]=rows[l]||[]).push(n.id); });
-  const W=220,H=78;
-  G.nodes.forEach(n=>{ const l=layer[n.id]; const r=rows[l].indexOf(n.id);
-    pos[n.id]={x:40+l*W, y:30+r*H}; });
+  const rows={}; G.nodes.forEach(n=>{ const l=layer[n.id]; (rows[l]=rows[l]||[]).push(n.id); });
+  let maxRow=0;
+  for(const arr of Object.values(rows)){ arr.sort(); maxRow=Math.max(maxRow,arr.length); }
+  for(const [l,arr] of Object.entries(rows)) arr.forEach((id,i)=>{ pos[id]={x:64+i*(NODE_W+GAP), y:44+Number(l)*LEVEL_Y}; });
+  const maxL=Math.max(0,...Object.values(layer));
+  return {w:72+maxRow*(NODE_W+GAP)+NODE_W, h:60+(maxL+1)*LEVEL_Y};
 }
-function textWidth(n){
-  const t=NODES[n].text||n; return Math.min(210, Math.max(90, 20+t.length*6.6));
-}
-/* ---------- SVG 绘制 ---------- */
+/* ---------- SVG 绘制 v2：贝塞尔边（同行微拱/跨行等差）+ 回边弧线 + 类型配色 ---------- */
 const svg=document.getElementById('canvas');
+const NS='http://www.w3.org/2000/svg';
+function el(t){ return document.createElementNS(NS,t); }
 function renderSVG(){
+  const size=layout();
   svg.innerHTML='';
-  const maxL=Math.max(1,...Object.values(layer)); const maxR=Math.max(1,...Object.values(pos).map(p=>p.y));
-  svg.setAttribute('width', 90+maxL*220); svg.setAttribute('height', maxR+110);
-  const arrow=document.createElementNS('http://www.w3.org/2000/svg','marker');
-  arrow.id='arr'; arrow.setAttribute('viewBox','0 0 10 10');
-  for(const [k,v] of Object.entries({refX:9,refY:5,markerWidth:7,markerHeight:7,orient:"auto-start-reverse"})) arrow.setAttribute(k,v);
+  svg.setAttribute('width',size.w); svg.setAttribute('height',size.h); svg.setAttribute('viewBox','0 0 '+size.w+' '+size.h);
+  const arrow=el('marker'); arrow.id='arr'; arrow.setAttribute('viewBox','0 0 10 10');
+  for(const [k,v] of Object.entries({refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'})) arrow.setAttribute(k,v);
   arrow.innerHTML='<path d="M0,0 L10,5 L0,10 z" fill="#666"/>';
   svg.appendChild(arrow);
   G.edges.forEach(e=>{
-    const p=pos[e.from], q=pos[e.to];
-    if(!p||!q) return;
-    const x1=p.x+textWidth(e.from), y1=p.y+20, x2=q.x+4, y2=q.y+20;
-    const cls=e.forward?(e.terminal?'e term':'e'):'e goto';
-    const l=document.createElementNS('http://www.w3.org/2000/svg','line');
-    l.setAttribute('x1',x1); l.setAttribute('y1',y1); l.setAttribute('x2',x2); l.setAttribute('y2',y2);
-    l.setAttribute('class',cls); l.setAttribute('marker-end','url(#arr)');
-    svg.appendChild(l);
+    const a=pos[e.from], b=pos[e.to]; if(!a||!b) return;
+    const x1=a.x+NODE_W, y1=a.y+NODE_H/2, x2=b.x, y2=b.y+NODE_H/2;
+    const cx=(x1+x2)/2;
+    const cy = !e.forward ? Math.min(a.y,b.y)-54
+          : (y1===y2 ? y1-40 : (y1+y2)/2);
+    const d='M'+x1+','+y1+' Q'+cx+','+cy+' '+x2+','+y2;
+    const p=el('path'); p.setAttribute('d',d);
+    p.setAttribute('class', e.forward ? (e.terminal?'e term':'e') : 'e goto');
+    p.setAttribute('marker-end','url(#arr)');
+    svg.appendChild(p);
+    if(e.label && e.label!=='next'){                 // 边标签（else / goto …）
+      const t=el('text'); t.setAttribute('x',cx); t.setAttribute('y',cy-8);
+      t.setAttribute('text-anchor','middle'); t.setAttribute('class','elabel');
+      t.textContent=e.label; svg.appendChild(t);
+    }
   });
   G.nodes.forEach(n=>{
-    const p=pos[n.id], w=textWidth(n.id);
-    const g=document.createElementNS('http://www.w3.org/2000/svg','g');
-    g.setAttribute('transform',`translate(${p.x},${p.y})`);
-    const rec=document.createElementNS('http://www.w3.org/2000/svg','rect');
-    rec.setAttribute('width',w); rec.setAttribute('height',40); rec.setAttribute('class','n');
-    rec.setAttribute('data-id',n.id);
-    const t1=document.createElementNS('http://www.w3.org/2000/svg','text');
-    t1.setAttribute('x',8); t1.setAttribute('y',16); t1.setAttribute('class','lbl');
-    t1.textContent=(NODES[n.id].kind||'node')+' · '+n.id;
-    const t2=document.createElementNS('http://www.w3.org/2000/svg','text');
-    t2.setAttribute('x',8); t2.setAttribute('y',34); t2.textContent=(NODES[n.id].text||'').slice(0,26);
+    const p=pos[n.id];
+    const g=el('g'); g.setAttribute('transform','translate('+p.x+','+p.y+')');
+    const rec=el('rect'); rec.setAttribute('width',NODE_W); rec.setAttribute('height',NODE_H);
+    rec.setAttribute('rx',7); rec.setAttribute('style','fill:'+kindColor(n.kind));
+    rec.setAttribute('class','n'); rec.setAttribute('data-id',n.id);
+    const t1=el('text'); t1.setAttribute('x',10); t1.setAttribute('y',18); t1.setAttribute('class','lbl');
+    t1.textContent=n.id;
+    const t2=el('text'); t2.setAttribute('x',10); t2.setAttribute('y',38);
+    t2.textContent=((n.kind||'')+' '+(NODES[n.id].text||'')).slice(0,26);
     g.appendChild(rec); g.appendChild(t1); g.appendChild(t2);
     g.addEventListener('click',()=>pickNode(n.id));
     svg.appendChild(g);
