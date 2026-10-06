@@ -72,7 +72,10 @@ gtest_discover_tests(state_tests)
 # ---- M6: Graph 引擎测试（含 M8 的 agent 适配器测试 → 需 graph_agent）----
 add_executable(graph_tests
   graph/graph_test.cpp
-  graph/agent_node_test.cpp)
+  graph/agent_node_test.cpp
+  graph/streaming_test.cpp
+  graph/interrupt_test.cpp
+  graph/send_test.cpp)
 
 target_link_libraries(graph_tests PRIVATE
   cppchain_graph_agent

@@ -2,10 +2,20 @@
 #include "cppchain/graph/graph.hpp"
 
 #include <algorithm>
+#include <deque>
 #include <string>
 #include <utility>
 
 namespace cppchain::graph {
+
+namespace {
+
+// 把待执行包队列转成供 Checkpointer::put 落盘的向量
+std::vector<state::Packet> to_packets(std::deque<state::Packet> const& q) {
+  return std::vector<state::Packet>(q.begin(), q.end());
+}
+
+}  // namespace
 
 StateGraph& StateGraph::add_node(std::string name, NodeFn fn) {
   if (nodes_.find(name) == nodes_.end()) order_.push_back(name);
@@ -70,71 +80,205 @@ std::expected<std::vector<std::string>, GraphError> CompiledGraph::next_nodes(
   return std::vector<std::string>{};  // 无出边 → 结束
 }
 
+// 引擎事件投递：分配 seq + 一律经 sink_（本次 invoke 注入）——为空即静默
+void CompiledGraph::emit(StreamEvent ev) {
+  ev.seq = ++last_seq_;
+  if (sink_) sink_(ev);
+}
+
+// 节点自报流式事件（模型 delta 等）。sink 空 / mode 无 Deltas / 无序列 → 静默。
+void NodeContext::emit(std::string_view type, Json payload) {
+  if (!sink || (mode & EventMode::Deltas) == EventMode::Off || !seq) return;
+  (*sink)(
+      StreamEvent{.type = std::string(type), .node = node_name, .step = step,
+                  .payload = std::move(payload), .ok = true, .status = "ok"});
+}
+
 std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
-                                                      std::string const& thread_id) {
+                                                      std::string const& thread_id,
+                                                      InvokeOptions opts) {
   last_steps_ = 0;
   last_checkpoint_ = "";
+  sink_ = std::move(opts.sink);
+  mode_ = opts.mode;
+  last_seq_ = 0;
+  last_interrupt_ = {};
+
+  // 收尾统一清理本次 invoke 的注入设施（不跨调用保留 sink）
+  auto finish = [this] {
+    sink_ = nullptr;
+    mode_ = EventMode::Off;
+  };
 
   Json state = input;
-  std::vector<std::string> current{entry_};
+  std::deque<state::Packet> current;
+  current.push_back(state::Packet{entry_});
   std::optional<std::string> parent;
+  bool resuming_interrupt = false;
+  std::string interrupt_node;
 
-  // 有快照 → 从最新快照恢复（状态 + 待跑节点），继续推进
+  // ① 恢复态：有快照 → 恢复到"该步边界继续"（input 被忽略）
   if (cp_ != nullptr && !thread_id.empty()) {
     if (auto snap = cp_->get_tuple(thread_id, "", std::nullopt); snap.has_value()) {
       state = snap->values;
-      current.clear();
-      for (auto const& p : snap->next)
-        current.push_back(p.node);  // P0 过渡：M10 前 next 均为"全局状态包"，先取回名字
+      current.assign(snap->next.begin(), snap->next.end());
       parent = snap->config.value("checkpoint_id", "");
-      if (current.empty()) return state;  // 上次已跑完
+      bool const interrupted = snap->metadata.value("interrupted", false);
+      if (interrupted) {
+        // 上次站在 interrupt 上：payload 从该 checkpoint 的 writes 重建
+        interrupt_node = snap->metadata.value("node", "");
+        Json payload = Json::object();
+        for (auto const& w : cp_->get_writes(thread_id, "", *parent))
+          if (w.channel == "interrupt") {
+            payload = w.value;
+            break;
+          }
+        last_interrupt_ = InterruptStatus{true, interrupt_node, std::move(payload)};
+        emit(StreamEvent{.type = "interrupt", .node = interrupt_node, .step = 0,
+                         .payload = last_interrupt_.payload, .ok = true, .status = "interrupt"});
+        if (!opts.resume) {   // 无答复：保持挂着，不动
+          finish();
+          return state;
+        }
+        resuming_interrupt = true;
+      } else {
+        if (opts.resume.has_value()) {
+          finish();
+          return std::unexpected(GraphError{GraphError::Kind::ResumeNotInterrupted,
+                                            "thread '" + thread_id +
+                                                "' 没有悬挂的中断，却收到了 resume 值"});
+        }
+        if (current.empty()) {  // 上次已跑完
+          finish();
+          return state;
+        }
+      }
     }
   }
 
+  // ② 执行态：包队列顺序推进（一个 super-step 产生的所有目标都在队列里）
   while (!current.empty()) {
-    if (last_steps_ >= opts_.max_steps)
+    if (last_steps_ >= opts_.max_steps) {
+      finish();
       return std::unexpected(GraphError{GraphError::Kind::RecursionLimit,
                                         "exceeded max_steps=" + std::to_string(opts_.max_steps)});
+    }
 
-    std::string const node = current.front();
+    state::Packet pkt = current.front();
+    current.pop_front();
+    std::string const node = std::move(pkt.node);
     if (node == kEnd) break;
 
     auto const it = nodes_.find(node);
-    if (it == nodes_.end())
+    if (it == nodes_.end()) {
+      finish();
       return std::unexpected(GraphError{GraphError::Kind::UnknownNode, "unknown node: " + node});
+    }
 
-    NodeContext ctx{node, thread_id, static_cast<int>(last_steps_)};
+    // 本包的输入视图：Send 包读自己的局部 state，普通包读全局 state
+    Json node_input = pkt.state.has_value() ? *pkt.state : state;
+
+    NodeContext ctx;
+    ctx.node_name = node;
+    ctx.thread_id = thread_id;
+    ctx.step = static_cast<int>(last_steps_);
+    ctx.sink = &sink_;
+    ctx.mode = mode_;
+    ctx.seq = &last_seq_;
+    if (resuming_interrupt && node == interrupt_node) ctx.pending_resume = opts.resume;
+
+    emit(StreamEvent{.type = "node_start", .node = node, .step = ctx.step,
+                     .payload = Json::object(), .ok = true, .status = "ok"});
+
     Command cmd;
     try {
-      cmd = it->second(state, ctx);
+      cmd = it->second(node_input, ctx);
+    } catch (InterruptSignal const& sig) {
+      // 悬挂需要 checkpoint 承载；无 cp / 无 thread_id 时 interrupt 不可用（对齐
+      // LangGraph "interrupt 需要 checkpointer"——否则挂起来没地方存、也没法恢复）
+      if (cp_ == nullptr || thread_id.empty()) {
+        finish();
+        return std::unexpected(
+            GraphError{GraphError::Kind::InterruptUnavailable,
+                       "interrupt() 需要 checkpointer 且 thread_id 非空（否则无法暂停/恢复）"});
+      }
+      // 首次悬挂：节点无 update 落盘 → 快照取节点入口的完整 state；
+      // next = 剩余包 + 重跑包（放最后，**保留本包的局部输入视图**）；payload 随 writes 落盘
+      last_interrupt_ = InterruptStatus{true, node, sig.payload()};
+      current.push_back(state::Packet{node, pkt.state});
+      Json meta = {{"step", last_steps_}, {"node", node}, {"interrupted", true}};
+      last_checkpoint_ = cp_->put(thread_id, "", parent, state, to_packets(current), meta);
+      cp_->put_writes(thread_id, "", last_checkpoint_,
+                      {state::WriteRecord{node, "interrupt", last_interrupt_.payload}});
+      parent = last_checkpoint_;
+      emit(StreamEvent{.type = "interrupt", .node = node, .step = ctx.step,
+                       .payload = last_interrupt_.payload, .ok = true, .status = "interrupt"});
+      finish();
+      return state;  // 以"挂着"返回完整 state；调用方用 last_interrupt() 区分
     } catch (std::exception const& e) {
+      emit(StreamEvent{.type = "node_end", .node = node, .step = ctx.step,
+                       .payload = Json{{"error", e.what()}}, .ok = false, .status = "error"});
+      finish();
       return std::unexpected(GraphError{GraphError::Kind::NodeError,
                                         "node '" + node + "' threw: " + e.what()});
     }
 
-    state = schema_.apply(state, cmd.update);  // 经 per-key reducer 归约
+    state = schema_.apply(state, cmd.update);  // 包结果经 per-key reducer 归约回主 state
+    emit(StreamEvent{.type = "node_end", .node = node, .step = ctx.step,
+                     .payload = cmd.update, .ok = true, .status = "ok"});
+    if ((mode_ & EventMode::Snapshot) != EventMode::Off)
+      emit(StreamEvent{.type = "values", .node = "", .step = ctx.step,
+                       .payload = state, .ok = true, .status = "ok"});
 
-    auto next = next_nodes(node, cmd, state);
-    if (!next) return std::unexpected(next.error());
+    // ③ 路由态：goto > sends > 静态边 > 条件边
+    // 语义：本包产出的目标**追加**到队尾 → 一个 super-step 产生的所有包都先跑完
+    //（同一批内 FIFO 顺序执行），而非替换掉尚未执行的剩余包。
+    std::vector<state::Packet> produced;
+    if (!cmd.goto_nodes.empty()) {
+      for (auto const& n : cmd.goto_nodes)
+        if (n != std::string(kEnd)) produced.emplace_back(n);  // goto 里的 END = 在此结束
+    } else if (!cmd.sends.empty()) {
+      for (auto const& s : cmd.sends) {
+        if (nodes_.find(s.node) == nodes_.end()) {
+          finish();
+          return std::unexpected(GraphError{GraphError::Kind::UnknownNode,
+                                            "send target unknown node: " + s.node});
+        }
+        produced.emplace_back(s.node, std::optional<Json>{s.state});
+      }
+    } else {
+      auto next = next_nodes(node, cmd, state);
+      if (!next) {
+        finish();
+        return std::unexpected(next.error());
+      }
+      // END 不是节点：先剔除，避免污染快照（恢复语义 = "待执行的节点"）
+      next->erase(std::remove(next->begin(), next->end(), std::string(kEnd)), next->end());
+      for (auto const& n : *next) produced.emplace_back(n);
+    }
+    for (auto& p : produced) current.push_back(std::move(p));
 
-    // END 不是节点：先从 next 里剔除，避免污染快照（恢复语义 = "待执行的节点"）
-    next->erase(std::remove(next->begin(), next->end(), std::string(kEnd)), next->end());
-
-    // 每步落一个快照：values + next（恢复语义 = 回到该步边界继续）
+    // 每步落一个快照：values + 剩余全部待执行包（恢复语义 = 回到该步边界继续）
     if (cp_ != nullptr && !thread_id.empty()) {
       Json meta = {{"step", last_steps_}, {"node", node}};
-      std::vector<state::Packet> pkts;  // M10 前 next 仍是节点名 → 等价于"全局状态包"
-      pkts.reserve(next->size());
-      for (auto const& n : *next) pkts.emplace_back(n);
-      last_checkpoint_ = cp_->put(thread_id, "", parent, state, pkts, meta);
+      last_checkpoint_ = cp_->put(thread_id, "", parent, state, to_packets(current), meta);
       parent = last_checkpoint_;
     }
 
-    current = *next;
     ++last_steps_;
   }
 
+  last_interrupt_ = {};  // 正常跑完：不再挂着（resume 已消费）
+  finish();
   return state;
+}
+
+// 便捷收集：跑一遍并把事件全收下来（供测试/demo 观察；唯一执行通道仍是 invoke）
+std::vector<StreamEvent> CompiledGraph::stream(Json const& input, std::string const& thread_id) {
+  std::vector<StreamEvent> out;
+  EventSink collector = [&out](StreamEvent const& e) { out.push_back(e); };
+  (void)invoke(input, thread_id, InvokeOptions{collector, EventMode::All, std::nullopt});
+  return out;
 }
 
 }  // namespace cppchain::graph
