@@ -1,6 +1,7 @@
 # M1 消息层测试（GTest，FetchContent 拉取）
 include(FetchContent)
 include(GoogleTest)
+set(INSTALL_GTEST OFF CACHE BOOL "不安装 googletest（发布只装 wfr 等正式产物）" FORCE)
 FetchContent_Declare(googletest
   GIT_REPOSITORY https://github.com/google/googletest
   GIT_TAG v1.15.2)

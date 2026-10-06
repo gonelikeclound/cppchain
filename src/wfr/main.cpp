@@ -71,10 +71,21 @@ std::string last_ai_text(Json const& state) {
 
 // 内置名（chat…）优先；否则路径/按名。
 // 返回 {kind: builtin|file, ir/路径} —— 现仅内置直接命中返回；文件走 resolve_workflow_path。
-// 发布自带的固定 workflow 目录（排在查找末尾）：WFR_WORKFLOWS_DIR 环境 或 编译期 share 路径。
+// 发布自带的固定 workflow 目录（排在查找末尾）：
+//   1) WFR_WORKFLOWS_DIR 环境
+//   2) 安装布局：<bin>/../share/wfr/workflows（从 /proc/self/exe 推断，搬到别处仍有效）
+//   3) 编译期宏（开发构建 = 源码 share/wfr/workflows）兜底
 std::vector<std::string> publish_workflow_dirs() {
   std::vector<std::string> out;
   if (char const* env = std::getenv("WFR_WORKFLOWS_DIR"); env && *env) out.push_back(env);
+  {
+    std::error_code ec;
+    auto const exe = std::filesystem::canonical("/proc/self/exe", ec);
+    if (!ec) {
+      std::filesystem::path const share = exe.parent_path().parent_path() / "share" / "wfr" / "workflows";
+      if (std::filesystem::is_directory(share, ec)) out.push_back(share.string());
+    }
+  }
   out.push_back(WFR_SHARE_WORKFLOWS_DIR);
   return out;
 }

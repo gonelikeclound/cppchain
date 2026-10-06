@@ -209,5 +209,6 @@ set_target_properties(wfr PROPERTIES
 
 # 发布：二进制 → <prefix>/bin；固定 workflow → <prefix>/share/wfr/workflows
 install(TARGETS wfr RUNTIME DESTINATION bin)
-install(DIRECTORY ${PROJECT_SOURCE_DIR}/share/wfr DESTINATION share/wfr
+# share/wfr/workflows/*.json（DESTINATION share → <prefix>/share/wfr/workflows）
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/share/wfr DESTINATION share
   FILES_MATCHING PATTERN "*.json")
