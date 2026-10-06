@@ -4,7 +4,7 @@
   "nodes": [
     { "id": "l0", "kind": "label" },
     { "id": "poll", "tool": "fetch_price",
-      "parameters": {"item_id": "@config.product_id"},
+      "parameters": {"item_id": "P1"},
       "output_schema": {"price": "number", "in_stock": "boolean"},
       "next": "ck" },
     { "id": "ck", "expr": "$poll.result.price < 500", "then": "n", "else": "gp" },

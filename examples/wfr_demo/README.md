@@ -13,7 +13,7 @@
 
 ```bash
 wfr list                        # 列出 workflow + trigger 形态（manual）
-wfr loop_wf --session s1 --reset --set product_id=P1 "检查价格"
+wfr loop_wf --session s1 --reset "检查价格"
 wfr debug loop_wf --all --open  # 可视化调试台（wfr-⑤）
 ```
 
@@ -21,3 +21,6 @@ wfr debug loop_wf --all --open  # 可视化调试台（wfr-⑤）
 `max:3` → 循环 3 次后 `_turn_end`。日志里能看到 `gp` 的 `loop_counts` 1..3 ——
 正是调试台「循环按 1,2,3.. 分组」的演示素材。改价走 then → 命中被 import 的
 `notify_wf__n`（send_notification 收到提醒），验证 import 边连通。
+
+（`item_id` 已内置为 `P1`，离线开箱可跑；`--set product_id=X` 可演示 @config 注入——
+想展示的话把 `poll.parameters` 改回 `"item_id": "@config.product_id"` 即可。）
