@@ -1,6 +1,6 @@
 # 14 · wfr 命令行工具与调试可视化（wfr 系列设计）
 
-> wfr 系列落地记录（wfr-①~⑤ 全部实现，写实文档）。
+> wfr 系列落地记录（wfr-①~㉕ 全部实现，写实文档）。
 > 定位：给 workflow 一个**发行级入口**（按名执行）与**可调试性**（单 HTML 调试台）。
 
 ## 1. 定位与边界
@@ -55,7 +55,28 @@
   父层可用子链**原始 id** 引用（自动映射到前缀最终 id）。
 - fail-closed：循环 import（路径链）拒、找不到报 searched 路径、重名拒、被引 wf 的
   动态库导入拒（v1）；被引 trigger 丢弃。loader 可注入（测试内存）。
-- 执行顺序：`read → load 动态库（顶层）→ expand_workflow_imports → parse → compile`。
+- **传参 `with`**（wfr-㉕）：`"with": { key: <字面量> | "@config.<父层键>" }`，把子链节点里
+  **整串恰为** `@config.<key>` 的字符串叶，在展开期折叠成字面量（常数化）或转写为父层
+  运行时配置引用；未绑定键原样保留。同一子 workflow 可被 import 多次、各带不同参数
+  实例化（靠 `as` 前缀区分命名空间）。
+- **子链徽标 `origin_wf`**（wfr-㉔）：被拉入节点的 `origin_wf` = 其**直属**子工作流名；
+  `as` 只改前缀不改归属；嵌套时仅标尚无徽标者（A→B→notify 的节点归 `notify_wf`，不归 B）
+  → 调试台/日志可按"子链"归组（见 §3.3）。
+- 执行顺序：`read → load 动态库（顶层）→ expand_workflow_imports（含 with 折叠 / origin_wf
+  打标）→ parse → compile`。
+
+### 3.3 组合分层（原语 → 参数化 import → 运行时组合）
+
+- 组合单元自小到大：
+  1. **原语节点**——`model` / `route` / `run_tools` / `expr` / `tool` / `label` / `goto` /
+     `load_history`（极小可组配单元；`wf.json` 把"聊天+工具"拆成 agent 循环即证）；
+  2. **workflow**——JSON 节点清单，`import` 把子 workflow **展开**进父（`as` 命名空间 +
+     `with` 参数化 + `origin_wf` 徽标）；
+  3. **运行时组合**——`Send`（M10 动态 fan-out 到子图）、agent 层 handoff/workers、
+     组件注册表（`model`/`toolset` 由宿主命名注入，`main`/`all` 即实例）。
+- **现状边界**：import 是**展开式**——编译期扁平成单 IR，子链无运行时子图边界/独立状态/
+  错误域，与父链同一命名空间（VN2 全图唯一）。
+- 待定缺口见 §6（显式入参接口、`with` 仅覆盖字符串叶、运行时子图边界）。
 
 ## 4. 调试可视化（`wfr debug`）
 
@@ -67,17 +88,24 @@ IR ──debug_view_graph──▶ {nodes, edges}       边=NodeType::edges()，
       build_debug_payload（>20k 裁节点诊断）→ render_debug_html → 自包含单 HTML
 ```
 
-- **HTML 结构**（纯 JS/SVG，零网络依赖）：入口 BFS 分层布局；节点矩形可点；
-  左栏 run 下拉 + 节点列表 + **循环分组 tab**（goto 1..max 迭代）；中栏图；右栏日志
-  （engine enter/exit/error/interrupt + 节点诊断，含 run/node/loop/update）。
-- **双向联动**：点节点 → 过滤右栏日志 + 高亮；点日志 → 自动切 run + 高亮节点 + 滚动。
-- 防注入：`script_data_escape`（`<`→`<` 等）；`html.ends_with("</html>")` 等测试锁。
+- **HTML 结构**（纯 JS/SVG，零网络依赖）：三栏可拖布局（左导航 | 中：图 + 节点 JSON 详情 |
+  右：树形日志）；分栏 pointer 拖拽 + localStorage 持久化；图里**内置节点**（`__input__` 置顶、
+  `_turn_end`/`_fail` 置底，虚线灰边）也一并绘出；图例在节点区底部。
+- **树形日志**（轮次→workflow→节点→记录）：run 去重键 = `会话名/run`（wfr-㉓ 起跑前用
+  `SessionLog::max_run_seq` 垫引擎计数 → 跨进程调用轮次不重号）；workflow 归属 =
+  节点 `origin_wf`（子链）→ 记录 `workflow` 徽标（父）→ 按节点在页内/「（其它）」推断；
+  节点行单行省略号截断；**选中日志**在右栏下半部 `#logdetail` 显示该条**美化 JSON**
+  （缩进 + key/字符串/数字/布尔语法高亮），再点取消。
+- **双向联动**：点图节点/导航 → 该节点记录全量日志中标 `.hit` + 图下方出节点完整 JSON 定义
+  （`def` = `NodeIR.raw`）+ 自动展开滚到分组；点日志行 → 对应节点被选中高亮 + `.sel`。
+- 防注入：`script_data_escape`（`<`→`\u003c` 等）；`html.ends_with("</html>")` 等测试锁。
 - 调试台展示**展开后**的扁平图（import 节点带前缀显形：demo 里 `notify_wf__n`）。
 
 ## 5. 验收
 
-- **全仓 438+ 测试全绿、clean-first 零告警**；新增项（wfr 相关单测）：
-  - ① `.wfr` 迁移路径断言；② 无 trigger parse/编译+fire；③ import 展开 8 项；⑤ debug_view 4 项。
+- **全仓 449 测试全绿、clean-first 零告警**；新增项（wfr 相关单测）：
+  - ① `.wfr` 迁移路径断言；② 无 trigger parse/编译+fire；③ import 展开 9 项
+    （含 with 传参、origin_wf 徽标、嵌套保留最深归属）；⑤ debug_view 4 项。
 - 手工端到端（`build/dev/bin/wfr`）：
   - `wfr list` → 内置 chat + `loop_wf / notify_wf`（trigger=manual）；
   - `wfr chat --session c1 "你好"` → 真机回复；`"我叫小明记住"` → 二次续聊记住名字
@@ -85,7 +113,10 @@ IR ──debug_view_graph──▶ {nodes, edges}       边=NodeType::edges()，
   - `wfr loop_wf --session s1 "检查"`（在 `examples/wfr_demo`，`item_id` 内置 P1）→ 退出 0、
     会话日志落 `.wfr/sessions/`、日志可见 `loop_counts{gp:1..3}`（goto `max:3` 循环）；
   - `wfr debug loop_wf --all` → `.wfr/debug/loop_wf.html`（图含 import 节点
-    `notify_wf__n`、gp 1..3 分组素材）。
+    `notify_wf__n`、gp 1..3 分组素材）；
+  - `wfr debug chat --open` → 新版三栏调试台（内置节点、轮次/workflow 树、
+    选中日志美化 JSON）；纯 tool 的离线 `paramcombo`（import 子链 + `with` 传参）
+    能跑通并能在调试台看到带 `origin_wf` 的子链分支。
 
 ## 6. 开放点
 
@@ -94,3 +125,9 @@ IR ──debug_view_graph──▶ {nodes, edges}       边=NodeType::edges()，
 3. `wfr debug` 布局对 50+ 节点图质量下降（第一版够用）；超大日志裁节点诊断保结构。
 4. 真定时调度（cron 常驻）不做；`checkpoints/` 预留（续跑走 `FireOptions.fork`）。
 5. HTML 每节点只显示简要文本与 update 截断；完整 diff 查看留作体验增强。
+6. import 是**展开式**：子链无运行时**子图边界**（独立状态/错误域/局部 checkpoint）——
+   "可组合单元"的边界属性未实现（候选：运行时子图节点，或 import 加实例上下文）。
+7. `with` 传参只覆盖**整串恰为** `@config.<key>` 的字符串叶（不折叠嵌在较长字符串中的
+   引用、不改数组/对象结构）；子链不声明参数契约，无入参/参数类型校验。
+8. 一个子 workflow 被 import 多实例靠 `as` 前缀区分命名空间，但运行时无**实例上下文**
+   （每实例的入参绑定校验、独立 run/日志域）——调试台目前的"子链归组"靠 `origin_wf` 徽标。
