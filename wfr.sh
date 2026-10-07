@@ -18,6 +18,9 @@
 #     否则 dev 版（需 source ~/opt/gcc16/env.sh，未构建时自动 cmake 配置+编译）。
 #   · import 按工作区的 .wfr/workflows 解析：demo workflow（loop_wf→notify_wf）带
 #     跨目录 sibling import，请在 examples/wfr_demo 下跑或 --workdir 指定其根目录。
+#   · wfr_demo 的 tool（fetch_price / send_notification）是 examples 演示假工具，未注册
+#     进 CLI（仅 datetime / calculator）——loop_wf / notify_wf 只能 debug 出图，不能真机跑
+#     （IR 校验 VN6 拒绝）；notify_wf 更是 loop_wf 的 import 子链，不可单独运行。真机用内置 chat。
 #   · cd 到仓库根运行：wfr 内置 dotenv 按 .env 相对路径加载，LLM 配置才找得到。
 #
 # 环境变量：WFR_BIN（指定二进制）、WFR_WS（默认工作区）、GCC16_ENV（工具链 env）。

@@ -233,7 +233,7 @@ function filtered(){
 function renderLog(){
   const box=document.getElementById('loglist');
   const R=filtered();
-  if(curRun<0){ box.textContent='↓ 下拉选择一个 run 查看日志'; return; }
+  if(curRun<0){ box.textContent=RUNS.length?'↓ 下拉选择一个 run 查看日志':'（无会话日志：先跑一轮 wfr <工作流名> 再重新 debug）'; return; }
   if(R.length===0){ box.textContent='（无记录）'; return; }
   box.innerHTML='';
   R.forEach((r,i)=>{
@@ -299,6 +299,7 @@ function renderGotoTabs(){
 const sel=document.getElementById('runSel');
 sel.addEventListener('change',()=>{ curRun=Number(sel.value); curNode='';curGoto='';curIt=''; renderLog(); renderNodeList(); renderGotoTabs(); });
 try {
+  if (RUNS.length) curRun = 0;   // 有日志则默认选中第一个 run：否则下拉「看起来已选」、实际 curRun=-1，点节点永远只出占位提示
   layout(); renderSVG(); renderRunSel(); renderNodeList(); renderGotoTabs(); renderLog();
   if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
 } catch (e) {
