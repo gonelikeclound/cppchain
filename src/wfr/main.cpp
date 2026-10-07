@@ -216,8 +216,17 @@ int main(int argc, char** argv) {
             !it->path().filename().string().ends_with(".log.jsonl"))
           continue;
         SessionLog slog(it->path().string());
-        auto rr = slog.records();
-        recs.insert(recs.end(), rr.begin(), rr.end());
+        // 每个会话的 run 都从 r-1 起编号 —— 跨会话会撞车：run 前缀「会话名」，轮次才不会并组
+        std::filesystem::path stem = it->path().filename();
+        stem.replace_extension("");
+        stem.replace_extension("");
+        std::string const sess = stem.string();
+        for (auto& r : slog.records()) {
+          r["session"] = sess;
+          std::string const run = r.value("run", "");
+          if (!run.empty() && run.find(sess + "/") != 0) r["run"] = sess + "/" + run;
+          recs.push_back(std::move(r));
+        }
       }
     } else {
       SessionLog slog(session_path(workdir, session_arg));
@@ -398,7 +407,7 @@ int main(int argc, char** argv) {
     std::filesystem::remove(slog_path, ec);
     std::println("已清空会话: {}", slog_path);
   }
-  SessionLog slog(slog_path);
+  SessionLog slog(slog_path, wf->ir_id);
   if (input.empty()) {
     std::println("（未给输入。加一句输入即续跑/聊一句；--reset 清空会话）");
     return 0;

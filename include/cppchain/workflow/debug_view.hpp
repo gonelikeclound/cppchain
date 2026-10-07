@@ -8,7 +8,7 @@
 //   debug_view_logs(records) — 日志 → 按 run 分组 + C++ 用 merge_slots 重放 loop_counts，
 //                              每条记录内嵌 `loop` 字段（无需前端归约）
 //   build_debug_payload     — {graph, ir, runs, trimmed_node_logs}；records 过大时裁 source=node
-//   render_debug_html       — 单 HTML（纯 JS/SVG：三栏可拖布局、树形日志 run→节点→记录、
+//   render_debug_html       — 单 HTML（纯 JS/SVG：三栏可拖布局、树形日志 轮次→workflow→节点、
 //                             选中节点 JSON 描述、选中日志下半区美化 JSON、点 node↔log 联动、
 //                             循环 1,2,3.. 分组）
 #pragma once

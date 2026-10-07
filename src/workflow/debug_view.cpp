@@ -167,6 +167,9 @@ details.run>summary:hover{background:var(--hl)}
 details.node{margin:2px 2px 2px 6px}
 details.node>summary{list-style:none;cursor:pointer;padding:3px 6px;font-weight:600;color:#333;border-radius:3px}
 details.node>summary:hover{background:var(--hl)}
+details.wf{margin:1px 2px 1px 10px}
+details.wf>summary{list-style:none;cursor:pointer;padding:2px 6px;font-weight:600;color:#444;border-radius:3px;font-size:12px}
+details.wf>summary:hover{background:var(--hl)}
 summary::before{content:'▸';display:inline-block;width:14px;color:#888}
 details[open]>summary::before{content:'▾'}
 .cnt{color:#999;font-weight:400}
@@ -222,6 +225,7 @@ const BUILTIN=[{id:'__input__',kind:'input',text:'输入'}]
   .concat(TERMS.map(t=>({id:t,kind:'end',text:'结束'})));
 BUILTIN.forEach(n=>{ NODES[n.id]=n; });
 const ALLNODES=G.nodes.concat(BUILTIN);
+const PAGEID=(P.ir&&P.ir.id)||'';   // 本页 workflow 名（记录无 workflow 徽标时的归属推断）
 /* ---------- 布局 v2：BFS 分层 → 行排布；回边不推层；孤立节点单独末行 ---------- */
 const layer = {};
 const pos = {};
@@ -368,33 +372,46 @@ function renderLog(){
   if(!RUNS.length){ box.textContent='（无会话日志：先跑一轮 wfr <工作流名> 再重新 debug）'; return; }
   let shown=0;
   RUNS.forEach(run=>{
-    const buckets={};
+    // 轮次(会话/run) → workflow → 节点 → 记录（workflow 来自记录徽标，缺失则按节点归属推断）
+    const wfs={};
     run.records.forEach(rc=>{
       if(curGoto&&curIt){ const v=rc.loop&&rc.loop[curGoto]; if(v===undefined||Number(v)!==curIt) return; }
-      const k=rc.node||'（引擎）'; (buckets[k]=buckets[k]||[]).push(rc);
+      const wf=rc.workflow||((!rc.node||NODES[rc.node])?PAGEID:'（其它）');
+      const bucket=(wfs[wf]=(wfs[wf]||{}));
+      const k=rc.node||'（引擎）';
+      (bucket[k]=(bucket[k]||[])).push(rc);
     });
     const rd=document.createElement('details'); rd.className='run'; rd.dataset.grp='r:'+run.run;
     if(open['r:'+run.run]!==undefined ? open['r:'+run.run] : true) rd.open=true;
     const rsum=document.createElement('summary');
     rd.appendChild(rsum);
     let disp=0, nNodes=0;
-    Object.keys(buckets).forEach(node=>{
-      const recs=buckets[node]; nNodes++; disp+=recs.length;
-      const nd=document.createElement('details'); nd.className='node'; nd.dataset.grp='n:'+node;
-      if(rd.open && (open['n:'+node]!==undefined ? open['n:'+node] : true)) nd.open=true;
-      const nsum=document.createElement('summary');
-      nsum.textContent=node+'（'+recs.length+' 条）';
-      nd.appendChild(nsum);
-      recs.forEach(r=>{
-        const row=document.createElement('div'); row.className='rec';
-        if(curNode && node===curNode) row.classList.add('hit');
-        if(curLog && curLog===recKey(r)) row.classList.add('sel');
-        row.dataset.node=r.node||''; row.dataset.seq=String(r.seq!==undefined?r.seq:'');
-        row.appendChild(recordRow(r));
-        row.addEventListener('click',()=>pickRecord(r));
-        nd.appendChild(row);
+    Object.keys(wfs).forEach(wf=>{
+      const nodesMap=wfs[wf];
+      const wd=document.createElement('details'); wd.className='wf'; wd.dataset.grp='wf:'+wf;
+      if(rd.open && (open['wf:'+wf]!==undefined ? open['wf:'+wf] : true)) wd.open=true;
+      const wsum=document.createElement('summary');
+      wsum.textContent=wf;
+      wd.appendChild(wsum);
+      Object.keys(nodesMap).forEach(node=>{
+        const recs=nodesMap[node]; nNodes++; disp+=recs.length;
+        const nd=document.createElement('details'); nd.className='node'; nd.dataset.grp='n:'+node;
+        if(wd.open && (open['n:'+node]!==undefined ? open['n:'+node] : true)) nd.open=true;
+        const nsum=document.createElement('summary');
+        nsum.textContent=node+'（'+recs.length+' 条）';
+        nd.appendChild(nsum);
+        recs.forEach(r=>{
+          const row=document.createElement('div'); row.className='rec';
+          if(curNode && node===curNode) row.classList.add('hit');
+          if(curLog && curLog===recKey(r)) row.classList.add('sel');
+          row.dataset.node=r.node||''; row.dataset.seq=String(r.seq!==undefined?r.seq:'');
+          row.appendChild(recordRow(r));
+          row.addEventListener('click',()=>pickRecord(r));
+          nd.appendChild(row);
+        });
+        wd.appendChild(nd);
       });
-      rd.appendChild(nd);
+      rd.appendChild(wd);
     });
     if(nNodes===0) return;                       // 本 run 被过滤空 → 不显示
     rsum.innerHTML=esc(run.run)+' <span class="cnt">（'+disp+' 条 · '+nNodes+' 节点）</span>';

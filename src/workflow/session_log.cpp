@@ -95,7 +95,8 @@ std::string session_path(std::string const& workspace, std::string const& sessio
   return (root / "sessions" / (name + ".log.jsonl")).string();
 }
 
-SessionLog::SessionLog(std::string path) : path_(std::move(path)) {
+SessionLog::SessionLog(std::string path, std::string workflow_meta)
+    : path_(std::move(path)), workflow_(std::move(workflow_meta)) {
   // 1) 父目录（.wfr 根与 .gitignore 已由 session_path 保证；这里兜底直接构造的场景）
   if (auto const parent = std::filesystem::path(path_).parent_path(); !parent.empty()) {
     std::error_code ec;
@@ -152,6 +153,7 @@ SessionLog::~SessionLog() {
 void SessionLog::write(Json rec) {
   std::lock_guard<std::mutex> lk(mu_);  // 同锁内：seq 分配 + 写盘 → 文件顺序 == seq 顺序
   if (!out_) throw std::runtime_error("session log: 未打开 " + path_);
+  if (!workflow_.empty()) rec["workflow"] = workflow_;
   rec["seq"] = ++seq_;
   rec["ts"] = now_iso();
   out_ << rec.dump() << '\n';

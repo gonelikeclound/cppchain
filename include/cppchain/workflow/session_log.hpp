@@ -50,7 +50,9 @@ struct NodeLog {
 // 构造失败（目录不可写等）抛异常 —— fail-closed，不静默丢会话。
 class SessionLog : public NodeLog {
  public:
-  explicit SessionLog(std::string path);
+  // workflow_meta：非空时每条记录带上 `workflow`（本轮所属 workflow 名），
+  // 供 wfr debug 按 workflow 分组/过滤；留空则与旧版完全一致（测试/宿主不受影响）。
+  explicit SessionLog(std::string path, std::string workflow_meta = {});
   ~SessionLog() override;
   SessionLog(SessionLog const&) = delete;
   SessionLog& operator=(SessionLog const&) = delete;
@@ -89,6 +91,7 @@ class SessionLog : public NodeLog {
   void write(nlohmann::json rec);
 
   std::string path_;
+  std::string workflow_;  // 每条记录附带 workflow 元数据（可空）
   std::ofstream out_;      // 追加句柄；records() 走独立只读路径（不互相影响）
   std::uint64_t seq_ = 0;  // 在 mu_ 内：seq = ++seq_ 后立即写盘 → 文件内顺序 == seq 顺序
   std::mutex mu_;
