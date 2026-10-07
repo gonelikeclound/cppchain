@@ -93,6 +93,33 @@ TEST(ImportWorkflow, as_prefix_overrides_default) {
   EXPECT_EQ(main["nodes"][2]["id"], "reminder__n");
 }
 
+TEST(ImportWorkflow, with_binds_config_args) {
+  Json sub; sub["id"] = "cfgwf";
+  Json params; params["item_id"] = "@config.item"; params["pid"] = "@config.pid";
+  params["tag"] = "@config.tag";
+  Json pick; pick["id"] = "pick"; pick["tool"] = "fetch_price";
+  pick["parameters"] = params; pick["next"] = "_turn_end";
+  sub["nodes"] = Json::array(); sub["nodes"].push_back(pick);
+  Json with; with["item"] = "P9"; with["pid"] = "@config.root_pid";
+  Json imp; imp["workflow"] = "cfgwf"; imp["with"] = with;
+  Json main; main["id"] = "m"; main["import"] = imp;
+  main["nodes"] = Json::array();
+  Json e; e["id"] = "e"; e["expr"] = "1==1"; e["then"] = "cfgwf__pick"; e["else"] = "_turn_end";
+  main["nodes"].push_back(e);
+  auto loader = mem_loader({{"cfgwf", sub}});
+  ASSERT_TRUE(expand_workflow_imports(main, ".", loader));
+  ASSERT_EQ(main["nodes"].size(), 2u);
+  Json const& pick2 = main["nodes"][1];
+  EXPECT_EQ(pick2["id"], "cfgwf__pick");
+  // with 传参：@config.<键> 折叠成字面量 / 转发成 @config.<父层键>
+  EXPECT_EQ(pick2["parameters"]["item_id"], "P9");
+  EXPECT_EQ(pick2["parameters"]["pid"], "@config.root_pid");
+  // 未绑定的键原样保留
+  EXPECT_EQ(pick2["parameters"]["tag"], "@config.tag");
+  // 父层 own 节点不受影响
+  EXPECT_EQ(main["nodes"][0]["expr"], "1==1");
+}
+
 TEST(ImportWorkflow, nested_two_levels) {
   Json b = notify_wf_json();
   b["nodes"] = Json::array();  // 纯组合：b 无 own 节点，全由 import 提供

@@ -112,6 +112,25 @@ void rewrite_node(Json& node, RenameMap const& rn) {
   }
 }
 
+// import `with` 传参（见 import.hpp）：把**整串恰为** `@config.<键>` 的字符串叶，
+// 按 with 换成字面量值，或转写为 `@config.<父层键>`（值本身也是 @config 引用时）。
+void bind_import_config(Json& node, Json const& with) {
+  if (node.is_string()) {
+    std::string const cur = node.get<std::string>();
+    if (cur.size() > 8 && cur.rfind("@config.", 0) == 0) {
+      if (auto const it = with.find(cur.substr(8)); it != with.end()) node = it.value();
+    }
+    return;
+  }
+  if (node.is_array()) {
+    for (Json& e : node) bind_import_config(e, with);
+    return;
+  }
+  if (node.is_object()) {
+    for (auto it = node.begin(); it != node.end(); ++it) bind_import_config(it.value(), with);
+  }
+}
+
 // 给一棵子树整体加一层前缀：id 与子树内引用全部 `pfx__`，rename 值也跟随。
 struct Prefixed {
   Json nodes = Json::array();
@@ -172,8 +191,14 @@ std::expected<Expanded, std::string> expand(
     std::vector<Json> chunks;
     for (Json const& entry : entries) {
       if (!entry.is_object() || !entry.contains("workflow") || !entry["workflow"].is_string())
-        return err("import 条目必须是 {workflow: \"<name-or-path>\", as?: \"<前缀>\"}");
+        return err("import 条目必须是 {workflow: \"<name-or-path>\", as?: \"<前缀>\", with?: {...}}");
       std::string const spec = entry["workflow"].get<std::string>();
+      Json with = Json::object();
+      if (entry.contains("with")) {
+        if (!entry["with"].is_object())
+          return err("import 'with' 必须是对象 { <config键>: <字面量|@config.<父层键>> }");
+        with = entry["with"];
+      }
 
       Json raw;
       std::string rerr;
@@ -219,6 +244,10 @@ std::expected<Expanded, std::string> expand(
         for (Json& n : pr.nodes)
           if (n.is_object() && !n.contains("origin_wf")) n["origin_wf"] = origin;
       }
+      // with 传参（展开期特化）：把整棵子链（含更深的 import 节点）的 @config.<键> 折叠/转发
+      if (!with.empty())
+        for (Json& n : pr.nodes)
+          if (n.is_object()) bind_import_config(n, with);
       for (auto const& [k, v] : pr.renames) {
         if (auto const dup = merged.find(k); dup != merged.end() && dup->second != v)
           return err("import 节点重名 '" + k + "'（两个来源都叫这个名字）");

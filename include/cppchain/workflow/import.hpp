@@ -4,8 +4,13 @@
 //   引擎（validator VG/VN/VR、compiler label 续接与 resolve）零改动——展开后是单 IR。
 //
 // 顶层键（避开现 `imports` 动态库数组）：
-//   "import": { "workflow": "<name-or-path>", "as": "<可选前缀，默认被引 workflow 的 id>" }
+//   "import": { "workflow": "<name-or-path>", "as": "<可选前缀，默认被引 workflow 的 id>",
+//               "with": { "<config键>": <字面量|"@config.<父层键>"> } }   # 可选：传参给子链
 //   "import": [ {...}, {...} ]          # 或数组；顺序即拼接顺序
+//
+// with 语义：把被 import 子链节点里**整串恰为** `@config.<键>` 的字符串叶，
+// 在展开期折叠成字面量（值），或转成 `@config.<父层键>`（借用父层运行时配置）。
+// 于是同一个子 workflow 可被 import 多次、各带不同参数实例化。
 //
 // 约定：
 //   · 被引 workflow 的 trigger 丢弃（子链无调度语义）；其自身 import（嵌套）递归展开；
