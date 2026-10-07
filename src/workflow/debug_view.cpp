@@ -136,6 +136,7 @@ svg text{font:12px system-ui}
 .n.kind-route{fill:#d9f2dc;stroke:#188038}
 .n.kind-run_tools{fill:#cdeee7;stroke:#0d7a6f}
 .n.kind-load_history{fill:#e2e3fb;stroke:#5b6ee1}
+.n.kind-echo{fill:#fde7d9;stroke:#f9672a}
 .n.kind-input,.n.kind-end{stroke-dasharray:5 3}
 .n.active{stroke:var(--acc);stroke-width:2.5;filter:drop-shadow(0 0 3px #1a73e833)}
 .n.hit{stroke:#d93025;stroke-width:2.5}
@@ -160,7 +161,8 @@ path.e.term{fill:none;stroke:#b0b3b8;stroke-width:1.2;stroke-dasharray:5 4}
 .small{color:#888;font:11px}
 /* ---- 日志树：run 轮 → 节点 → 记录 ---- */
 #loglist{flex:1 1 auto;overflow:auto;margin-top:4px;min-height:0}
-#logdetail{flex:0 1 42%;min-height:110px;margin-top:8px;display:flex;flex-direction:column;border-top:1px solid var(--e);padding-top:6px}
+#sh2{flex:none;height:6px;border-top:1px solid var(--e);margin-top:6px;cursor:row-resize}
+#logdetail{flex:none;height:200px;margin-top:0;display:flex;flex-direction:column;border-top:1px solid var(--e);padding-top:6px;min-height:0}
 details.run{background:#fff;border:1px solid var(--e);border-radius:5px;margin:6px 0;overflow:hidden}
 details.run>summary{list-style:none;cursor:pointer;padding:5px 8px;background:#f4f6f9;font-weight:600}
 details.run>summary:hover{background:var(--hl)}
@@ -198,6 +200,9 @@ details.node>.rec:first-of-type{border-top:none}
 <aside id="nav">
 <h1>__IR_ID__</h1>
 <div id="trim" class="small" style="display:none">⚠ 记录过多，已裁掉节点诊断</div>
+<h2>会话 / 轮次（日志区只显示所选 run）</h2>
+<select id="sessSel"></select>
+<select id="runSel"></select>
 <h2>节点（导航）</h2><div id="nodelist"></div>
 <h2>循环分组</h2><div id="gototabs"></div>
 </aside>
@@ -213,6 +218,7 @@ details.node>.rec:first-of-type{border-top:none}
 </div>
 <div id="sv2" class="split" title="拖动调整右栏宽度"></div>
 <section id="log"><h1>日志</h1><div id="loglist" class="small"></div>
+  <div id="sh2" title="拖动调整日志详情高度"></div>
   <div id="logdetail"><div id="ldhead"></div><div id="ldbody"></div></div>
 </section>
 <script>
@@ -235,7 +241,8 @@ const KIND_COLORS={
   expr:{f:'#fdeccb',s:'#f9ab00'}, goto:{f:'#fbdcd9',s:'#d93025'},
   model:{f:'#e8e0f4',s:'#7620bb'}, route:{f:'#d9f2dc',s:'#188038'},
   run_tools:{f:'#cdeee7',s:'#0d7a6f'}, load_history:{f:'#e2e3fb',s:'#5b6ee1'},
-  input:{f:'#e7e9ec',s:'#5f6368'}, end:{f:'#f0f0f0',s:'#3c4043'}
+  input:{f:'#e7e9ec',s:'#5f6368'}, end:{f:'#f0f0f0',s:'#3c4043'},
+  echo:{f:'#fde7d9',s:'#f9672a'}
 };
 function kindColor(k){ return KIND_COLORS[k]||{f:'#f1f3f4',s:'#9aa0a6'}; }
 function renderLegend(){
@@ -328,8 +335,15 @@ function renderSVG(){
       const dx=cb.x-ca.x, dy=cb.y-ca.y;
       const s=boxEdge(ca.x,ca.y,dx,dy), t=boxEdge(cb.x,cb.y,-dx,-dy);
       const my=(ca.y+cb.y)/2, mx=(s.x+t.x)/2;
-      d='M'+s.x+','+s.y+' C'+s.x+','+my+' '+t.x+','+my+' '+t.x+','+t.y;
-      lx=mx; ly=my-(dy>0?8:12);
+      if (dy < 0) {
+        // 回边（向上）→ 绕到左侧弧线：不沿主线列走，避免与同列的竖直前向边完全重叠
+        const bx = Math.min(s.x, t.x) - NODE_W * 0.55 - 4;
+        d='M'+s.x+','+s.y+' C'+bx+','+(my-32)+' '+bx+','+(my+32)+' '+t.x+','+t.y;
+        lx=bx; ly=my-12;
+      } else {
+        d='M'+s.x+','+s.y+' C'+s.x+','+my+' '+t.x+','+my+' '+t.x+','+t.y;
+        lx=mx; ly=my-8;
+      }
     }
     const cls=e.forward ? (e.terminal?'e term':'e') : 'e goto';
     const p=el('path'); p.setAttribute('d',d); p.setAttribute('class',cls);
@@ -363,7 +377,8 @@ RUNS.forEach(run=>run.records.forEach(rc=>{
   const k = rc.node || '（引擎）'; countByNode[k] = (countByNode[k]||0) + 1;
 }));
 /* ---------- 状态 ---------- */
-let curNode='', curGoto='', curIt='', curLog='';   // curLog = 当前选中 json 记录（去重键）
+let curNode='', curGoto='', curIt='', curLog='';
+let curRunIdx = RUNS.length ? 0 : -1;   // 选中轮次（会话/run）→ 日志区只显示这一轮
 /* ---------- 日志树：run 轮 → 节点 → 记录（可开合，记录间分割线）---------- */
 function renderLog(){
   const box=document.getElementById('loglist');
@@ -371,7 +386,8 @@ function renderLog(){
   box.innerHTML='';
   if(!RUNS.length){ box.textContent='（无会话日志：先跑一轮 wfr <工作流名> 再重新 debug）'; return; }
   let shown=0;
-  RUNS.forEach(run=>{
+  RUNS.forEach((run,i)=>{
+    if(curRunIdx>=0 && i!==curRunIdx) return;   // 只渲染选中会话下的选中 run（轮次）
     // 轮次(会话/run) → workflow → 节点 → 记录（workflow 来自记录徽标，缺失则按节点归属推断）
     const wfs={};
     run.records.forEach(rc=>{
@@ -534,7 +550,9 @@ function renderGotoTabs(){
     const wrap=document.createElement('div'); wrap.className='gototab';
     const cap=document.createElement('div'); cap.textContent='↺ '+g;
     wrap.appendChild(cap);
-    const its=[...new Set(RUNS.flatMap(r=>r.records).map(r=>r.loop&&r.loop[g]).filter(v=>v&&!isNaN(v)))].sort((a,b)=>a-b);
+    const selRecs = (curRunIdx>=0 && RUNS[curRunIdx]) ? RUNS[curRunIdx].records
+                  : RUNS.flatMap(r=>r.records);   // 循环分组只看选中轮次
+    const its=[...new Set(selRecs.map(r=>r.loop&&r.loop[g]).filter(v=>v&&!isNaN(v)))].sort((a,b)=>a-b);
     (its.length?its:[1]).forEach(it=>{
       const b=document.createElement('button'); b.className='loopit'; b.textContent=it;
       if(curGoto===g&&String(curIt)===String(it)) b.classList.add('on');
@@ -544,12 +562,48 @@ function renderGotoTabs(){
     box.appendChild(wrap);
   });
 }
+/* ---------- 会话 / 轮次选择器（左栏）：session → run ---------- */
+const SESS = {};
+RUNS.forEach((r,i)=>{ const p=(r.run.split('/')[0])||r.run; (SESS[p]=SESS[p]||[]).push(i); });
+function renderRunSelectors(){
+  const ss=document.getElementById('sessSel'), rs=document.getElementById('runSel');
+  const sessions=Object.keys(SESS);
+  if(!sessions.length) return;
+  const curRunLabel = (curRunIdx>=0 && RUNS[curRunIdx]) ? RUNS[curRunIdx].run : '';
+  const curSess = curRunLabel.split('/')[0];
+  const activeSess = (curSess && SESS[curSess]) ? curSess : sessions[0];
+  ss.innerHTML='';
+  sessions.forEach(p=>{
+    const o=document.createElement('option'); o.value=p;
+    o.textContent = p + (SESS[p].length>1 ? '（'+SESS[p].length+' 轮）' : '');
+    if(p===activeSess) o.selected=true; ss.appendChild(o);
+  });
+  const runs=(SESS[activeSess]||[]);
+  if(!runs.includes(curRunIdx)) curRunIdx = runs.length? runs[0] : -1;
+  rs.innerHTML='';
+  runs.forEach(idx=>{
+    const o=document.createElement('option'); o.value=String(idx);
+    o.textContent=RUNS[idx].run.split('/')[1]||RUNS[idx].run;
+    if(idx===curRunIdx) o.selected=true; rs.appendChild(o);
+  });
+}
+function bindRunSelectors(){
+  const ss=document.getElementById('sessSel'), rs=document.getElementById('runSel');
+  ss.addEventListener('change',()=>{
+    const runs=(SESS[ss.value]||[]); curRunIdx = runs.length? runs[0] : -1;
+    renderRunSelectors(); renderLog(); renderGotoTabs();
+  });
+  rs.addEventListener('change',()=>{
+    curRunIdx=Number(rs.value); renderLog(); renderGotoTabs();
+  });
+}
 /* ---------- 分栏拖动 + 尺寸持久化（localStorage 尽力而为）---------- */
 function loadSizes(){ try{ return JSON.parse(localStorage.getItem('wfr_dbg_size'))||{}; }catch(e){ return {}; } }
 function saveSizes(){ try{ localStorage.setItem('wfr_dbg_size',
   JSON.stringify({wnav:document.documentElement.style.getPropertyValue('--wnav'),
                  wlog:document.documentElement.style.getPropertyValue('--wlog'),
-                 dh:document.getElementById('detail').style.height})); }catch(e){} }
+                 dh:document.getElementById('detail').style.height,
+                 dh2:document.getElementById('logdetail').style.height})); }catch(e){} }
 function bindSplitter(bar, axis, get, set, min, max, dir){
   dir = (dir===undefined)?1:dir;   // dir=-1：该分割条锚定在拖动方向的反侧（右/下锚定）
   bar.addEventListener('pointerdown',e=>{
@@ -573,16 +627,20 @@ function initSplitters(){
   if(sizes.wnav) document.documentElement.style.setProperty('--wnav',sizes.wnav);
   if(sizes.wlog) document.documentElement.style.setProperty('--wlog',sizes.wlog);
   const dt=document.getElementById('detail'); if(sizes.dh&&parseFloat(sizes.dh)>0) dt.style.height=sizes.dh;
+  const dt2=document.getElementById('logdetail'); if(sizes.dh2&&parseFloat(sizes.dh2)>0) dt2.style.height=sizes.dh2;
   bindSplitter(document.getElementById('sv1'),'v',()=>gv('--wnav'),
     v=>document.documentElement.style.setProperty('--wnav',Math.round(v)+'px'),160,380,1);
   bindSplitter(document.getElementById('sv2'),'v',()=>gv('--wlog'),
     v=>document.documentElement.style.setProperty('--wlog',Math.round(v)+'px'),300,640,-1);   // 右锚定→反向
   bindSplitter(document.getElementById('sh'),'h',()=>dt.offsetHeight,
     v=>dt.style.height=Math.round(v)+'px',96,0,-1);   // 底锚定→反向
+  bindSplitter(document.getElementById('sh2'),'h',()=>dt2.offsetHeight,
+    v=>dt2.style.height=Math.round(v)+'px',80,0,-1);   // 日志详情区（日志栏内）→ 底锚定反向
 }
 /* ---------- 启动 ---------- */
 try {
-  layout(); renderSVG(); renderLegend(); renderNodeList(); renderGotoTabs(); renderLog(); renderDetail(''); renderLogDetail(null);
+  layout(); renderSVG(); renderLegend(); renderRunSelectors(); bindRunSelectors();
+  renderNodeList(); renderGotoTabs(); renderLog(); renderDetail(''); renderLogDetail(null);
   if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
   initSplitters();
 } catch (e) {
