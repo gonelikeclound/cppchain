@@ -408,6 +408,7 @@ int main(int argc, char** argv) {
     std::println("已清空会话: {}", slog_path);
   }
   SessionLog slog(slog_path, wf->ir_id);
+  seed_run_seq(slog.max_run_seq());   // 跨进程续编号：本轮 run = 该会话已有最大 + 1（轮次不重号）
   if (input.empty()) {
     std::println("（未给输入。加一句输入即续跑/聊一句；--reset 清空会话）");
     return 0;

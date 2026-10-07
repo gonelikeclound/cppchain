@@ -126,7 +126,8 @@ SessionLog::SessionLog(std::string path, std::string workflow_meta)
     }
   }
 
-  // 3) seq 从已有记录继续（跨进程续写同一会话）
+  // 3) seq 从已有记录继续（跨进程续写同一会话）；并记下已有的最大 run 编号
+  //   （"r-N" 的 N）—— CLI 每次起跑前把引擎 run 计数垫到该值，跨调用的轮次才不重号
   {
     std::istringstream in(content);
     std::string line;
@@ -136,6 +137,15 @@ SessionLog::SessionLog(std::string path, std::string workflow_meta)
         Json j = Json::parse(line);
         if (j.is_object() && j.contains("seq") && j["seq"].is_number_unsigned())
           seq_ = std::max(seq_, j["seq"].get<std::uint64_t>());
+        if (j.is_object() && j.contains("run") && j["run"].is_string()) {
+          std::string const r = j["run"].get<std::string>();
+          if (r.size() >= 2 && r[0] == 'r' && r[1] == '-') {
+            try {
+              max_run_ = std::max(max_run_, static_cast<std::int64_t>(std::stoll(r.substr(2))));
+            } catch (std::exception const&) {
+            }
+          }
+        }
       } catch (std::exception const&) {
       }
     }

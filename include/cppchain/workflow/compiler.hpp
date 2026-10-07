@@ -30,6 +30,11 @@ namespace cppchain::workflow {
 
 using Json = nlohmann::json;
 
+// 垫高进程内 run 计数（引擎内部 g_run_seq）。宿主在**跨进程续写同一会话**
+//（如每次 CLI 调用）时，起跑前把基数设为 SessionLog::max_run_seq()
+// —— 引擎 `++g_run_seq` 后即得到该会话下一个不重复的轮次号（r-N）。
+void seed_run_seq(std::int64_t base);
+
 struct WorkflowError {
   enum class Kind { Invalid, Compile, Runtime };
   Kind kind = Kind::Compile;

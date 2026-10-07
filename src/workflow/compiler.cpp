@@ -105,6 +105,12 @@ constexpr char kFailTarget[] = "__fail__";
 
 }  // namespace
 
+// 垫高进程内 run 计数（跨进程续写同一会话时由宿主调用，
+// 见 session_log 的 max_run_seq 说明）。定义在匿名命名空间之外 → 导出符号。
+void seed_run_seq(std::int64_t base) {
+  g_run_seq.store(base, std::memory_order_relaxed);
+}
+
 std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     WorkflowIR const& ir, tool::ToolRegistry const& registry, state::Checkpointer* cp,
     CompileOptions opts) {

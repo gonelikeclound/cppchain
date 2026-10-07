@@ -86,12 +86,16 @@ class SessionLog : public NodeLog {
 
   [[nodiscard]] std::string const& path() const { return path_; }
   [[nodiscard]] std::size_t truncated_lines() const { return truncated_; }
+  // 本会话文件里已出现的最大 run 编号（"r-N" 的 N，无则 0）。
+  // 宿主（wfr CLI）每次起跑前把引擎 run 计数垫到该值 —— 跨进程调用的轮次编号不重复。
+  [[nodiscard]] std::int64_t max_run_seq() const { return max_run_; }
 
  private:
   void write(nlohmann::json rec);
 
   std::string path_;
   std::string workflow_;  // 每条记录附带 workflow 元数据（可空）
+  std::int64_t max_run_ = 0;  // 会话已有最大 run 编号（跨进程续跑用）
   std::ofstream out_;      // 追加句柄；records() 走独立只读路径（不互相影响）
   std::uint64_t seq_ = 0;  // 在 mu_ 内：seq = ++seq_ 后立即写盘 → 文件内顺序 == seq 顺序
   std::mutex mu_;
