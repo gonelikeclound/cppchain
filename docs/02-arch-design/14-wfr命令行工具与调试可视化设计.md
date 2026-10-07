@@ -69,7 +69,9 @@
 
 - 组合单元自小到大：
   1. **原语节点**——`model` / `route` / `run_tools` / `expr` / `tool` / `label` / `goto` /
-     `load_history`（极小可组配单元；`wf.json` 把"聊天+工具"拆成 agent 循环即证）；
+     `load_history` / `echo`（极小可组配单元；`wf.json` 把"聊天+工具"拆成 agent 循环即证；
+     `echo` 为回显节点：`text` 模板（`$节点.result.字段` / `@config.*`）解析后打印到终端
+     并落一条节点诊断，不改 state；model/run_tools 发布可引用 result 供 echo 引用）；
   2. **workflow**——JSON 节点清单，`import` 把子 workflow **展开**进父（`as` 命名空间 +
      `with` 参数化 + `origin_wf` 徽标）；
   3. **运行时组合**——`Send`（M10 动态 fan-out 到子图）、agent 层 handoff/workers、

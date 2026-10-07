@@ -16,10 +16,13 @@
 // 1 fire 运行时错误。
 #include <cppchain/http/curl_multi_transport.hpp>
 #include <cppchain/message/serializer.hpp>  // Message ↔ JSON
+#include <cppchain/message/utf8.hpp>        // 答案打印前净化断字节
 #include <cppchain/model/openai/openai_chat_model.hpp>
 #include <cppchain/tool/calculator.hpp>
 #include <cppchain/tool/datetime.hpp>
 #include <cppchain/tool/registry.hpp>
+#include <cppchain/tool/weather.hpp>
+#include <cppchain/tool/web_search.hpp>
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/components.hpp>
 #include <cppchain/workflow/debug_view.hpp>
@@ -46,6 +49,8 @@ using namespace cppchain;
 using namespace cppchain::workflow;
 using cppchain::tool::make_calculator_tool;
 using cppchain::tool::make_datetime_tool;
+using cppchain::tool::make_weather_tool;
+using cppchain::tool::make_web_search_tool;
 using cppchain::wfr::ca_bundle_from_env;
 using cppchain::wfr::env_or;
 using cppchain::wfr::load_dotenv;
@@ -358,19 +363,27 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  // ---- 组件：内置宿主工具（datetime / calculator）+ 真实模型（仅含 model 节点时需要 key）----
+  // ---- 组件：内置宿主工具（datetime / calculator / weather / web_search）+ 真实模型 ----
+  auto dotenv = load_dotenv({".env", "../.env", "../../.env"});
+  // transport 供工具与模型共用（天气/网络搜索/LLM 都走它；纯离线 workflow 无副作用）
+  auto transport = std::make_shared<http::CurlMultiTransport>();
   tool::ToolRegistry registry;
   registry.add(make_datetime_tool());
   registry.add(make_calculator_tool());
-  auto dotenv = load_dotenv({".env", "../.env", "../../.env"});
+  registry.add(make_weather_tool(transport, {}));              // Open-Meteo，免密钥
+  {
+    tool::WebSearchConfig ws_cfg;
+    ws_cfg.api_key = env_or(dotenv, "WEB_SEARCH_API_KEY");     // feedcoop Bearer；未配则运行时搜索报错
+    registry.add(make_web_search_tool(transport, std::move(ws_cfg)));
+  }
   ComponentRegistry comps;
   std::vector<std::string> all_tools;
   for (tool::ToolSpec const& t : registry.all()) all_tools.push_back(t.name);
   comps.toolsets["all"] = all_tools;
   comps.toolsets["ts"] = all_tools;
+  comps.toolsets["chat"] = {"get_weather", "web_search"};  // 内置 chat 专用：只暴露天气/搜索
 
   std::optional<model::openai::OpenAIChatModel> model;
-  std::shared_ptr<http::Transport> transport;
   if (model_needed_key) {
     std::string const key = env_or(dotenv, "LLM_API_KEY");
     if (key.empty()) {
@@ -382,7 +395,6 @@ int main(int argc, char** argv) {
     cfg.base_url = env_or(dotenv, "LLM_BASE_URL", "https://api.deepseek.com/v1");
     cfg.model = env_or(dotenv, "LLM_MODEL", "deepseek-chat");
     cfg.ca_info = ca_bundle_from_env();
-    transport = std::make_shared<http::CurlMultiTransport>();
     model.emplace(cfg, transport);
     comps.models["main"] = &*model;
   }
@@ -427,8 +439,9 @@ int main(int argc, char** argv) {
     std::println("触发失败: {}", r.error().message);
     return 1;
   }
-  std::string const answer = last_ai_text(*r);
-  std::println("\n{}", answer.empty() ? "(无文本回复)" : clip(answer, 800));
+  std::string answer = last_ai_text(*r);
+  message::sanitize_utf8(answer);  // 模型串流拼接可能带断字节：净化后完整打印（不截断）
+  std::println("\n{}", answer.empty() ? "(无文本回复)" : answer);
   std::println("会话已更新: {} 条消息", replay_session_messages(slog_path).size());
   return 0;
 }

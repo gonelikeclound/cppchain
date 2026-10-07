@@ -62,6 +62,8 @@ enum class NodeKind {
   RunTools,  // 执行最后一条 AI 消息的 tool_calls → ToolMessage 追加进 messages
   LoadHistory,   // 工作路径的历史消息 → 追加进 state.messages（④：日志的 replay 投影）
   // （save_history 已随 ④ 删除：history = 日志的投影，不再单独落盘）
+  // ---- wfr-㉗：回显节点（屏之道回显 thinking/工具摘要，纯副作用不改 state）----
+  Echo,
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供

@@ -544,12 +544,19 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
             c.err("VR2", "节点 '" + n.id + "' 引用了不存在的节点 '" + r.node + "'");
           else {
             NodeIR const& target = ir.nodes[it->second];
-            if (target.kind != NodeKind::Tool)
-              c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node + "' 指向非 tool 节点（只有 tool 有 result）");
+            // 可引用 result 的节点：tool（output_schema 声明字段）+ model / run_tools
+            //（wfr-㉗：模型/工具阶段发布 thinking/文本/调用摘要，字段运行时定义）。
+            bool const result_ok = target.kind == NodeKind::Tool ||
+                                   target.kind == NodeKind::Model ||
+                                   target.kind == NodeKind::RunTools;
+            if (!result_ok)
+              c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
+                               "' 指向非 result 节点（仅 tool / model / run_tools 发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");
-            else if (!schema_declares(target.output_schema, r.field))
+            else if (target.kind == NodeKind::Tool &&
+                     !schema_declares(target.output_schema, r.field))
               c.err("VR2", "节点 '" + n.id + "' 引用了 '" + r.node + ".result." + r.field +
                                "'，但该节点 output_schema 未声明此字段");
           }

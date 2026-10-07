@@ -6,6 +6,8 @@
 #include <future>
 #include <string>
 
+#include "cppchain/message/utf8.hpp"
+
 namespace cppchain::tool {
 
 namespace {
@@ -51,8 +53,9 @@ Message ToolNode::execute_one(ToolCall const& call) const {
     return error_tool_message(call.id, result.error().message);
   }
 
-  std::string const content = result->is_string() ? result->get<std::string>() : result->dump();
-  return message::tool_message(content, call.id);
+  std::string content = result->is_string() ? result->get<std::string>() : message::utf8_safe_dump(*result);
+  message::sanitize_utf8(content);   // 双保险：字符串型结果也可能带非法字节
+  return message::tool_message(std::move(content), call.id);
 }
 
 std::vector<Message> ToolNode::run(std::span<ToolCall const> calls) const {

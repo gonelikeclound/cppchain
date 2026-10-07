@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+
+#include "cppchain/message/utf8.hpp"  // utf8_safe_dump：外部文本坏字节也不让会话日志 dump 崩
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -166,7 +168,7 @@ void SessionLog::write(Json rec) {
   if (!workflow_.empty()) rec["workflow"] = workflow_;
   rec["seq"] = ++seq_;
   rec["ts"] = now_iso();
-  out_ << rec.dump() << '\n';
+  out_ << message::utf8_safe_dump(rec) << '\n';
   out_.flush();
   if (!out_) throw std::runtime_error("session log: 写入失败 " + path_);
 }

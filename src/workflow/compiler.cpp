@@ -131,12 +131,13 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     NodeIR const& n = ir.nodes[i];
     cont[n.id] = n.id;  // 占位（非 label 用不到）
     if (n.kind == NodeKind::Label) {
-      std::string c;
-      for (std::size_t k = i + 1; k < ir.nodes.size(); ++k)
-        if (ir.nodes[k].kind != NodeKind::Label) {
-          c = ir.nodes[k].id;
-          break;
-        }
+      std::string c = n.next;  // 显式 next 优先（wfr-㉘）；缺省回退"下表第一个非 label"
+      if (c.empty())
+        for (std::size_t k = i + 1; k < ir.nodes.size(); ++k)
+          if (ir.nodes[k].kind != NodeKind::Label) {
+            c = ir.nodes[k].id;
+            break;
+          }
       cont[n.id] = c;  // VG3 保证非空
     }
   }

@@ -7,12 +7,15 @@
 #include <cctype>
 #include <memory>
 #include <optional>
+#include <print>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
 
+#include "cppchain/message/content_block.hpp"
 #include "cppchain/message/serializer.hpp"
+#include "cppchain/message/utf8.hpp"
 #include "cppchain/tool/tool_node.hpp"
 #include "cppchain/workflow/expr.hpp"
 #include "cppchain/workflow/refs.hpp"
@@ -73,7 +76,7 @@ bool is_ident_chars(std::string_view s) {
 void v_label(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
   if (n.raw.is_object())
     for (auto it = n.raw.begin(); it != n.raw.end(); ++it)
-      if (it.key() != "id" && it.key() != "kind")
+      if (it.key() != "id" && it.key() != "kind" && it.key() != "next")
         err("VN5", "label '" + n.id + "' 不得带字段 '" + it.key() + "'");
 }
 
@@ -148,6 +151,10 @@ void v_model(NodeIR const& n, NodeType::ValidateContext const& ctx,
           err("VN10", "工具集 '" + n.toolset + "' 里的工具 '" + t + "' 不在工具注册表里");
     }
   }
+}
+
+void v_echo(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN12", "echo 节点 '" + n.id + "' 缺少 next");
 }
 
 void v_route(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
@@ -233,7 +240,10 @@ std::vector<NodeType::Edge> e_tool(NodeIR const& n) {
 std::vector<NodeType::Edge> e_expr(NodeIR const& n) {
   return {{n.then, "then", true}, {n.else_, "else", true}};
 }
-std::vector<NodeType::Edge> e_label(NodeIR const&) { return {}; }
+std::vector<NodeType::Edge> e_label(NodeIR const& n) {
+  return n.next.empty() ? std::vector<NodeType::Edge>{}
+                        : std::vector<NodeType::Edge>{{n.next, "next", /*forward=*/true}};
+}
 std::vector<NodeType::Edge> e_goto(NodeIR const& n) {
   return {{n.goto_target, "goto", /*forward=*/false}};  // ← 回边，是循环的来源
 }
@@ -248,6 +258,13 @@ std::vector<NodeType::Edge> e_route(NodeIR const& n) {
 // ---- 引用文本片段（VR1 语法检查 + VR 段引用收集共用）----
 
 std::vector<std::string> t_none(NodeIR const&) { return {}; }
+
+// echo 的 text 模板作为引用文本（VR1 语法检查 + VR2 校验内嵌 $/@config 引用是否合法）
+std::vector<std::string> t_echo(NodeIR const& n) {
+  if (n.raw.is_object() && n.raw.contains("text") && n.raw["text"].is_string())
+    return {n.raw["text"].get<std::string>()};
+  return {};
+}
 
 std::vector<std::string> t_tool(NodeIR const& n) {
   std::vector<std::string> out;
@@ -360,6 +377,24 @@ void c_goto(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// echo：把 text 模板（支持 $节点.result.字段 / @config.*，段落内嵌引用同样解析）打印到
+// 终端，并落一条 source=node 诊断到会话日志（debug 台可回放）；不改 state、无 next 外副作用。
+void c_echo(NodeIR const& n, NodeType::CompileContext& ctx) {
+  Json const text_tpl =
+      (n.raw.is_object() && n.raw.contains("text")) ? n.raw["text"] : Json("");
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [sink_p, text_tpl](Json const& state, NodeContext& nc) {
+    Json const r = resolve_parameter(text_tpl, state);
+    std::string const msg =
+        r.is_string() ? r.get<std::string>() : message::utf8_safe_dump(r);  // 对象/数组安全渲染
+    if (!msg.empty()) std::println("{}", msg);
+    if (sink_p) sink_p->log_node(nc.node_name, "info", msg.empty() ? "(echo)" : msg);
+    return Command{};
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
   model::ChatModel* m =
       (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
@@ -377,8 +412,8 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const model_name = n.model;
   auto sink_p = ctx.sink;  // 触发期注入的 NodeLog（docs/12 §6.4：source=node 的诊断日志）
 
-  ctx.graph.add_node(n.id, [m, tools_json, sys, model_name, sink_p](Json const& state,
-                                                                    NodeContext& nc) {
+  ctx.graph.add_node(n.id, [m, tools_json, sys, model_name, sink_p, node_id = n.id](
+                              Json const& state, NodeContext& nc) {
     std::vector<message::Message> msgs = messages_from_state(state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
     model::CallOptions co;
@@ -388,7 +423,27 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     // **只发一次**：回复追加进 messages，循环由 route + 回边负责
     sink_p->log_node(nc.node_name, "info", "model '" + model_name + "' 完成一次调用",
                      Json{{"in_msg", msgs.size()}, {"tool_calls", !r->tool_calls.empty()}});
-    return Command::with_update(Json{{kMessagesKey, Json::array({*r})}});
+    // 发布可引用 result（echo 节点 $引用打印）：thinking / 正文 / 工具调用摘要
+    std::string thinking;
+    for (auto const& blk : r->content)
+      if (auto const* rb = std::get_if<message::ReasoningBlock>(&blk)) thinking += rb->reasoning;
+    Json tcalls = Json::array();
+    for (auto const& t : r->tool_calls) {
+      Json call;
+      call["name"] = t.name;
+      call["args"] = t.args;
+      tcalls.push_back(std::move(call));
+    }
+    Json frame;
+    frame["thinking"] = std::move(thinking);
+    frame["text"] = r->text();
+    frame["tool_calls"] = std::move(tcalls);
+    Json results = Json::object();
+    results[node_id] = std::move(frame);
+    Json update = Json::object();
+    update[kMessagesKey] = Json::array({*r});
+    update[kResultsKey] = std::move(results);
+    return Command::with_update(std::move(update));
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
   ++ctx.registered;
@@ -409,7 +464,7 @@ void c_route(NodeIR const& n, NodeType::CompileContext& ctx) {
 
 void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   tool::ToolNode tn(ctx.registry);  // 复用 M3 的实现（并行、顺序对齐、错误回喂）
-  ctx.graph.add_node(n.id, [tn](Json const& state, NodeContext&) {
+  ctx.graph.add_node(n.id, [tn, node_id = n.id](Json const& state, NodeContext&) {
     std::vector<message::ToolCall> calls;
     auto const msgs = messages_from_state(state);
     for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
@@ -420,8 +475,37 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
     if (calls.empty())
       throw tool::ToolException("run_tools 节点：最后一条 AI 消息没有 tool_calls");
     Json arr = Json::array();
-    for (message::Message& m : tn.run(calls)) arr.push_back(m);
-    return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
+    for (message::Message& m : tn.run(calls)) {
+      // 工具输出（含 CJK/截断字节）可能非法 UTF-8 → 净化后再进 state，避免 dump 崩溃
+      for (auto& blk : m.content)
+        if (auto* tb = std::get_if<message::TextBlock>(&blk)) message::sanitize_utf8(tb->text);
+      arr.push_back(m);
+    }
+    // 发布可引用 result（echo 节点 $引用打印）：每个工具调用的 名字(参数) → 结果截断
+    std::unordered_map<std::string, message::ToolCall const*> by_id;
+    for (auto const& tc : calls) by_id[tc.id] = &tc;
+    Json summary = Json::array();
+    for (message::Message const& m : arr) {
+      std::string name = "tool", args;
+      if (m.tool_call_id)
+        if (auto const it = by_id.find(*m.tool_call_id); it != by_id.end()) {
+          name = it->second->name;
+          args = message::utf8_safe_dump(it->second->args);  // 模型给的参数也可能带坏字节
+        }
+      std::string text = m.text();
+      if (text.size() > 140) text = text.substr(0, 140) + "…";
+      std::string line = name + (args.empty() ? "" : "(" + args + ")") + " → " + text;
+      message::sanitize_utf8(line);  // 逐行兜底：任何一段带坏字节都整行净化
+      summary.push_back(std::move(line));
+    }
+    Json frame;
+    frame["summary"] = std::move(summary);
+    Json results = Json::object();
+    results[node_id] = std::move(frame);
+    Json update = Json::object();
+    update[kMessagesKey] = std::move(arr);
+    update[kResultsKey] = std::move(results);
+    return Command::with_update(std::move(update));
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
   ++ctx.registered;
@@ -506,8 +590,11 @@ std::vector<NodeType> const& builtin_node_types() {
       // ---------------- label ----------------
       {NodeKind::Label, "label",
        [](Json const& n) { return kind_is(n, "label"); },
-       [](NodeIR&, Json const&) {},  // 只有 id/kind
-       [](Json& node, NodeIR const&) { node["kind"] = "label"; },
+       [](NodeIR& out, Json const& node) { get_str(out, node, "next", out.next); },  // next 可选
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "label";
+         if (!n.next.empty()) node["next"] = n.next;
+       },
        [](NodeIR const&) { return std::string("label"); }, v_label, c_label, e_label, t_none},
 
       // ---------------- goto ----------------
@@ -600,6 +687,21 @@ std::vector<NodeType> const& builtin_node_types() {
          return "load_history path=" + n.path +
                 " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
        }, v_load_history, c_load_history, e_next, t_history},
+      // ---------------- echo（wfr-㉗）----------------
+      // 回显节点：text 模板（$节点.result.字段 / @config.*）解析后打印到终端并落一条
+      // 节点诊断；不改 state，纯粹"回显一步"。
+      {NodeKind::Echo, "echo",
+       [](Json const& n) { return kind_is(n, "echo"); },
+       [](NodeIR& out, Json const& node) { get_str(out, node, "next", out.next); },
+       [](Json& node, NodeIR const& n) { node["kind"] = "echo"; node["next"] = n.next; },
+       [](NodeIR const& n) {
+         std::string text =
+             n.raw.is_object() && n.raw.contains("text") && n.raw["text"].is_string()
+                 ? n.raw["text"].get<std::string>()
+                 : "";
+         if (text.size() > 34) text = text.substr(0, 34) + "…";
+         return (text.empty() ? "echo" : text) + " → " + n.next;
+       }, v_echo, c_echo, e_next, t_echo},
   };
   return types;
 }

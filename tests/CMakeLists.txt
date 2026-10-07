@@ -9,7 +9,8 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(message_tests
   message/message_serialization_test.cpp
-  message/chunk_merge_test.cpp)
+  message/chunk_merge_test.cpp
+  message/utf8_test.cpp)
 
 target_link_libraries(message_tests PRIVATE
   cppchain_message
@@ -139,6 +140,7 @@ add_executable(workflow_tests
   wf/plugin_import_test.cpp
   wf/m10_runtime_test.cpp
   wf/import_workflow_test.cpp
+  wf/echo_test.cpp
   wf/debug_view_test.cpp
   wf/wfr_lookup_test.cpp)
 
