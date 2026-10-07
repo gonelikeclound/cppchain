@@ -115,10 +115,12 @@ body{font:13px system-ui,sans-serif;margin:0;height:100vh;overflow:hidden;
 #nav{grid-column:1;border-right:1px solid var(--e);padding:10px;background:#fafafa;overflow:auto;min-width:0;min-height:0}
 #sv1{grid-column:2}#sv2{grid-column:4}
 #mid{grid-column:3;display:flex;flex-direction:column;min-width:0;min-height:0;background:#fbfbfb}
-#graphwrap{flex:1 1 auto;overflow:auto;padding:8px;min-height:0}
+#graphwrap{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0}
+#canvasbox{flex:1 1 auto;overflow:auto;padding:8px;min-height:0}
 #sh{flex:none;height:8px;border-top:1px solid var(--e)}
 #detail{flex:none;height:220px;border-top:1px solid var(--e);overflow:auto;background:#fff;padding:8px 10px;min-height:0}
-#log{grid-column:5;border-left:1px solid var(--e);padding:10px;overflow:auto;background:#fff;min-width:0;min-height:0}
+#log{grid-column:5;border-left:1px solid var(--e);padding:10px 10px 8px;background:#fff;min-width:0;min-height:0;display:flex;flex-direction:column}
+#log h1{flex:none}
 .split{background:#e8eaed;cursor:col-resize}#sh{cursor:row-resize}
 .split:hover{background:#b6bcc4}#sh:hover{background:#b6bcc4}
 body.drag-v,body.drag-v *{cursor:col-resize!important;user-select:none}
@@ -134,6 +136,7 @@ svg text{font:12px system-ui}
 .n.kind-route{fill:#d9f2dc;stroke:#188038}
 .n.kind-run_tools{fill:#cdeee7;stroke:#0d7a6f}
 .n.kind-load_history{fill:#e2e3fb;stroke:#5b6ee1}
+.n.kind-input,.n.kind-end{stroke-dasharray:5 3}
 .n.active{stroke:var(--acc);stroke-width:2.5;filter:drop-shadow(0 0 3px #1a73e833)}
 .n.hit{stroke:#d93025;stroke-width:2.5}
 .n .lbl{font:12px ui-monospace,monospace;font-weight:600;fill:#111}
@@ -145,6 +148,7 @@ path.e.term{fill:none;stroke:#b0b3b8;stroke-width:1.2;stroke-dasharray:5 4}
 .elabel{font:10px system-ui;fill:#9aa0a6;pointer-events:none;font-weight:600}
 /* ---- 节点图例（种类→颜色的对照）---- */
 .legend{display:flex;flex-wrap:wrap;gap:4px 12px;margin:2px 0 8px}
+.graph-legend{flex:none;border-top:1px solid var(--e);padding:5px 10px;background:#fafafa;margin:0;align-items:center}
 .legend .item{display:flex;align-items:center;gap:5px;font-size:11px;color:#555}
 .legend .dot{width:16px;height:11px;border-radius:3px;border:1.5px solid;background:transparent}
 .nodeitem{padding:2px 4px;cursor:pointer;border-radius:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;justify-content:space-between;gap:6px}
@@ -155,7 +159,8 @@ path.e.term{fill:none;stroke:#b0b3b8;stroke-width:1.2;stroke-dasharray:5 4}
 .loopit.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 .small{color:#888;font:11px}
 /* ---- 日志树：run 轮 → 节点 → 记录 ---- */
-#loglist{margin-top:4px}
+#loglist{flex:1 1 auto;overflow:auto;margin-top:4px;min-height:0}
+#logdetail{flex:0 1 42%;min-height:110px;margin-top:8px;display:flex;flex-direction:column;border-top:1px solid var(--e);padding-top:6px}
 details.run{background:#fff;border:1px solid var(--e);border-radius:5px;margin:6px 0;overflow:hidden}
 details.run>summary{list-style:none;cursor:pointer;padding:5px 8px;background:#f4f6f9;font-weight:600}
 details.run>summary:hover{background:var(--hl)}
@@ -165,13 +170,21 @@ details.node>summary:hover{background:var(--hl)}
 summary::before{content:'▸';display:inline-block;width:14px;color:#888}
 details[open]>summary::before{content:'▾'}
 .cnt{color:#999;font-weight:400}
-.rec{padding:3px 8px 3px 22px;border-top:1px dashed #e4e7ea;cursor:pointer;white-space:pre-wrap;word-break:break-all;font:11.5px ui-monospace,Menlo,Consolas,monospace}
+.rec{padding:3px 8px 3px 22px;border-top:1px dashed #e4e7ea;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:11.5px ui-monospace,Menlo,Consolas,monospace}
 details.node>.rec:first-of-type{border-top:none}
-.rec:hover{background:var(--hl)}.rec.hit{background:#fdecea}
+.rec:hover{background:var(--hl)}
+.rec.hit{background:#fdecea}
+.rec.sel{background:#e8f0fe;box-shadow:inset 2px 0 0 var(--acc)}
 .rec b{font-weight:600;color:#222}
 .ph{display:inline-block;min-width:64px;color:#666;font-weight:600}
 .s{color:#1a73e8}.e2{color:#d93025}.iv{color:#b06000}
-.lvl{color:#9e9e9e}.ts{color:#aaa;font-size:10.5px;float:right;margin-left:8px}
+.lvl{color:#9e9e9e}
+.ts{color:#aaa;font-size:10.5px;margin-left:8px}
+/* ---- 日志选中记录的下半区 JSON 美化查看 ---- */
+#ldhead{font:11.5px ui-monospace,monospace;color:#666;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ldbody{flex:1 1 auto;overflow:auto;background:#fbfbfb;border:1px solid var(--e);border-radius:4px;padding:6px 8px}
+#ldbody pre{margin:0;font:11px ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+.j-key{color:#1a6db5;font-weight:600}.j-str{color:#1e8e3e}.j-num{color:#c5221f}.j-kw{color:#f9ab00}.j-pun{color:#666}
 /* ---- 节点详情 ---- */
 #detailhead{display:flex;align-items:center;gap:8px;margin-bottom:6px;color:#666}
 #detailhead b{color:#111;font-size:13px}
@@ -182,23 +195,33 @@ details.node>.rec:first-of-type{border-top:none}
 <aside id="nav">
 <h1>__IR_ID__</h1>
 <div id="trim" class="small" style="display:none">⚠ 记录过多，已裁掉节点诊断</div>
-<h2>图例（节点颜色）</h2><div class="legend" id="legend"></div>
 <h2>节点（导航）</h2><div id="nodelist"></div>
 <h2>循环分组</h2><div id="gototabs"></div>
 </aside>
 <div id="sv1" class="split" title="拖动调整左栏宽度"></div>
 <div id="mid">
-  <div id="graphwrap"><svg id="canvas" width="700" height="400"></svg></div>
+  <div id="graphwrap">
+    <div id="canvasbox"><svg id="canvas" width="700" height="400"></svg></div>
+    <div id="legend" class="legend graph-legend"></div>
+  </div>
   <div id="sh" title="拖动调整详情区高度"></div>
   <div id="detail"><div id="detailhead">节点 <b id="dnode"></b><span id="dkind"></span>
     <button id="dcopy">复制</button></div><pre id="djson"></pre></div>
 </div>
 <div id="sv2" class="split" title="拖动调整右栏宽度"></div>
-<section id="log"><h1>日志</h1><div id="loglist" class="small"></div></section>
+<section id="log"><h1>日志</h1><div id="loglist" class="small"></div>
+  <div id="logdetail"><div id="ldhead"></div><div id="ldbody"></div></div>
+</section>
 <script>
 const P = __DATA__;
 const G = P.graph, RUNS = P.runs;
 const NODES = {}; G.nodes.forEach(n => NODES[n.id] = n);
+// —— 合成内置节点：__input__ 入口 + 各终端目标（_turn_end / _fail / __end__）——
+const TERMS=[...new Set(G.edges.map(e=>e.to).filter(t=>t&&!NODES[t]))];
+const BUILTIN=[{id:'__input__',kind:'input',text:'输入'}]
+  .concat(TERMS.map(t=>({id:t,kind:'end',text:'结束'})));
+BUILTIN.forEach(n=>{ NODES[n.id]=n; });
+const ALLNODES=G.nodes.concat(BUILTIN);
 /* ---------- 布局 v2：BFS 分层 → 行排布；回边不推层；孤立节点单独末行 ---------- */
 const layer = {};
 const pos = {};
@@ -207,7 +230,8 @@ const KIND_COLORS={
   label:{f:'#edf0f3',s:'#5f6368'}, tool:{f:'#d8e7fb',s:'#1a73e8'},
   expr:{f:'#fdeccb',s:'#f9ab00'}, goto:{f:'#fbdcd9',s:'#d93025'},
   model:{f:'#e8e0f4',s:'#7620bb'}, route:{f:'#d9f2dc',s:'#188038'},
-  run_tools:{f:'#cdeee7',s:'#0d7a6f'}, load_history:{f:'#e2e3fb',s:'#5b6ee1'}
+  run_tools:{f:'#cdeee7',s:'#0d7a6f'}, load_history:{f:'#e2e3fb',s:'#5b6ee1'},
+  input:{f:'#e7e9ec',s:'#5f6368'}, end:{f:'#f0f0f0',s:'#3c4043'}
 };
 function kindColor(k){ return KIND_COLORS[k]||{f:'#f1f3f4',s:'#9aa0a6'}; }
 function renderLegend(){
@@ -221,29 +245,50 @@ function renderLegend(){
   });
 }
 function layout(){
-  const first = G.nodes[0] && G.nodes[0].id; if(!first) return {w:400,h:200};
-  const indeg={}; G.nodes.forEach(n=>indeg[n.id]=0);
-  const froms={}; G.edges.forEach(e=>{ (froms[e.from]=froms[e.from]||[]).push(e); if(e.to in indeg) indeg[e.to]++; });
-  layer[first]=0; let cur=[first];
-  while(cur.length){ const nx=[];
-    for(const id of cur) for(const e of (froms[id]||[]))
-      if(e.forward && !e.terminal && layer[e.to]===undefined){ layer[e.to]=layer[id]+1; nx.push(e.to); }
-    cur=nx; }
-  // 孤立节点（无入边、非入口）→ 末尾新行，避免与入口挤
-  const isolated=G.nodes.map(n=>n.id).filter(id=>!(indeg[id]>0 || id===first));
-  if(isolated.length){ const base=Math.max(0,...Object.values(layer)); isolated.forEach(id=>layer[id]=base+1); }
-  G.nodes.forEach(n=>{ if(layer[n.id]===undefined) layer[n.id]=0; });
-  const rows={}; G.nodes.forEach(n=>{ const l=layer[n.id]; (rows[l]=rows[l]||[]).push(n.id); });
+  const ids=G.nodes.map(n=>n.id); const first=ids[0];
+  if(!first) return {w:400,h:200};
+  const indeg={}; ids.forEach(id=>indeg[id]=0);
+  const froms={};
+  G.edges.forEach(e=>{
+    (froms[e.from]=froms[e.from]||[]).push(e);
+    if(e.forward && !e.terminal && e.to in indeg) indeg[e.to]++;   // 只数前向入边（goto 回边不推层）
+  });
+  // 多源 BFS：所有前向入度为 0 的入口（含只有 goto 回边的 l0）都从第 0 层起排
+  const q=ids.filter(id=>indeg[id]===0);
+  q.forEach(id=>layer[id]=0);
+  if(!q.includes(first)){ layer[first]=0; q.push(first); }
+  for(let i=0;i<q.length;i++){
+    const id=q[i];
+    for(const e of (froms[id]||[]))
+      if(e.forward && !e.terminal && e.to in indeg && layer[e.to]===undefined) {
+        layer[e.to]=layer[id]+1; q.push(e.to);
+      }
+  }
+  // 未分层（孤立）→ 已有最大层下方新行
+  const rest=ids.filter(id=>layer[id]===undefined);
+  if(rest.length){ const base=Math.max(0,...Object.values(layer)); rest.forEach(id=>layer[id]=base+1); }
+  // 内置节点置顶（__input__）与置底（各终端目标）
+  const realL=G.nodes.map(n=>layer[n.id]);
+  if(realL.length){ const mL=Math.min(...realL), xL=Math.max(...realL);
+    layer['__input__']=mL-1; TERMS.forEach(t=>layer[t]=xL+1); }
+  else { layer['__input__']=0; TERMS.forEach(t=>layer[t]=1); }
+  const topL=Math.min(...Object.values(layer));
+  const rows={}; ALLNODES.forEach(n=>{ const l=layer[n.id]; (rows[l]=rows[l]||[]).push(n.id); });
   let maxRow=0;
   for(const arr of Object.values(rows)){ arr.sort(); maxRow=Math.max(maxRow,arr.length); }
-  for(const [l,arr] of Object.entries(rows)) arr.forEach((id,i)=>{ pos[id]={x:64+i*(NODE_W+GAP), y:44+Number(l)*LEVEL_Y}; });
-  const maxL=Math.max(0,...Object.values(layer));
-  return {w:72+maxRow*(NODE_W+GAP)+NODE_W, h:60+(maxL+1)*LEVEL_Y};
+  for(const [l,arr] of Object.entries(rows)) arr.forEach((id,i)=>{ pos[id]={x:64+i*(NODE_W+GAP), y:44+(Number(l)-topL)*LEVEL_Y}; });
+  const maxL2=Math.max(0,...Object.values(layer));
+  return {w:72+maxRow*(NODE_W+GAP)+NODE_W, h:60+(maxL2-topL+1)*LEVEL_Y};
 }
 /* ---------- SVG 绘制 v2：贝塞尔边（同行微拱/跨行等差）+ 回边弧线 + 类型配色 ---------- */
 const svg=document.getElementById('canvas');
 const NS='http://www.w3.org/2000/svg';
 function el(t){ return document.createElementNS(NS,t); }
+// 从中心 (cx,cy) 沿方向 (dx,dy) 到矩形节点边界交点（让箭头停在节点边界，不压住文字）
+function boxEdge(cx,cy,dx,dy){
+  const t=Math.min((NODE_W/2)/Math.abs(dx),(NODE_H/2)/Math.abs(dy));
+  return {x:cx+dx*t, y:cy+dy*t};
+}
 function renderSVG(){
   const size=layout();
   svg.setAttribute('width',size.w); svg.setAttribute('height',size.h); svg.setAttribute('viewBox','0 0 '+size.w+' '+size.h);
@@ -253,37 +298,46 @@ function renderSVG(){
     for(const [k,v] of Object.entries({refX:9,refY:5,markerWidth:6.5,markerHeight:6.5,orient:'auto'})) m.setAttribute(k,v);
     m.innerHTML='<path d="M0,0 L10,5 L0,10 z" fill="'+fill+'"/>'; defs.appendChild(m); };
   mk('arr','#5f6368'); mk('arrg','#d93025'); svg.appendChild(defs);
-  G.edges.forEach(e=>{
+  // 输入 → 各入口 的内置边（只画，不参与分层）
+  const rl=G.nodes.map(n=>layer[n.id]);
+  const eMin=Math.min(...rl);
+  const REDGES=G.edges.concat(
+    G.nodes.filter(n=>layer[n.id]===eMin)
+           .map(n=>({from:'__input__',to:n.id,forward:true,label:'next',terminal:false}))
+  );
+  REDGES.forEach(e=>{
     const a=pos[e.from]; if(!a) return;
-    const x1=a.x+NODE_W, y1=a.y+NODE_H/2;
-    const cls=e.forward ? (e.terminal?'e term':'e') : 'e goto';
-    let d, ex, ey;
-    if(pos[e.to]){
-      const b=pos[e.to], x2=b.x, y2=b.y+NODE_H/2;
-      ex=x2; ey=y2;
-      const cx=(x1+x2)/2;
-      const cy = !e.forward ? Math.min(a.y,b.y)-58 : (y1===y2 ? y1-46 : (y1+y2)/2);
-      d='M'+x1+','+y1+' Q'+cx+','+cy+' '+x2+','+y2;
-    } else {
-      // 终端目标（_turn_end/_fail/__end__，图内无节点）：引到节点右侧的端点圆点
-      ex=x1+34; ey=y1; const cx=(x1+ex)/2;
-      d='M'+x1+','+y1+' Q'+cx+','+y1+' '+ex+','+ey;
-      const dot=el('circle'); dot.setAttribute('cx',ex); dot.setAttribute('cy',ey); dot.setAttribute('r',3.5);
+    const ca={x:a.x+NODE_W/2, y:a.y+NODE_H/2};
+    const b=pos[e.to];
+    let d, lx, ly;
+    if(!b){
+      // 兜底：目标不存在（非常规）→ 右缘短线段 + 端点圆点
+      const y1=ca.y, x0=ca.x+NODE_W/2, x2=x0+40;
+      d='M'+x0+','+y1+' L'+x2+','+y1;
+      lx=x2-6; ly=y1-6;
+      const dot=el('circle'); dot.setAttribute('cx',x2); dot.setAttribute('cy',y1); dot.setAttribute('r',3.5);
       dot.setAttribute('class',(/fail/.test(String(e.to))||e.label==='fail')?'eterm fail':'eterm');
       svg.appendChild(dot);
+    } else {
+      // 中心到中心的三次贝塞尔：两个控制点都落在两中心之间的中层（连线从中间穿过）
+      const cb={x:b.x+NODE_W/2, y:b.y+NODE_H/2};
+      const dx=cb.x-ca.x, dy=cb.y-ca.y;
+      const s=boxEdge(ca.x,ca.y,dx,dy), t=boxEdge(cb.x,cb.y,-dx,-dy);
+      const my=(ca.y+cb.y)/2, mx=(s.x+t.x)/2;
+      d='M'+s.x+','+s.y+' C'+s.x+','+my+' '+t.x+','+my+' '+t.x+','+t.y;
+      lx=mx; ly=my-(dy>0?8:12);
     }
+    const cls=e.forward ? (e.terminal?'e term':'e') : 'e goto';
     const p=el('path'); p.setAttribute('d',d); p.setAttribute('class',cls);
-    if(pos[e.to]) p.setAttribute('marker-end', e.forward?'url(#arr)':'url(#arrg)');
+    if(b && !e.terminal) p.setAttribute('marker-end', e.forward?'url(#arr)':'url(#arrg)');
     svg.appendChild(p);
     if(e.label && e.label!=='next'){
-      const t=el('text'); const tgt=pos[e.to];
-      t.setAttribute('x',(x1+(tgt?tgt.x:ex))/2);
-      t.setAttribute('y',((tgt?Math.min(a.y,tgt.y):a.y)-16));
+      const t=el('text'); t.setAttribute('x',lx); t.setAttribute('y',ly);
       t.setAttribute('text-anchor','middle'); t.setAttribute('class','elabel');
       t.textContent=e.label; svg.appendChild(t);
     }
   });
-  G.nodes.forEach(n=>{
+  ALLNODES.forEach(n=>{
     const p=pos[n.id];
     const g=el('g'); g.setAttribute('transform','translate('+p.x+','+p.y+')');
     const rec=el('rect'); rec.setAttribute('width',NODE_W); rec.setAttribute('height',NODE_H);
@@ -305,7 +359,7 @@ RUNS.forEach(run=>run.records.forEach(rc=>{
   const k = rc.node || '（引擎）'; countByNode[k] = (countByNode[k]||0) + 1;
 }));
 /* ---------- 状态 ---------- */
-let curNode='', curGoto='', curIt='';
+let curNode='', curGoto='', curIt='', curLog='';   // curLog = 当前选中 json 记录（去重键）
 /* ---------- 日志树：run 轮 → 节点 → 记录（可开合，记录间分割线）---------- */
 function renderLog(){
   const box=document.getElementById('loglist');
@@ -325,7 +379,6 @@ function renderLog(){
     rd.appendChild(rsum);
     let disp=0, nNodes=0;
     Object.keys(buckets).forEach(node=>{
-      if(curNode && node!==curNode) return;
       const recs=buckets[node]; nNodes++; disp+=recs.length;
       const nd=document.createElement('details'); nd.className='node'; nd.dataset.grp='n:'+node;
       if(rd.open && (open['n:'+node]!==undefined ? open['n:'+node] : true)) nd.open=true;
@@ -335,9 +388,10 @@ function renderLog(){
       recs.forEach(r=>{
         const row=document.createElement('div'); row.className='rec';
         if(curNode && node===curNode) row.classList.add('hit');
+        if(curLog && curLog===recKey(r)) row.classList.add('sel');
         row.dataset.node=r.node||''; row.dataset.seq=String(r.seq!==undefined?r.seq:'');
         row.appendChild(recordRow(r));
-        row.addEventListener('click',()=>gotoNode(r));
+        row.addEventListener('click',()=>pickRecord(r));
         nd.appendChild(row);
       });
       rd.appendChild(nd);
@@ -364,15 +418,59 @@ function recordRow(r){
   ts.textContent=(r.ms!=null?r.ms+'ms ':'')+(r.ts?new Date(r.ts).toLocaleTimeString():''); frag.appendChild(ts);
   return frag;
 }
+/* ---------- 选中记录 → 使用说明 JSON 美化（下半区）---------- */
+function recKey(r){ return (r.run||'')+'\u0001'+(r.node||'')+'\u0001'+String(r.seq!==undefined?r.seq:''); }
+function pickRecord(r){
+  gotoNode(r);                       // 保持跳图/展开定位
+  const k=recKey(r);
+  curLog=(curLog===k)?null:k;        // 再点同一行 → 取消
+  renderLog();                       // 重挂 .sel（保留 open 状态）
+  renderLogDetail(curLog?r:null);
+}
+function renderLogDetail(r){
+  const head=document.getElementById('ldhead'), body=document.getElementById('ldbody');
+  if(!r){ head.textContent='点日志行 → 下半区显示该条完整 JSON'; body.textContent=''; return; }
+  head.textContent=(r.run||'?')+' / '+(r.node||'（引擎）')+' / '+(r.phase||r.level||'event')
+    +((r.phase&&r.status)?('·'+r.status):'')+(r.ms!=null?('  ['+r.ms+'ms]'):'');
+  body.innerHTML='<pre>'+hl(JSON.stringify(r,null,2))+'</pre>';
+}
+// 极简 JSON 语法高亮：key/字符串/数字/布尔/null 着色；文本全经过 esc 防注入
+function hl(s){
+  const num=/^-?\d+(\.\d+)?([eE][+-]?\d+)?/, kw=/^(true|false|null)/;
+  let out='', i=0, n=s.length;
+  while(i<n){
+    const ch=s[i];
+    if(ch==='"'){
+      let j=i+1; while(j<n&&s[j]!=='"'){ if(s[j]==='\\')j+=2; else j++; } j++;
+      const tok=s.slice(i,j); i=j;
+      let k=i; while(k<n&&/\s/.test(s[k])) k++;
+      out+='<span class="'+(s[k]===':'?'j-key':'j-str')+'">'+esc(tok)+'</span>';
+      continue;
+    }
+    if(/[-\d]/.test(ch)){ const m=num.exec(s.slice(i)); if(m){ out+='<span class="j-num">'+esc(m[0])+'</span>'; i+=m[0].length; continue; } }
+    const m=kw.exec(s.slice(i)); if(m){ out+='<span class="j-kw">'+esc(m[0])+'</span>'; i+=m[0].length; continue; }
+    out+=esc(ch); i++;
+  }
+  return out;
+}
 /* ---------- 联动 ---------- */
 function highlightNode(id){ document.querySelectorAll('rect.n').forEach(r=>r.classList.toggle('active',r.dataset.id===id)); }
-function pickNode(id){ curNode=(curNode===id?'':id); renderNodeList(); renderLog(); renderDetail(curNode); highlightNode(curNode); }
+function pickNode(id){ curNode=(curNode===id?'':id); renderNodeList(); renderLog(); renderDetail(curNode); highlightNode(curNode);
+  if(curNode) focusNodeInLog(curNode); }
+function focusNodeInLog(id){
+  let nd=null; document.querySelectorAll('details.node').forEach(d=>{ if(!nd&&d.dataset.grp==='n:'+id) nd=d; });
+  if(!nd) return;
+  const run=nd.parentElement; if(run) run.open=true; nd.open=true;
+  if(nd.scrollIntoView) nd.scrollIntoView({behavior:'smooth',block:'center'});
+}
 function cssq(s){ return String(s).replace(/\\/g,'\\\\').replace(/"/g,'\\"'); }
 function gotoNode(r){
   curNode=r.node||''; curGoto=''; curIt='';
   renderNodeList(); renderLog(); renderDetail(curNode); highlightNode(curNode);
-  if(r.run){ const rd=document.querySelector('details.run[data-grp="r:'+cssq(r.run)+'"]'); if(rd) rd.open=true;
-    if(r.node){ const nd=rd.querySelector('details.node[data-grp="n:'+cssq(r.node)+'"]'); if(nd) nd.open=true; } }
+  if(r.run){ const rd=document.querySelector('details.run[data-grp="r:'+cssq(r.run)+'"]');
+    if(rd){ rd.open=true;
+      if(r.node){ const nd=rd.querySelector('details.node[data-grp="n:'+cssq(r.node)+'"]'); if(nd) nd.open=true; }
+    } }
   const row=document.querySelector('details.run[data-grp="r:'+cssq(r.run||'')+'"] .rec[data-seq="'+cssq(String(r.seq!==undefined?r.seq:''))+'"][data-node="'+cssq(r.node||'')+'"]');
   if(row) row.scrollIntoView({behavior:'smooth',block:'center'});
 }
@@ -382,6 +480,8 @@ function renderDetail(id){
   const n=id?NODES[id]:null;
   if(!id||!n){ hn.textContent=id||''; hk.textContent=n?(n.kind||''):'';
     pre.textContent=(id&&!n)?'(引擎合成节点，无原始定义 —— 如 __input__)':'(点击某个节点，其 JSON 定义显示在这里)'; return; }
+  if(n.def===undefined||n.def===null){ hn.textContent=id; hk.textContent='· '+(n.kind||'');
+    pre.textContent='（内置合成节点，无原始定义 —— 点右侧日志里对应记录行可看完整 JSON）'; return; }
   hn.textContent=id; hk.textContent=n.kind||'';
   const js=JSON.stringify(n.def!=null?n.def:null,null,2);
   pre.textContent=js.length>20000?js.slice(0,20000)+'\n…（已截断）':js;
@@ -395,7 +495,7 @@ dcopy.addEventListener('click',()=>{
 /* ---------- 导航列表 ---------- */
 function renderNodeList(){
   const box=document.getElementById('nodelist'); box.innerHTML='';
-  G.nodes.forEach(n=>{
+  ALLNODES.forEach(n=>{
     const d=document.createElement('div'); d.className='nodeitem';
     if(n.id===curNode) d.classList.add('on');
     const lab=document.createElement('span'); lab.textContent=n.id+'（'+n.kind+'）';
@@ -429,13 +529,15 @@ function saveSizes(){ try{ localStorage.setItem('wfr_dbg_size',
   JSON.stringify({wnav:document.documentElement.style.getPropertyValue('--wnav'),
                  wlog:document.documentElement.style.getPropertyValue('--wlog'),
                  dh:document.getElementById('detail').style.height})); }catch(e){} }
-function bindSplitter(bar, axis, get, set, min, max){
+function bindSplitter(bar, axis, get, set, min, max, dir){
+  dir = (dir===undefined)?1:dir;   // dir=-1：该分割条锚定在拖动方向的反侧（右/下锚定）
   bar.addEventListener('pointerdown',e=>{
     e.preventDefault();
     document.body.classList.add(axis==='v'?'drag-v':'drag-h');
     const start=(axis==='v'?e.clientX:e.clientY), base=get();
     const move=ev=>{
-      let v=base+(axis==='v'?ev.clientX:ev.clientY)-start;
+      const delta=(axis==='v'?ev.clientX:ev.clientY)-start;
+      let v=dir>0?base+delta:base-delta;
       v=axis==='v'?Math.min(max,Math.max(min,v)):Math.min(window.innerHeight-200,Math.max(min,v));
       set(v);
     };
@@ -451,15 +553,15 @@ function initSplitters(){
   if(sizes.wlog) document.documentElement.style.setProperty('--wlog',sizes.wlog);
   const dt=document.getElementById('detail'); if(sizes.dh&&parseFloat(sizes.dh)>0) dt.style.height=sizes.dh;
   bindSplitter(document.getElementById('sv1'),'v',()=>gv('--wnav'),
-    v=>document.documentElement.style.setProperty('--wnav',Math.round(v)+'px'),160,380);
+    v=>document.documentElement.style.setProperty('--wnav',Math.round(v)+'px'),160,380,1);
   bindSplitter(document.getElementById('sv2'),'v',()=>gv('--wlog'),
-    v=>document.documentElement.style.setProperty('--wlog',Math.round(v)+'px'),300,640);
+    v=>document.documentElement.style.setProperty('--wlog',Math.round(v)+'px'),300,640,-1);   // 右锚定→反向
   bindSplitter(document.getElementById('sh'),'h',()=>dt.offsetHeight,
-    v=>dt.style.height=Math.round(v)+'px',96,0);   // h 轴 max 用窗口高度动态 clamp
+    v=>dt.style.height=Math.round(v)+'px',96,0,-1);   // 底锚定→反向
 }
 /* ---------- 启动 ---------- */
 try {
-  layout(); renderSVG(); renderLegend(); renderNodeList(); renderGotoTabs(); renderLog(); renderDetail('');
+  layout(); renderSVG(); renderLegend(); renderNodeList(); renderGotoTabs(); renderLog(); renderDetail(''); renderLogDetail(null);
   if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
   initSplitters();
 } catch (e) {
