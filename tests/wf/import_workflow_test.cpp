@@ -79,6 +79,9 @@ TEST(ImportWorkflow, basic_rewrite_and_concat) {
   EXPECT_EQ(main["nodes"][1]["then"], "notify_wf__n");
   // $<id> 引用本身不动（引用的是 own id）
   EXPECT_EQ(main["nodes"][1]["expr"], "$fetch_p.result.price < 500");
+  // 子链徽标：被 import 的节点带 origin_wf（其直属工作流名）；own 节点没有
+  EXPECT_EQ(main["nodes"][2]["origin_wf"], "notify_wf");
+  EXPECT_FALSE(main["nodes"][0].contains("origin_wf"));
 }
 
 TEST(ImportWorkflow, as_prefix_overrides_default) {
@@ -103,6 +106,8 @@ TEST(ImportWorkflow, nested_two_levels) {
   // b2__notify_wf__n：两层前缀
   ASSERT_EQ(a["nodes"].size(), 1u);
   EXPECT_EQ(a["nodes"][0]["id"], "b2__notify_wf__n");
+  // 徽标保留最深处归属：b2__notify_wf__n 来自 notify_wf（不是中间层 b）
+  EXPECT_EQ(a["nodes"][0]["origin_wf"], "notify_wf");
 }
 
 TEST(ImportWorkflow, circular_import_rejected) {

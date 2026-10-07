@@ -211,6 +211,14 @@ std::expected<Expanded, std::string> expand(
         return err("import 前缀 '" + pfx + "' 必须以字母开头（VN1 同规）");
 
       Prefixed pr = prepend_chunk(sub->nodes, sub->renames, pfx);
+      // 子链徽标：给本层被拉入的节点标 origin_wf（其**直属**子工作流名）。
+      // 仅标尚未有 origin_wf 的 —— 深层 import 已在递归里标过（保留最深处归属）。
+      {
+        std::string const origin =
+            raw.contains("id") && raw["id"].is_string() ? raw["id"].get<std::string>() : pfx;
+        for (Json& n : pr.nodes)
+          if (n.is_object() && !n.contains("origin_wf")) n["origin_wf"] = origin;
+      }
       for (auto const& [k, v] : pr.renames) {
         if (auto const dup = merged.find(k); dup != merged.end() && dup->second != v)
           return err("import 节点重名 '" + k + "'（两个来源都叫这个名字）");

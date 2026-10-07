@@ -376,7 +376,11 @@ function renderLog(){
     const wfs={};
     run.records.forEach(rc=>{
       if(curGoto&&curIt){ const v=rc.loop&&rc.loop[curGoto]; if(v===undefined||Number(v)!==curIt) return; }
-      const wf=rc.workflow||((!rc.node||NODES[rc.node])?PAGEID:'（其它）');
+      const n0=rc.node?NODES[rc.node]:null;
+      // 归属优先级：节点 origin_wf（import 子链）→ 记录徽标（父 workflow）→ 按节点/页推断
+      const wf=(n0&&n0.def&&n0.def.origin_wf)
+          ? n0.def.origin_wf
+          : (rc.workflow||(n0?PAGEID:'（其它）'));
       const bucket=(wfs[wf]=(wfs[wf]||{}));
       const k=rc.node||'（引擎）';
       (bucket[k]=(bucket[k]||[])).push(rc);
