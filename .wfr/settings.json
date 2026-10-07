@@ -1,0 +1,7 @@
+{
+  "workflow_dirs": [
+    ".wfr/workflows",
+    "share/wfr/workflows",
+    "examples/wfr_demo/.wfr/workflows"
+  ]
+}

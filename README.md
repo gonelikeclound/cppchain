@@ -25,6 +25,11 @@ ctest --preset dev            # 全部测试（438 项）
 build/dev/bin/wfr chat "你好"          # 内置聊天 workflow（多轮续聊，需 .env；查找：ws settings → ws → ~/.wfr settings → ~/.wfr → share）
 build/dev/bin/wfr list                 # 列各查找来源的 workflow（share / settings / ws / ~/.wfr）
 build/dev/bin/wfr debug loop_wf --all --open   # 单 HTML 调试台（在 wfr_demo 目录）
+
+# wfr.sh —— 便捷封装：默认工作区 = 仓库 tmp/wfr（临时、不上 git），自动生成 .wfr/settings.json
+./wfr.sh list                          # 同 wfr list，但落在默认临时工作区
+./wfr.sh chat "你好"                    # 跑内置 chat，会话日志落 tmp/wfr/.wfr/sessions/
+./wfr.sh debug loop_wf --open           # 调试台落 tmp/wfr/.wfr/debug/（跨目录 import 的 demo 用 --workdir examples/wfr_demo）
 ```
 
 真实端点配置放 `.env`（**已被 git 忽略**，模板见 `.env.example`）：

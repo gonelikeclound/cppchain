@@ -5,6 +5,9 @@ cmake-build-*/
 # demo 运行产物（examples/ 落盘演示写到此处）
 demo-out/
 
+# wfr 默认临时工作区（wfr.sh；session/checkpoint/debug 产物都在这里）
+tmp/
+
 # 密钥与本地环境配置 —— 绝不入库
 .env
 .env.*
