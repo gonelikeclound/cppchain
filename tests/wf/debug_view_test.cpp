@@ -44,6 +44,10 @@ TEST(DebugView, graph_exports_nodes_and_edges) {
   ASSERT_EQ(g["nodes"].size(), 4u);
   EXPECT_EQ(g["nodes"][0]["id"], "l0");
   EXPECT_EQ(g["nodes"][0]["kind"], "label");
+  // 每个节点带完整原始定义（选中节点 JSON 面板的数据源）
+  EXPECT_EQ(g["nodes"][1]["id"], "poll");
+  EXPECT_EQ(g["nodes"][1]["def"]["tool"], "fetch_price");
+  EXPECT_EQ(g["nodes"][1]["def"]["parameters"]["item_id"], "P1");
 
   auto edges = g["edges"];
   ASSERT_EQ(edges.size(), 4u);
@@ -95,6 +99,10 @@ TEST(DebugView, render_html_is_self_contained_and_escaped) {
 
   EXPECT_NE(html.find("<title>wfr debug — loop_wf</title>"), std::string::npos) << html.substr(0, 160);
   EXPECT_NE(html.find("const P = "), std::string::npos);
+  // 新布局骨架：中列详情面板 + 树形日志组 + 分栏拖动条
+  EXPECT_NE(html.find("id=\"detail\""), std::string::npos);
+  EXPECT_NE(html.find("details.run"), std::string::npos);
+  EXPECT_NE(html.find("id=\"sv1\""), std::string::npos);
   // 数据里的 </script 必须被转义（浏览器端不执行注入的脚本）
   EXPECT_EQ(html.find("</script><script>alert"), std::string::npos);
   // 但 escape 后数据仍在（< 形式）
