@@ -53,7 +53,7 @@ bool default_reader(std::string const& base_dir, std::string const& spec, Json& 
 
 // 指针目标字段：值是字符串且语义是"节点引用"（改写只碰这些 key；散文文本不动）
 bool is_pointer_key(std::string_view key) {
-  return key == "next" || key == "then" || key == "else" || key == "goto" ||
+  return key == "next" || key == "then" || key == "else" || key == "on_max" ||
          key == "default" || key == "fallback";
 }
 

@@ -127,14 +127,7 @@ NodeType::Edge edge_to(std::string target, std::string label) {
 }
 
 // ---- 类型专属校验（VN5–VN11）----
-// 通用图规则（目标存在/无环/可达/死 label）**不在这里**，由框架按 edges() 统一做（②）。
-
-void v_label(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
-  if (n.raw.is_object())
-    for (auto it = n.raw.begin(); it != n.raw.end(); ++it)
-      if (it.key() != "id" && it.key() != "kind" && it.key() != "next")
-        err("VN5", "label '" + n.id + "' 不得带字段 '" + it.key() + "'");
-}
+// 通用图规则（目标存在/无环/可达）**不在这里**，由框架按 edges() 统一做（②）。
 
 void v_tool(NodeIR const& n, NodeType::ValidateContext const& ctx,
             NodeType::ErrorSink const& err) {
@@ -182,12 +175,6 @@ void v_expr(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSi
   if (!parsed) err("VN9", "expr 节点 '" + n.id + "' 的表达式不合法：" + parsed.error());
   if (n.then.empty()) err("VN9", "expr 节点 '" + n.id + "' 缺少 then");
   if (n.else_.empty()) err("VN9", "expr 节点 '" + n.id + "' 缺少 else");
-}
-
-void v_goto(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
-  if (n.max <= 0)
-    err("VN9", "goto 节点 '" + n.id + "' 的 max 必须是正整数（循环有界），收到 " +
-                   std::to_string(n.max));
 }
 
 void v_model(NodeIR const& n, NodeType::ValidateContext const& ctx,
@@ -410,16 +397,6 @@ std::vector<NodeType::Edge> e_tool(NodeIR const& n) {
 std::vector<NodeType::Edge> e_expr(NodeIR const& n) {
   return {edge_to(n.then, "then"), edge_to(n.else_, "else")};
 }
-std::vector<NodeType::Edge> e_label(NodeIR const& n) {
-  if (n.next.empty()) return {};
-  // 用 push_back 而非嵌套花括号：后者会让 GCC 报 -Wdangling-pointer（初始化列表的临时数组）
-  std::vector<NodeType::Edge> out;
-  out.push_back({n.next, "next", /*forward=*/true});
-  return out;
-}
-std::vector<NodeType::Edge> e_goto(NodeIR const& n) {
-  return {{n.goto_target, "goto", /*forward=*/false}};  // ← 回边，是循环的来源
-}
 std::vector<NodeType::Edge> e_next(NodeIR const& n) { return {edge_to(n.next, "next")}; }
 std::vector<NodeType::Edge> e_route(NodeIR const& n) {
   std::vector<NodeType::Edge> out;
@@ -544,29 +521,6 @@ void c_expr(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
-void c_label(NodeIR const&, NodeType::CompileContext&) {}  // 不注册（指针已替换）
-
-void c_goto(NodeIR const& n, NodeType::CompileContext& ctx) {
-  std::string const label = n.goto_target;
-  std::string const target = label.empty() ? graph::kEnd : ctx.resolve(label);
-  int const max = n.max;
-  ctx.graph.add_node(n.id, [n_ = n.id, target, max](Json const& state, NodeContext&) {
-    long cur = 0;
-    if (state.contains(kLoopCountsKey))
-      if (auto const& lc = state.at(kLoopCountsKey); lc.contains(n_) && lc[n_].is_number())
-        cur = lc[n_].get<long>();
-    long const next = cur + 1;
-    Json update = Json{{kLoopCountsKey, Json{{n_, next}}}};
-    Command c;
-    c.update = std::move(update);
-    c.goto_nodes = {next >= max ? std::string(graph::kEnd) : target};
-    return c;
-  });
-  ++ctx.registered;
-}
-
-// echo：把 text 模板（支持 $节点.result.字段 / @config.*，段落内嵌引用同样解析）打印到
-// 终端，并落一条 source=node 诊断到会话日志（debug 台可回放）；不改 state、无 next 外副作用。
 void c_echo(NodeIR const& n, NodeType::CompileContext& ctx) {
   Json const text_tpl =
       (n.raw.is_object() && n.raw.contains("text")) ? n.raw["text"] : Json("");
@@ -808,32 +762,6 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "expr \"" + n.expr + "\" → then=" + n.then + " else=" + n.else_;
        }, v_expr, c_expr, e_expr, t_expr},
-
-      // ---------------- label ----------------
-      {NodeKind::Label, "label",
-       [](Json const& n) { return kind_is(n, "label"); },
-       [](NodeIR& out, Json const& node) { get_str(out, node, "next", out.next); },  // next 可选
-       [](Json& node, NodeIR const& n) {
-         node["kind"] = "label";
-         if (!n.next.empty()) node["next"] = n.next;
-       },
-       [](NodeIR const&) { return std::string("label"); }, v_label, c_label, e_label, t_none},
-
-      // ---------------- goto ----------------
-      {NodeKind::Goto, "goto",
-       [](Json const& n) { return has(n, "goto") || kind_is(n, "goto"); },
-       [](NodeIR& out, Json const& node) {
-         get_str(out, node, "goto", out.goto_target);
-         if (node.contains("max") && node["max"].is_number_integer())
-           out.max = node["max"].get<int>();
-       },
-       [](Json& node, NodeIR const& n) {
-         node["goto"] = n.goto_target;
-         node["max"] = n.max;
-       },
-       [](NodeIR const& n) {
-         return "goto " + n.goto_target + " (max " + std::to_string(n.max) + ")";
-       }, v_goto, c_goto, e_goto, t_none},
 
       // ---------------- loop（wfr-㉚，替代 label + goto）----------------
       // 循环容器：body 是子树；`_continue` 回节点头（回边）、`_break` 去 next。

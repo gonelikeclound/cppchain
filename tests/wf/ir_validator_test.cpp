@@ -81,27 +81,41 @@ TEST(WfIr, parse_errors) {
 }
 
 TEST(WfIr, classify_precedence) {
-  EXPECT_EQ(WorkflowIR::classify(Json{{"kind", "label"}}), NodeKind::Label);
-  EXPECT_EQ(WorkflowIR::classify(Json{{"goto", "l"}}), NodeKind::Goto);
+  EXPECT_EQ(WorkflowIR::classify(Json{{"kind", "loop"}}), NodeKind::Loop);
   EXPECT_EQ(WorkflowIR::classify(Json{{"expr", "a"}}), NodeKind::Expr);
   EXPECT_EQ(WorkflowIR::classify(Json{{"tool", "t"}}), NodeKind::Tool);
   EXPECT_FALSE(WorkflowIR::classify(Json{{"expr", "a"}, {"tool", "t"}}).has_value());  // 歧义
-  EXPECT_FALSE(WorkflowIR::classify(Json{{"kind", "label"}, {"tool", "t"}}).has_value());
+  EXPECT_FALSE(WorkflowIR::classify(Json{{"kind", "loop"}, {"tool", "t"}}).has_value());
   EXPECT_FALSE(WorkflowIR::classify(Json{{"id", "x"}}).has_value());  // 无决定性键
 }
 
-TEST(WfIr, label_and_goto_parse) {
+TEST(WfIr, loop_parse_and_deprecated_label_goto_rejected) {
   auto ir = WorkflowIR::parse(Json{
       {"id", "wf_l"},
       {"trigger", Json{{"source", "time"}, {"timing", Json{{"kind", "schedule"},
                                                            {"schedule", "0 * * * *"}}}}},
-      {"nodes", Json::array({Json{{"id", "l0"}, {"kind", "label"}},
-                             Json{{"id", "gp"}, {"goto", "l0"}, {"max", 4}}})}});
-  ASSERT_TRUE(ir);
-  EXPECT_EQ(ir->nodes[0].kind, NodeKind::Label);
-  EXPECT_EQ(ir->nodes[1].kind, NodeKind::Goto);
-  EXPECT_EQ(ir->nodes[1].goto_target, "l0");
-  EXPECT_EQ(ir->nodes[1].max, 4);
+      {"nodes", Json::array({Json{{"id", "poll"}, {"kind", "loop"}, {"max", 4},
+                                  {"next", "_turn_end"},
+                                  {"body", Json::array({Json{{"id", "gp"}, {"tool", "echo"},
+                                                             {"output_schema",
+                                                              Json{{"value", "string"}}},
+                                                             {"next", "_continue"}}})}}})}});
+  ASSERT_TRUE(ir) << ir.error();
+  EXPECT_EQ(ir->nodes[0].kind, NodeKind::Loop);
+  EXPECT_EQ(ir->nodes[0].max, 4);
+  ASSERT_EQ(ir->nodes[0].body.size(), 1u);
+  EXPECT_EQ(ir->nodes[0].body[0].next, "_continue");
+
+  // 废弃写法：parse 阶段就拒，且报错教人改用 loop
+  for (Json const& dead : {Json{{"id", "wf_d"}, {"nodes", Json::array({Json{{"id", "l0"},
+                                                                          {"kind", "label"}}})}},
+                           Json{{"id", "wf_d"}, {"nodes", Json::array({Json{{"id", "gp"},
+                                                                          {"goto", "l0"},
+                                                                          {"max", 4}}})}}}) {
+    auto const got = WorkflowIR::parse(dead);
+    ASSERT_FALSE(got.has_value());
+    EXPECT_NE(got.error().find("loop"), std::string::npos) << got.error();
+  }
 }
 
 // ---- validator：正向 ----
@@ -255,38 +269,25 @@ TEST(WfValidator, graph_rules) {
   EXPECT_FALSE(r3.ok());
   EXPECT_NE(r3.describe().find("VG7"), std::string::npos);
 
-  // VG8：死 label
-  auto j4 = minimal_price_ir();
-  j4["nodes"].push_back(Json{{"id", "dead_l"}, {"kind", "label"}});
-  auto r4 = validate_json(j4, ValidatorOptions{&tools()});
-  EXPECT_FALSE(r4.ok());
-  EXPECT_NE(r4.describe().find("VG8"), std::string::npos);
-
-  // VG3：label 在末尾没有续接
-  auto j5 = Json{{"id", "wf_l"},
-                 {"trigger", Json{{"source", "time"},
-                                  {"timing", Json{{"kind", "schedule"}, {"schedule", "0 * * * *"}}}}},
-                 {"nodes", Json::array({Json{{"id", "only"}, {"kind", "label"}}})}};
-  auto r5 = validate_json(j5, ValidatorOptions{&tools()});
-  EXPECT_FALSE(r5.ok());
-  EXPECT_NE(r5.describe().find("VG3"), std::string::npos);
 }
 
-// ---- label 消解（D2）：整体计算，不要求 label 先于 goto ----
+// ---- loop（wfr-㉚）：循环容器 ----
 
-TEST(WfValidator, label_loop_header) {
-  // label 在开头、goto 在末尾（规范形态：入口经过 label 进循环体）
+TEST(WfValidator, loop_container_validates) {
   Json j = Json{
       {"id", "wf_poll"},
       {"trigger", Json{{"source", "time"}, {"timing", Json{{"kind", "schedule"},
                                                            {"schedule", "0 * * * *"}}}}},
       {"nodes", Json::array(
-                    {Json{{"id", "l0"}, {"kind", "label"}},
-                     Json{{"id", "fetch"}, {"tool", "fetch_price"},
-                          {"parameters", Json{{"item_id", "@config.product_id"}}},
-                          {"output_schema", Json{{"in_stock", "boolean"}}}, {"next", "check"}},
-                     node("check", "$fetch.result.in_stock == true", "notify", "gp"),
-                     Json{{"id", "gp"}, {"goto", "l0"}, {"max", 4}},
+                    {Json{{"id", "poll"}, {"kind", "loop"}, {"max", 4},
+                          {"next", "notify"}, {"on_max", "_turn_end"},
+                          {"body", Json::array(
+                                       {Json{{"id", "fetch"}, {"tool", "fetch_price"},
+                                             {"parameters", Json{{"item_id", "@config.product_id"}}},
+                                             {"output_schema", Json{{"in_stock", "boolean"}}},
+                                             {"next", "check"}},
+                                        node("check", "$fetch.result.in_stock == true", "_break",
+                                             "_continue")})}},
                      Json{{"id", "notify"}, {"tool", "send_notification"},
                           {"parameters", Json{{"title", "到货"}}},
                           {"output_schema", Json{{"ok", "boolean"}}}, {"next", "_turn_end"}}})}};
@@ -294,8 +295,8 @@ TEST(WfValidator, label_loop_header) {
   EXPECT_TRUE(r.ok()) << r.describe();
 }
 
-TEST(WfValidator, label_as_join_target) {
-  // 汇合：两条分支都指向 label，label 之后才是公共续接（labels 仅作汇合目标）
+TEST(WfValidator, two_branches_join_at_one_node) {
+  // 汇合：两条分支都指向同一个普通节点（label 已删除，汇合不再需要占位节点）
   Json j = Json{
       {"id", "wf_join"},
       {"trigger", Json{{"source", "time"}, {"timing", Json{{"kind", "schedule"},
@@ -303,10 +304,9 @@ TEST(WfValidator, label_as_join_target) {
       {"nodes", Json::array(
                     {node("start", "true", "a", "b"),
                      Json{{"id", "a"}, {"tool", "echo"}, {"output_schema", Json{{"value", "string"}}},
-                          {"next", "join"}},
+                          {"next", "after"}},
                      Json{{"id", "b"}, {"tool", "echo"}, {"output_schema", Json{{"value", "string"}}},
-                          {"next", "join"}},
-                     Json{{"id", "join"}, {"kind", "label"}},
+                          {"next", "after"}},
                      Json{{"id", "after"}, {"tool", "send_notification"},
                           {"parameters", Json{{"title", "done"}}},
                           {"output_schema", Json{{"ok", "boolean"}}}, {"next", "_turn_end"}}})}};

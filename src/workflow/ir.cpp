@@ -118,13 +118,20 @@ std::expected<NodeKind, std::string> WorkflowIR::classify(Json const& node) {
   if (hits.size() > 1)
     return std::unexpected("ambiguous node: multiple decisive keys (kind/goto/expr/tool)");
 
-  // 命中 0：写了 kind 但没人认领 → 报"未知 kind 值"（比笼统的 no decisive key 有用）
+  // 命中 0：先给两个**已废弃**的写法一个能自纠的报错（生成器/旧 IR 都可能是它们），
+  // 再报"未知 kind 值"（比笼统的 no decisive key 有用）。
+  if ((node.contains("kind") && node["kind"].is_string() &&
+       (node["kind"] == "label" || node["kind"] == "goto")) ||
+      node.contains("goto"))
+    return std::unexpected(
+        "label/goto 已废弃（wfr-㉚）：请改用 {\"kind\":\"loop\",\"max\":N,\"next\":<出口>,"
+        "\"body\":[<循环体节点>]}；body 内用 _continue 下一轮、_break 跳出循环");
   if (node.contains("kind") && node["kind"].is_string())
     return std::unexpected("unknown node kind: '" + node["kind"].get<std::string>() +
                            "'（见 node_types.cpp 的注册表）");
   return std::unexpected(
-      "unknown node: no decisive key (kind=loop|label|goto|expr|tool|model|route|"
-      "run_tools|load_history, 或 goto/expr/tool 键)");
+      "unknown node: no decisive key (kind=loop|expr|tool|model|route|"
+      "run_tools|load_history, 或 expr/tool 键)");
 }
 
 std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {

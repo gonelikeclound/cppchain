@@ -57,9 +57,7 @@ struct TriggerIR {
 enum class NodeKind {
   Tool,
   Expr,
-  Label,
-  Goto,
-  // ---- wfr-㉚：循环容器（替代 label + goto，见 02-arch-design/16）----
+  // ---- wfr-㉚：循环容器（已替代 label + goto，见 02-arch-design/16）----
   // loop 是**真实图节点**：节点头自己做「计数 + 分支」（Command.goto_nodes），
   // body 是它的子树；body 里的 `_continue` 回节点头（回边）、`_break` 跳到 loop 的 next。
   Loop,
@@ -104,9 +102,7 @@ struct NodeIR {
   std::string then;
   std::string else_;
 
-  // Goto 节点
-  std::string goto_target;                   // 指向一个 label 节点的 id（§4）
-  int max = 0;                               // 循环有界（正整数）
+  int max = 0;  // Loop：body 的最大执行次数（正整数）
 
   // Loop 节点（wfr-㉚）：循环容器。id 全局唯一、**不 mangle**（图/日志/results 键按 id 对齐）。
   //   next   = 循环的**正常出口**（`_break` 去这里，也是"循环成功结束"的落点）；

@@ -82,7 +82,7 @@ struct TempDir {
   [[nodiscard]] std::string str() const { return dir.string(); }
 };
 
-// D 阶段的完整形态现在收敛为：load_history → [label → model → route → run_tools → goto]
+// D 阶段的完整形态现在收敛为：load_history → loop[model → route → run_tools → _continue]
 // （save_history 已随 ④ 删除；历史是日志的投影，无需持久化节点）。
 Json history_react_ir() {
   return Json{
@@ -94,22 +94,27 @@ Json history_react_ir() {
                           {"kind", "load_history"},
                           {"path", "@config.workspace"},
                           {"session", "@config.session"},
-                          {"next", "L"}},
-                     Json{{"id", "L"}, {"kind", "label"}},
-                     Json{{"id", "think"},
-                          {"kind", "model"},
-                          {"model", "m"},
-                          {"tools", "ts"},
-                          {"next", "route"}},
-                     Json{{"id", "route"},
-                          {"kind", "route"},
-                          {"on", "last_ai_outcome"},
-                          {"cases", Json{{"tool_calls", "act"},
-                                         {"invalid_tool_calls", "_fail"},
-                                         {"text", "_turn_end"}}},
-                          {"default", "_fail"}},
-                     Json{{"id", "act"}, {"kind", "run_tools"}, {"next", "loop"}},
-                     Json{{"id", "loop"}, {"goto", "L"}, {"max", 4}}})}};
+                          {"next", "loop"}},
+                     Json{{"id", "loop"},
+                          {"kind", "loop"},
+                          {"max", 4},
+                          {"next", "_turn_end"},
+                          {"body", Json::array(
+                                       {Json{{"id", "think"},
+                                             {"kind", "model"},
+                                             {"model", "m"},
+                                             {"tools", "ts"},
+                                             {"next", "route"}},
+                                        Json{{"id", "route"},
+                                             {"kind", "route"},
+                                             {"on", "last_ai_outcome"},
+                                             {"cases", Json{{"tool_calls", "act"},
+                                                            {"invalid_tool_calls", "_fail"},
+                                                            {"text", "_turn_end"}}},
+                                             {"default", "_fail"}},
+                                        Json{{"id", "act"},
+                                             {"kind", "run_tools"},
+                                             {"next", "_continue"}}})}}})}};
 }
 
 struct Fixture {
@@ -257,17 +262,20 @@ TEST(WfHistoryNodes, different_workspace_is_isolated) {
 
 // VG9：load_history 出现在消费 messages 的节点之后 → 硬拒绝（读了没人用）
 TEST(WfHistoryNodes, validator_rejects_load_history_after_consumer) {
-  auto ir_json = history_react_ir();
-  // 把 recall 挪到最后（数组下标即顺序）
-  Json nodes = ir_json["nodes"];
-  Json recall = nodes[0];
-  nodes.erase(nodes.begin());
-  nodes.push_back(recall);
-  ir_json["nodes"] = nodes;
+  // 同一个作用域（顶层）里 model 先出现、load_history 在后 → "加载了也没人用"。
+  // 注：loop body 里禁止放 load_history（VG13），所以这条只能在顶层验。
+  Fixture f;
+  Json ir_json = Json{
+      {"id", "wf_vg9"},
+      {"nodes", Json::array(
+                    {Json{{"id", "think"}, {"kind", "model"}, {"model", "m"},
+                          {"tools", "ts"}, {"next", "recall"}},
+                     Json{{"id", "recall"}, {"kind", "load_history"},
+                          {"path", "@config.workspace"}, {"next", "_turn_end"}}})}};
 
-  FakeToolSinks sinks;
-  tool::ToolRegistry const reg = make_fake_tools(sinks);
-  auto r = validate_json(ir_json, ValidatorOptions{&reg});
+  ValidatorOptions o{&f.registry};
+  o.components = &f.components;
+  auto r = validate_json(ir_json, o);
   ASSERT_FALSE(r.ok());
   EXPECT_NE(r.describe().find("VG9"), std::string::npos) << r.describe();
 }

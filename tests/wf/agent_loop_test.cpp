@@ -82,22 +82,30 @@ Json react_ir() {
       {"trigger", Json{{"source", "time"},
                        {"timing", Json{{"kind", "schedule"}, {"schedule", "0 8 * * *"}}}}},
       {"nodes", Json::array(
-                    {Json{{"id", "L"}, {"kind", "label"}},
-                     Json{{"id", "think"},
-                          {"kind", "model"},
-                          {"model", "m"},
-                          {"tools", "ts"},
-                          {"next", "route"}},
-                     Json{{"id", "route"},
-                          {"kind", "route"},
-                          {"on", "last_ai_outcome"},
-                          {"cases", Json{{"tool_calls", "act"},
-                                         {"invalid_tool_calls", "_fail"},
-                                         {"text", "_turn_end"}}},
-                          {"default", "_fail"}},
-                     Json{{"id", "act"}, {"kind", "run_tools"}, {"next", "loop"}},
-                     Json{{"id", "loop"}, {"goto", "L"}, {"max", 4}}})}};
+                    {Json{{"id", "loop"},
+                          {"kind", "loop"},
+                          {"max", 4},
+                          {"next", "_turn_end"},
+                          {"body", Json::array(
+                                       {Json{{"id", "think"},
+                                             {"kind", "model"},
+                                             {"model", "m"},
+                                             {"tools", "ts"},
+                                             {"next", "route"}},
+                                        Json{{"id", "route"},
+                                             {"kind", "route"},
+                                             {"on", "last_ai_outcome"},
+                                             {"cases", Json{{"tool_calls", "act"},
+                                                            {"invalid_tool_calls", "_fail"},
+                                                            {"text", "_turn_end"}}},
+                                             {"default", "_fail"}},
+                                        Json{{"id", "act"},
+                                             {"kind", "run_tools"},
+                                             {"next", "_continue"}}})}}})}};
 }
+
+// react_ir 现在是 loop 形态：think/route/act 都在 nodes[0].body 里。
+Json& body_node(Json& ir, std::size_t i) { return ir["nodes"][0]["body"][i]; }
 
 struct Fixture {
   FakeToolSinks sinks;
@@ -182,8 +190,8 @@ TEST(WfAgentLoop, invalid_tool_call_fails_closed_instead_of_silently_ending) {
   EXPECT_NE(r.error().message.find("_fail"), std::string::npos) << r.error().message;
 }
 
-// 循环上界：模型一直要工具 → goto 的 max 把它截停（不是无限循环）
-TEST(WfAgentLoop, loop_is_bounded_by_goto_max) {
+// 循环上界：模型一直要工具 → loop 的 max 把它截停（不是无限循环）
+TEST(WfAgentLoop, loop_is_bounded_by_max) {
   Fixture f;
   for (int i = 0; i < 20; ++i)
     f.model.replies.push_back(ai_tool_call("fetch_price", Json{{"item_id", "P"}}));
@@ -209,7 +217,7 @@ TEST(WfAgentLoop, validator_rejects_unknown_component) {
   comps.toolsets["ts"] = {"fetch_price"};
 
   auto ir_json = react_ir();
-  ir_json["nodes"][1]["model"] = "不存在的组件";
+  body_node(ir_json, 0)["model"] = "不存在的组件";
 
   ValidatorOptions o{&reg};
   o.components = &comps;
@@ -223,11 +231,11 @@ TEST(WfAgentLoop, validator_requires_route_to_cover_all_outcomes_or_default) {
   auto reg = make_fake_tools(sinks);
 
   auto ir_json = react_ir();
-  ir_json["nodes"][2] = Json{{"id", "route"},
-                             {"kind", "route"},
-                             {"on", "last_ai_outcome"},
-                             {"cases", Json{{"tool_calls", "act"}}},  // 只覆盖一档
-                             {"default", ""}};                        // 且没有 default
+  body_node(ir_json, 1) = Json{{"id", "route"},
+                               {"kind", "route"},
+                               {"on", "last_ai_outcome"},
+                               {"cases", Json{{"tool_calls", "act"}}},  // 只覆盖一档
+                               {"default", ""}};                        // 且没有 default
 
   auto r = validate_json(ir_json, ValidatorOptions{&reg});
   ASSERT_FALSE(r.ok()) << "漏档必须被拒（否则会静默走错分支）";
@@ -239,23 +247,32 @@ TEST(WfAgentLoop, validator_rejects_unknown_outcome_key) {
   auto reg = make_fake_tools(sinks);
 
   auto ir_json = react_ir();
-  ir_json["nodes"][2]["cases"]["编造的档"] = "act";
+  body_node(ir_json, 1)["cases"]["编造的档"] = "act";
 
   auto r = validate_json(ir_json, ValidatorOptions{&reg});
   ASSERT_FALSE(r.ok());
   EXPECT_NE(r.describe().find("VN10"), std::string::npos) << r.describe();
 }
 
-// 规范 §3：kind 是通用判别键，历史写法（靠键判别）继续支持 —— 两者必须等价。
-// （这条是回归：我一度只给新 kind 加显式判别，导致 {"kind":"goto"} 反被拒。）
-TEST(WfAgentLoop, kind_key_and_legacy_discrimination_agree) {
+// 规范 §3：kind 是通用判别键。wfr-㉚ 之后 label/goto 已废弃 —— 必须被**明确拒绝**，
+// 且错误信息要能让人自纠（生成器/旧 IR 都可能还写着它们）。
+TEST(WfAgentLoop, kind_discrimination_and_deprecated_label_goto) {
   auto k = [](Json const& node) { return WorkflowIR::classify(node); };
 
-  EXPECT_EQ(*k(Json{{"id", "x"}, {"goto", "L"}, {"max", 1}}), NodeKind::Goto);
-  EXPECT_EQ(*k(Json{{"id", "x"}, {"kind", "goto"}, {"goto", "L"}, {"max", 1}}), NodeKind::Goto);
-  EXPECT_EQ(*k(Json{{"id", "x"}, {"kind", "label"}}), NodeKind::Label);
+  EXPECT_EQ(*k(Json{{"id", "x"}, {"kind", "loop"}, {"max", 1}, {"next", "_turn_end"},
+                    {"body", Json::array()}}),
+            NodeKind::Loop);
   EXPECT_EQ(*k(Json{{"id", "x"}, {"kind", "model"}, {"model", "m"}, {"next", "y"}}),
             NodeKind::Model);
+
+  // 废弃写法：两种都拒，且报错里点名"loop"给出路
+  for (Json const& dead : {Json{{"id", "x"}, {"goto", "L"}, {"max", 1}},
+                           Json{{"id", "x"}, {"kind", "goto"}, {"goto", "L"}, {"max", 1}},
+                           Json{{"id", "x"}, {"kind", "label"}}}) {
+    auto const got = k(dead);
+    ASSERT_FALSE(got.has_value()) << dead.dump();
+    EXPECT_NE(got.error().find("loop"), std::string::npos) << got.error();
+  }
 
   // 未知 kind 值 → 拒绝
   EXPECT_FALSE(k(Json{{"id", "x"}, {"kind", "编造的"}}).has_value());

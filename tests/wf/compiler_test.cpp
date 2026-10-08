@@ -35,21 +35,24 @@ Json price_ir() {
                           {"next", "_turn_end"}}})}};
 }
 
-// 轮询循环：label → fetch → expr(有货?) → notify | goto(max=4)
+// 轮询循环（loop 形态）：loop{max:4, next:notify, on_max:_turn_end, body:[fetch → check]}
 Json poll_ir() {
   return Json{
       {"id", "wf_poll"},
       {"trigger", Json{{"source", "time"}, {"timing", Json{{"kind", "schedule"},
                                                            {"schedule", "0 * * * *"}}}}},
       {"nodes", Json::array(
-                    {Json{{"id", "l0"}, {"kind", "label"}},
-                     Json{{"id", "fetch_st"}, {"tool", "fetch_price"},
-                          {"parameters", Json{{"item_id", "@config.product_id"}}},
-                          {"output_schema", Json{{"price", "number"}, {"in_stock", "boolean"}}},
-                          {"next", "check_st"}},
-                     Json{{"id", "check_st"}, {"expr", "$fetch_st.result.in_stock == true"},
-                          {"then", "notify"}, {"else", "gp"}},
-                     Json{{"id", "gp"}, {"goto", "l0"}, {"max", 4}},
+                    {Json{{"id", "poll"}, {"kind", "loop"}, {"max", 4},
+                          {"next", "notify"}, {"on_max", "_turn_end"},
+                          {"body", Json::array(
+                                       {Json{{"id", "fetch_st"}, {"tool", "fetch_price"},
+                                             {"parameters", Json{{"item_id", "@config.product_id"}}},
+                                             {"output_schema", Json{{"price", "number"},
+                                                                    {"in_stock", "boolean"}}},
+                                             {"next", "check_st"}},
+                                        Json{{"id", "check_st"},
+                                             {"expr", "$fetch_st.result.in_stock == true"},
+                                             {"then", "_break"}, {"else", "_continue"}}})}},
                      Json{{"id", "notify"}, {"tool", "send_notification"},
                           {"parameters", Json{{"title", "到货了"}}},
                           {"output_schema", Json{{"ok", "boolean"}}}, {"next", "_turn_end"}}})}};
@@ -99,9 +102,9 @@ TEST(WfCompiler, poll_loop_bounded) {
   ASSERT_TRUE(wf);
   auto r = fire_once(*wf, Json{{"product_id", "P1"}});
   ASSERT_TRUE(r) << r.error().message;
-  // 缺货 → 每轮走 else→goto，4 次后截止（body 恰好跑 max 次，无通知）
+  // 缺货 → 每轮走 else→_continue，4 次后按 on_max 截止（body 恰好跑 max 次，无通知）
   EXPECT_TRUE(sinks.notifications.empty());
-  EXPECT_EQ((*r)["loop_counts"]["gp"].get<long>(), 4);
+  EXPECT_EQ((*r)["loop_counts"]["poll"].get<long>(), 4);
 }
 
 TEST(WfCompiler, on_error_retry_succeeds) {
@@ -137,7 +140,7 @@ TEST(WfCompiler, on_error_retry_succeeds) {
 // 回归：on_error.fallback 指向 **label** 时，编译期必须把它解析成该标签的续接节点。
 // 原先 fallback 直接用原始 id 构造 Command.goto，而 label 并不注册为图节点
 // → validate 通过、compile 成功，一 fire 就 "Runtime: unknown node: L0"。
-TEST(WfCompiler, on_error_fallback_may_target_a_label) {
+TEST(WfCompiler, on_error_fallback_may_target_a_loop) {
   FakeToolSinks sinks;
   tool::ToolRegistry reg = make_fake_tools(sinks);
   reg.add(cppchain::tool::make_tool(
@@ -146,17 +149,21 @@ TEST(WfCompiler, on_error_fallback_may_target_a_label) {
         return std::unexpected(tool::ToolError{"boom"});
       }));
 
+  // fallback 指向 loop 节点（新机制下的"特殊目标"）：必须与指向普通节点一样能解析编译。
   Json ir_json = Json{
-      {"id", "wf_fb_label"},
+      {"id", "wf_fb_loop"},
       {"trigger", Json{{"source", "time"}, {"timing", Json{{"kind", "schedule"},
                                                            {"schedule", "0 8 * * *"}}}}},
       {"nodes", Json::array(
                     {Json{{"id", "main"}, {"tool", "always_fail"}, {"parameters", Json::object()},
-                          {"output_schema", Json{{"x", "number"}}}, {"next", "L0"},
-                          {"on_error", Json{{"retry", 0}, {"fallback", "L0"}}}},
-                     Json{{"id", "L0"}, {"kind", "label"}},
-                     Json{{"id", "backup"}, {"tool", "echo"}, {"parameters", Json{{"v", "fallback!"}}},
-                          {"output_schema", Json{{"value", "string"}}}, {"next", "_turn_end"}}})}};
+                          {"output_schema", Json{{"x", "number"}}}, {"next", "poll"},
+                          {"on_error", Json{{"retry", 0}, {"fallback", "poll"}}}},
+                     Json{{"id", "poll"}, {"kind", "loop"}, {"max", 2}, {"next", "_turn_end"},
+                          {"body", Json::array(
+                                       {Json{{"id", "backup"}, {"tool", "echo"},
+                                             {"parameters", Json{{"v", "fallback!"}}},
+                                             {"output_schema", Json{{"value", "string"}}},
+                                             {"next", "_break"}}})}}})}};
 
   auto ir = WorkflowIR::parse(ir_json);
   ASSERT_TRUE(ir) << ir.error();

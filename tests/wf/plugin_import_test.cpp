@@ -196,9 +196,9 @@ TEST(WfPlugin, imports_shape_violates_vi1) {
   ir.trigger = trig;
   ir.imports.push_back(ImportIR{/*lib=*/"", /*nodes=*/{"ultra"}});
   NodeIR node;  // 逐字段赋值（designated 初始化会触发 -Wmissing-field-initializers）
-  node.id = "L";
-  node.kind = NodeKind::Label;
-  node.raw = Json{{"id", "L"}, {"kind", "label"}};
+  node.id = "N";
+  node.kind = NodeKind::Echo;  // 随便一个内置类型：这条用例只关心 VI1（库名为空）
+  node.raw = Json{{"id", "N"}, {"kind", "echo"}};
   ir.nodes.push_back(std::move(node));
 
   auto r = validate(ir, {});

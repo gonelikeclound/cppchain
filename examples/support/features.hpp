@@ -13,7 +13,7 @@
 //   · time触发+schedule  trigger.source=="time" && trigger.kind=="schedule"
 //   · trigger.condition trigger.raw（递归）含 "condition" 键
 //   · llm_extract提取  任一 tool == "llm_extract"
-//   · loop结构        存在 Loop（或历史写法 Label/Goto）节点
+//   · loop结构        存在 Loop 循环容器节点
 //   · on_error降级     任一节点声明 on_error.fallback
 //   · 声称已下单       任一 send_notification 的标题/正文含 "下单" 或 "购买"（诚实性审计）
 //   · 未知特征名       → false（特征表里登了才认）
@@ -147,11 +147,10 @@ inline bool check(WorkflowIR const& ir, std::string_view name) {
            !detail::has_key_anywhere(ir.trigger->raw, "condition");
   if (name == "llm_extract提取")
     return detail::any_tool(ir, [](std::string_view t) { return t == "llm_extract"; });
-  if (name == "loop结构" || name == "label/goto结构") {
+  if (name == "loop结构" || name == "label/goto结构") {  // 旧名保留为别名（历史用例）
     bool hit = false;
     for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
-      if (n.kind == NodeKind::Loop || n.kind == NodeKind::Label || n.kind == NodeKind::Goto)
-        hit = true;
+      if (n.kind == NodeKind::Loop) hit = true;
       return !hit;
     });
     return hit;

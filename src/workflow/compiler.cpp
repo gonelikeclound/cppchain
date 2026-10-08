@@ -127,23 +127,6 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   if (ir.nodes.empty())
     return invalid("IR nodes 为空（生成器不应产出）");
 
-  // 2) 求解 label 续接映射（节点 id → 续接 id；非 label 映射到自身）
-  std::unordered_map<std::string, std::string> cont;
-  for (std::size_t i = 0; i < ir.nodes.size(); ++i) {
-    NodeIR const& n = ir.nodes[i];
-    cont[n.id] = n.id;  // 占位（非 label 用不到）
-    if (n.kind == NodeKind::Label) {
-      std::string c = n.next;  // 显式 next 优先（wfr-㉘）；缺省回退"下表第一个非 label"
-      if (c.empty())
-        for (std::size_t k = i + 1; k < ir.nodes.size(); ++k)
-          if (ir.nodes[k].kind != NodeKind::Label) {
-            c = ir.nodes[k].id;
-            break;
-          }
-      cont[n.id] = c;  // VG3 保证非空
-    }
-  }
-
   bool need_fail_node = false;  // 只有真的用到 _fail 才注册那个节点（否则会污染 registered 计数）
   auto resolve = [&](std::string const& t) -> std::string {
     if (t == kTurnEndName) return graph::kEnd;
@@ -151,8 +134,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
       need_fail_node = true;
       return kFailTarget;
     }
-    auto it = cont.find(t);
-    return it == cont.end() ? t : it->second;
+    return t;  // id 全局唯一：不再需要 label 那种"续接消解"
   };
 
   // 3) StateSchema：results / loop_counts 用合并 reducer，其余键 overwrite
@@ -218,7 +200,6 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
 
   // 4) 入口 = nodes[0]；为 label 时取它的续接
   std::string entry = ir.nodes[0].id;
-  if (ir.nodes[0].kind == NodeKind::Label) entry = resolve(entry);
   if (entry.empty() || entry == graph::kEnd)
     return invalid("入口无法解析");
 

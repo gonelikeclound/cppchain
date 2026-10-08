@@ -12,19 +12,22 @@ using namespace cppchain::workflow;
 
 namespace {
 
-// 与 wfr_demo 的 loop_wf 同构（label + tool + expr + goto 回边、无 trigger）
+// 与 wfr_demo 的 loop_wf 同构（loop 容器 + tool + expr、无 trigger）
 Json loop_ir_json() {
   return Json{{"id", "loop_wf"},
               {"nodes", Json::array(
-                            {Json{{"id", "l0"}, {"kind", "label"}},
-                             Json{{"id", "poll"},
-                                  {"tool", "fetch_price"},
-                                  {"parameters", Json{{"item_id", "P1"}}},
-                                  {"output_schema", Json{{"price", "number"}}},
-                                  {"next", "ck"}},
-                             Json{{"id", "ck"}, {"expr", "$poll.result.price < 500"},
-                                  {"then", "gp"}, {"else", "_turn_end"}},
-                             Json{{"id", "gp"}, {"goto", "l0"}, {"max", 3}}})}};
+                            {Json{{"id", "poll"}, {"kind", "loop"}, {"max", 3},
+                                  {"next", "_turn_end"},
+                                  {"body", Json::array(
+                                               {Json{{"id", "fetch"},
+                                                     {"tool", "fetch_price"},
+                                                     {"parameters", Json{{"item_id", "P1"}}},
+                                                     {"output_schema", Json{{"price", "number"}}},
+                                                     {"next", "ck"}},
+                                                Json{{"id", "ck"},
+                                                     {"expr", "$fetch.result.price < 500"},
+                                                     {"then", "_break"},
+                                                     {"else", "_continue"}}})}}})}};
 }
 
 Json rec(std::string run, std::string node, std::string phase, Json update = Json::object(),
@@ -41,30 +44,30 @@ TEST(DebugView, graph_exports_nodes_and_edges) {
   ASSERT_TRUE(ir) << ir.error();
 
   Json g = debug_view_graph(*ir);
-  ASSERT_EQ(g["nodes"].size(), 4u);
-  EXPECT_EQ(g["nodes"][0]["id"], "l0");
-  EXPECT_EQ(g["nodes"][0]["kind"], "label");
+  ASSERT_EQ(g["nodes"].size(), 3u);  // loop 容器平铺 + body 两个节点
+  EXPECT_EQ(g["nodes"][0]["id"], "poll");
+  EXPECT_EQ(g["nodes"][0]["kind"], "loop");
   // 每个节点带完整原始定义（选中节点 JSON 面板的数据源）
-  EXPECT_EQ(g["nodes"][1]["id"], "poll");
+  EXPECT_EQ(g["nodes"][1]["id"], "fetch");
   EXPECT_EQ(g["nodes"][1]["def"]["tool"], "fetch_price");
   EXPECT_EQ(g["nodes"][1]["def"]["parameters"]["item_id"], "P1");
 
   auto edges = g["edges"];
-  ASSERT_EQ(edges.size(), 4u);
-  // poll → ck（next）
-  EXPECT_EQ(edges[0]["from"], "poll");
-  EXPECT_EQ(edges[0]["to"], "ck");
-  EXPECT_EQ(edges[0]["forward"], true);
-  // ck → then(gp) / else(_turn_end，终端)
-  EXPECT_EQ(edges[1]["from"], "ck");
-  EXPECT_EQ(edges[2]["from"], "ck");
-  bool saw_terminal = false, saw_goto_back = false;
+  // poll→body、poll→next(_break 落点)、poll→on_max(跑满落点)、fetch→ck、ck→_break、ck→_continue(回边)
+  ASSERT_EQ(edges.size(), 6u);
+  // poll 的三条出边（body 入口、_break 落点、跑满落点）都是前向
+  bool saw_body = false, saw_terminal = false, saw_continue_back = false;
   for (auto const& e : edges) {
+    if (e["from"] == "poll" && e["label"] == "body" && e["to"] == "fetch" && e["forward"] == true)
+      saw_body = true;
     if (e.value("terminal", false) && e["to"] == "_turn_end") saw_terminal = true;
-    if (e["label"] == "goto" && e["forward"] == false && e["to"] == "l0") saw_goto_back = true;
+    // `_continue` 就地解析成 loop 节点头，且是唯一回边
+    if (e["label"] == "else" && e["to"] == "poll" && e["forward"] == false)
+      saw_continue_back = true;
   }
-  EXPECT_TRUE(saw_terminal) << "else→_turn_end 应标为终端";
-  EXPECT_TRUE(saw_goto_back) << "goto 应导出为回边（forward=false）";
+  EXPECT_TRUE(saw_body) << "loop→body 入口应是前向边";
+  EXPECT_TRUE(saw_terminal) << "_turn_end 应标为终端";
+  EXPECT_TRUE(saw_continue_back) << "_continue 应导出为指向 loop 节点头的回边";
 }
 
 TEST(DebugView, logs_replay_loop_counts_per_record) {

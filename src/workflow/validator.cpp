@@ -206,40 +206,14 @@ void build_index(Ctx& c) {
   });
 }
 
-// 计算每个 label 的续接节点（D2：整体求解；不要求 label 先于 goto）。
-// 规则：label L 的续接 = 数组里 L 之后第一个非 label 节点。
-void resolve_labels(Ctx& c) {
-  auto const& nodes = c.ir.nodes;
-  for (std::size_t i = 0; i < nodes.size(); ++i) {
-    NodeIR const& n = nodes[i];
-    if (n.kind != NodeKind::Label) continue;
-    std::optional<std::size_t> j;
-    for (std::size_t k = i + 1; k < nodes.size(); ++k)
-      if (nodes[k].kind != NodeKind::Label) {
-        j = k;
-        break;
-      }
-    if (!j)
-      c.err("VG3", "label '" + n.id + "' 之后没有续接节点（label 必须位于其将要续接的链之前）");
-  }
-}
-
-// 指针目标替换：_turn_end → 终止 id；label → 续接；loop 保留名 → 节点头/出口。
+// 指针目标替换：_turn_end → 终止 id；loop 保留名 → 节点头/出口；其余原样（id 全局唯一，
+// 不再需要 label 那种"续接消解"）。
 // scope 非空表示"这个节点在某个 loop 的 body 里"。
 std::string resolve_target(Ctx const& c, std::string const& t, LoopScope const* scope = nullptr) {
   if (t == kTurnEnd) return kEndId;
   if (t == kContinueName) return scope != nullptr ? scope->loop_id : t;  // 回边 → loop 节点头
   if (t == kBreakName)
     return scope != nullptr ? resolve_target(c, scope->exit_target, nullptr) : t;
-  auto it = c.kind.find(t);
-  if (it != c.kind.end() && it->second == NodeKind::Label) {
-    // 续接由 resolve_labels 保证存在（label 之后必有非 label）
-    auto const& nodes = c.ir.nodes;
-    auto idx = c.index.at(t);
-    for (std::size_t k = idx + 1; k < nodes.size(); ++k)
-      if (nodes[k].kind != NodeKind::Label) return nodes[k].id;
-    return t;  // 不会走到（VG3 已报错）
-  }
   return t;
 }
 
@@ -389,8 +363,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                          std::to_string(kMaxRetry) + " 的整数");
       if (n.on_error->fallback) {
         std::string const& t = *n.on_error->fallback;
-        bool const exists =
-            t == kTurnEnd || (c.index.find(t) != c.index.end() && c.kind[t] != NodeKind::Goto);
+        bool const exists = t == kTurnEnd || c.index.find(t) != c.index.end();
         if (!exists)
           c.err("VH1", "tool 节点 '" + n.id + "' 的 on_error.fallback 指向不存在的节点 '" + t +
                            "'（应为节点 id 或 _turn_end）");
@@ -398,8 +371,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     }
   }
 
-  // ---- VG：指针、label 消解、环、可达性 ----
-  resolve_labels(c);
+  // ---- VG：指针、环、可达性 ----
 
   // 以下四条通用图规则**全部由 NodeType::edges() 驱动** —— 加一种节点不必再改这里。
   // （见 02-arch-design/12 §4.2：原先它们按 kind 各写一遍，是 28 处 if 链的来源。）
@@ -430,28 +402,6 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
         c.err("VG1", "节点 '" + n.id + "' 的 " + e.label + " 指向不存在的节点 '" + e.target + "'");
       }
     }
-    // goto 的边必须落在 label 上 —— **结构性约束**，非"可插拔节点类型"范畴，故留在此处
-    if (n.kind == NodeKind::Goto) {
-      auto const it = c.kind.find(n.goto_target);
-      if (it == c.kind.end())
-        c.err("VG1", "goto 节点 '" + n.id + "' 指向不存在的 label '" + n.goto_target + "'");
-      else if (it->second != NodeKind::Label)
-        c.err("VG1", "goto 节点 '" + n.id + "' 必须指向 label 节点，但 '" + n.goto_target +
-                         "' 不是 label");
-    }
-  }
-
-  // VG8：label 必须被引用（**任何边的目标**都算，不再按 kind 分支）
-  {
-    std::unordered_map<std::string, bool> targeted;
-    for (auto const& [mp, _s] : c.flat) {
-      NodeType const* t = node_type_of_ir(*mp);
-      if (t == nullptr || !t->edges) continue;
-      for (NodeType::Edge const& e : t->edges(*mp)) targeted[e.target] = true;
-    }
-    for (auto const& [np, _s] : c.flat)
-      if (np->kind == NodeKind::Label && targeted.find(np->id) == targeted.end())
-        c.err("VG8", "label '" + np->id + "' 没有被任何边指向（死 label）");
   }
 
   // ---- VG9：load_history 必须在消费 messages 的节点之前 ----
@@ -529,16 +479,11 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
 
   // ---- VG7：可达性（前向边） + 入口 ----
   {
-    std::string const entry = [&] {
-      if (ir.nodes.empty()) return std::string{};
-      NodeIR const& first = ir.nodes[0];
-      if (first.kind == NodeKind::Label) return resolve_target(c, first.id);
-      return first.id;
-    }();
+    std::string const entry = ir.nodes.empty() ? std::string{} : ir.nodes[0].id;
 
     if (ir.nodes.empty()) c.err("V2", "nodes 不能为空");
     if (entry.empty() || c.index.find(entry) == c.index.end())
-      c.err("VG6", "入口无法解析（nodes[0] 是 label 但无续接）");
+      c.err("VG6", "入口无法解析（nodes 为空或 nodes[0] 不在索引里）");
 
     // 前向可达集：从入口出发，沿 next/then/else **以及 on_error.fallback** 展开到不动点。
     //
@@ -560,7 +505,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       std::string const v = stack.back();
       stack.pop_back();
       auto it = c.kind.find(v);
-      if (it == c.kind.end() || it->second == NodeKind::Label) continue;
+      if (it == c.kind.end()) continue;
       NodeIR const& node = *c.by_id.at(v);
       NodeType const* t = node_type_of_ir(node);
       if (t == nullptr || !t->edges) continue;
@@ -573,7 +518,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     }
     // 死节点检查（含 loop body 内的节点）
     for (auto const& [np, _s] : c.flat)
-      if (np->kind != NodeKind::Label && !seen[np->id])
+      if (!seen[np->id])
         c.err("VG7", "节点 '" + np->id +
                          "' 从入口不可达且不是任何可达节点的 on_error.fallback 目标（死节点）");
   }
