@@ -125,3 +125,95 @@ TEST(DebugView, oversized_payload_trims_node_diag) {
   for (auto const& run : payload["runs"])
     for (auto const& r : run["records"]) EXPECT_NE(r.value("source", ""), "node");
 }
+// ---- wfr-㉚：loop 节点在调试台里的呈现与归属 ----
+
+namespace {
+
+// loop 形态的循环：loop{max:3, body:[poll → ck(_break/_continue)]} → notify
+Json loop_node_ir_json() {
+  return Json{
+      {"id", "loop_node_wf"},
+      {"nodes", Json::array(
+                    {Json{{"id", "poll"}, {"kind", "loop"}, {"max", 3}, {"next", "notify"},
+                          {"body", Json::array(
+                                       {Json{{"id", "fetch"},
+                                             {"tool", "fetch_price"},
+                                             {"parameters", Json{{"item_id", "P1"}}},
+                                             {"output_schema", Json{{"price", "number"}}},
+                                             {"next", "ck"}},
+                                        Json{{"id", "ck"}, {"expr", "$fetch.result.price < 500"},
+                                             {"then", "_break"}, {"else", "_continue"}}})}},
+                     Json{{"id", "notify"}, {"tool", "send_notification"},
+                          {"parameters", Json{{"title", "到货"}}},
+                          {"output_schema", Json{{"ok", "boolean"}}}, {"next", "_turn_end"}}})}};
+}
+
+Json const* find_node(Json const& g, std::string const& id) {
+  for (Json const& n : g["nodes"])
+    if (n.value("id", "") == id) return &n;
+  return nullptr;
+}
+
+Json const* find_edge(Json const& g, std::string const& from, std::string const& label) {
+  for (Json const& e : g["edges"])
+    if (e.value("from", "") == from && e.value("label", "") == label) return &e;
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(DebugView, loop_nodes_are_exported_flat_with_body_attribution) {
+  auto ir = WorkflowIR::parse(loop_node_ir_json());
+  ASSERT_TRUE(ir) << ir.error();
+  auto const g = debug_view_graph(*ir);
+
+  // 图是平铺的：loop 节点头与 body 里的节点是同级节点（不做容器框）
+  EXPECT_EQ(g["nodes"].size(), 4u);
+  ASSERT_NE(find_node(g, "poll"), nullptr);
+  EXPECT_EQ((*find_node(g, "poll"))["kind"], "loop");
+  EXPECT_EQ((*find_node(g, "notify"))["kind"], "tool");
+
+  // body 里的节点带 `loop` 归属（前端据此做迭代分组）；loop 自身与 loop 之后的节点不带
+  ASSERT_NE(find_node(g, "fetch"), nullptr);
+  EXPECT_EQ((*find_node(g, "fetch"))["loop"], "poll");
+  EXPECT_EQ((*find_node(g, "ck"))["loop"], "poll");
+  EXPECT_FALSE(find_node(g, "poll")->contains("loop"));
+  EXPECT_FALSE(find_node(g, "notify")->contains("loop"));
+}
+
+TEST(DebugView, loop_edges_are_resolved_into_graph_targets) {
+  auto ir = WorkflowIR::parse(loop_node_ir_json());
+  ASSERT_TRUE(ir) << ir.error();
+  auto const g = debug_view_graph(*ir);
+
+  // loop 节点头：body 入口与出口都是前向边
+  Json const* body_edge = find_edge(g, "poll", "body");
+  ASSERT_NE(body_edge, nullptr);
+  EXPECT_EQ((*body_edge)["to"], "fetch");
+  EXPECT_TRUE((*body_edge)["forward"].get<bool>());
+  Json const* next_edge = find_edge(g, "poll", "next");
+  ASSERT_NE(next_edge, nullptr);
+  EXPECT_EQ((*next_edge)["to"], "notify");
+  EXPECT_TRUE((*next_edge)["forward"].get<bool>());
+
+  // `_continue` → loop 节点头，且标成**回边**（前端据此画绕行弧线）
+  Json const* back = find_edge(g, "ck", "else");
+  ASSERT_NE(back, nullptr);
+  EXPECT_EQ((*back)["to"], "poll");
+  EXPECT_FALSE((*back)["forward"].get<bool>());
+
+  // `_break` → loop 的 next，仍是前向边
+  Json const* brk = find_edge(g, "ck", "then");
+  ASSERT_NE(brk, nullptr);
+  EXPECT_EQ((*brk)["to"], "notify");
+  EXPECT_TRUE((*brk)["forward"].get<bool>());
+}
+
+TEST(DebugView, html_carries_the_loop_kind_and_colour) {
+  auto ir = WorkflowIR::parse(loop_node_ir_json());
+  ASSERT_TRUE(ir) << ir.error();
+  auto const html = render_debug_html(build_debug_payload(*ir, {}));
+  EXPECT_NE(html.find("kind-loop"), std::string::npos);   // CSS 配色
+  EXPECT_NE(html.find("loop:{f:'#e6dcf7'"), std::string::npos);  // 图例
+  EXPECT_NE(html.find("n.kind==='loop'"), std::string::npos);    // 分组维度 = loop 节点
+}

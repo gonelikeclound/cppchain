@@ -4,6 +4,7 @@
 #include "cppchain/workflow/debug_view.hpp"
 
 #include "cppchain/workflow/ir.hpp"
+#include "cppchain/workflow/ir_walk.hpp"
 #include "cppchain/workflow/node_type.hpp"
 
 #include <map>
@@ -13,31 +14,47 @@
 
 namespace cppchain::workflow {
 
+// 图是**平铺**的（loop 不做容器框）：loop 节点就是普通节点，body 里的节点额外带一个
+// `loop` 归属字段（与 import 的 origin_wf 同一套"节点级扁平归属"），前端据此做迭代分组。
 Json debug_view_graph(WorkflowIR const& ir) {
   Json nodes = Json::array();
-  for (NodeIR const& n : ir.nodes) {
+  Json edges = Json::array();
+
+  for_each_node(ir, [&](NodeIR const& n, LoopScope const* scope) {
     std::string const kind = type_name_of(n);
     std::string text;
     if (NodeType const* t = node_type_of_name(kind); t != nullptr && t->describe)
       text = t->describe(n);
     else
       text = kind + " " + n.id;
-    nodes.push_back(Json{{"id", n.id}, {"kind", kind}, {"text", text}, {"def", n.raw}});
-  }
-  Json edges = Json::array();
-  for (NodeIR const& n : ir.nodes) {
-    if (NodeType const* t = node_type_of_name(type_name_of(n)); t != nullptr && t->edges)
-      for (NodeType::Edge const& e : t->edges(n)) {
-        bool const terminal =
-            e.target == "__end__" || e.target == "__fail__" || e.target == "_turn_end" ||
-            e.target == "_fail";
-        edges.push_back(Json{{"from", n.id},
-                             {"to", e.target},
-                             {"label", e.label},
-                             {"forward", e.forward},
-                             {"terminal", terminal}});
+    Json node{{"id", n.id}, {"kind", kind}, {"text", text}, {"def", n.raw}};
+    if (scope != nullptr) node["loop"] = scope->loop_id;  // 归属（前端分组维度）
+    nodes.push_back(std::move(node));
+
+    NodeType const* t = node_type_of_name(kind);
+    if (t == nullptr || !t->edges) return true;
+    for (NodeType::Edge const& e : t->edges(n)) {
+      // 保留名在这里就地解析成图目标：_continue → loop 节点头（回边）、
+      // _break → loop 的 next。与 validator/compiler 同一套解析，画出来的边才和跑的一致。
+      std::string to = e.target;
+      bool forward = e.forward;
+      if (scope != nullptr && e.target == kContinueName) {
+        to = scope->loop_id;
+        forward = false;  // 回边：前端据此画绕行弧线
+      } else if (scope != nullptr && e.target == kBreakName) {
+        to = scope->exit_target;
       }
-  }
+      bool const terminal = to == "__end__" || to == "__fail__" || to == "_turn_end" ||
+                            to == "_fail";
+      edges.push_back(Json{{"from", n.id},
+                           {"to", std::move(to)},
+                           {"label", e.label},
+                           {"forward", forward},
+                           {"terminal", terminal}});
+    }
+    return true;
+  });
+
   return Json{{"nodes", std::move(nodes)}, {"edges", std::move(edges)}};
 }
 
@@ -137,6 +154,7 @@ svg text{font:12px system-ui}
 .n.kind-run_tools{fill:#cdeee7;stroke:#0d7a6f}
 .n.kind-load_history{fill:#e2e3fb;stroke:#5b6ee1}
 .n.kind-echo{fill:#fde7d9;stroke:#f9672a}
+.n.kind-loop{fill:#e6dcf7;stroke:#6a1b9a;stroke-width:2}
 .n.kind-input,.n.kind-end{stroke-dasharray:5 3}
 .n.active{stroke:var(--acc);stroke-width:2.5;filter:drop-shadow(0 0 3px #1a73e833)}
 .n.hit{stroke:#d93025;stroke-width:2.5}
@@ -242,7 +260,7 @@ const KIND_COLORS={
   model:{f:'#e8e0f4',s:'#7620bb'}, route:{f:'#d9f2dc',s:'#188038'},
   run_tools:{f:'#cdeee7',s:'#0d7a6f'}, load_history:{f:'#e2e3fb',s:'#5b6ee1'},
   input:{f:'#e7e9ec',s:'#5f6368'}, end:{f:'#f0f0f0',s:'#3c4043'},
-  echo:{f:'#fde7d9',s:'#f9672a'}
+  echo:{f:'#fde7d9',s:'#f9672a'}, loop:{f:'#e6dcf7',s:'#6a1b9a'}
 };
 function kindColor(k){ return KIND_COLORS[k]||{f:'#f1f3f4',s:'#9aa0a6'}; }
 function renderLegend(){
@@ -391,7 +409,11 @@ function renderLog(){
     // 轮次(会话/run) → workflow → 节点 → 记录（workflow 来自记录徽标，缺失则按节点归属推断）
     const wfs={};
     run.records.forEach(rc=>{
-      if(curGoto&&curIt){ const v=rc.loop&&rc.loop[curGoto]; if(v===undefined||Number(v)!==curIt) return; }
+      if(curGoto&&curIt){
+    const v=rc.loop&&rc.loop[curGoto]; if(v===undefined||Number(v)!==curIt) return;
+    // 收紧：只有该 loop body 里的节点才属于这次迭代（loop 之后的节点不带 loop 归属）
+    const nd=NODES[rc.node]; if(nd && nd.loop!==curGoto) return;
+  }
       const n0=rc.node?NODES[rc.node]:null;
       // 归属优先级：节点 origin_wf（import 子链）→ 记录徽标（父 workflow）→ 按节点/页推断
       const wf=(n0&&n0.def&&n0.def.origin_wf)
@@ -544,8 +566,9 @@ function renderNodeList(){
 }
 function renderGotoTabs(){
   const box=document.getElementById('gototabs'); box.innerHTML='';
-  const gotos=[...new Set(G.edges.filter(e=>!e.forward).map(e=>e.from))];
-  if(gotos.length===0){ box.textContent='（无循环 goto）'; return; }
+  // 分组维度 = loop 节点（wfr-㉚）。loop_counts 的键就是 loop 节点 id，所以迭代号直接可读。
+  const gotos=[...new Set(G.nodes.filter(n=>n.kind==='loop').map(n=>n.id))];
+  if(gotos.length===0){ box.textContent='（无循环）'; return; }
   gotos.forEach(g=>{
     const wrap=document.createElement('div'); wrap.className='gototab';
     const cap=document.createElement('div'); cap.textContent='↺ '+g;

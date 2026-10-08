@@ -12,6 +12,7 @@
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/generator.hpp>
 #include <cppchain/workflow/ir.hpp>
+#include <cppchain/workflow/ir_walk.hpp>
 #include <cppchain/workflow/node_type.hpp>
 
 #include <cstdio>
@@ -69,11 +70,15 @@ void print_readable_ir(WorkflowIR const& ir) {
     std::println("  trigger: time + schedule \"{}\"", ir.trigger->schedule);
   else
     std::println("  trigger: (手动触发,无调度 —— 由宿主拉起)");
-  for (NodeIR const& n : ir.nodes) {
-    // 展示也走注册表：加一种节点不必再改 demo 的 switch（见 02-arch-design/12）
+  // 展示也走注册表（加一种节点不必再改 demo 的 switch，见 02-arch-design/12）；
+  // 遍历走 for_each_node —— loop 的 body 缩进展示（wfr-㉚）。
+  for_each_node(ir, [](NodeIR const& n, LoopScope const* scope) {
     NodeType const* type = node_type_of_name(type_name_of(n));
-    std::println("  [{}] {}", n.id, type != nullptr ? type->describe(n) : "(未知节点类型)");
-  }
+    std::string const indent = scope == nullptr ? "  " : "    ↳ ";
+    std::println("{}[{}] {}", indent, n.id,
+                 type != nullptr ? type->describe(n) : "(未知节点类型)");
+    return true;
+  });
   std::println("  ---- JSON 规范形 ----");
   std::println("{}", ir.to_json().dump(2));
 }

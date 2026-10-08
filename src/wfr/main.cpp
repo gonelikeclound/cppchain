@@ -28,6 +28,7 @@
 #include <cppchain/workflow/debug_view.hpp>
 #include <cppchain/workflow/import.hpp>
 #include <cppchain/workflow/ir.hpp>
+#include <cppchain/workflow/ir_walk.hpp>
 #include <cppchain/workflow/session_log.hpp>
 #include <cppchain/workflow/wfr.hpp>
 #include <cppchain/workflow/wfr_lookup.hpp>
@@ -105,10 +106,19 @@ std::optional<std::string> locate(std::string const& workdir, std::string const&
   return wfr_lookup_workflow(workdir, spec, settings, publish_workflow_dirs());
 }
 
-bool has_model_node(Json const& ir_json) {
-  for (Json const& n : ir_json.value("nodes", Json::array()))
+// 递归扫（含 loop body）：迁移后 chat 的 model 节点在 loop 里，漏了就会把
+// "需要 LLM" 的 workflow 误判成无需 key，运行到一半才炸。
+bool has_model_node_in(Json const& nodes) {
+  for (Json const& n : nodes) {
+    if (!n.is_object()) continue;
     if (n.value("kind", "") == "model" || n.contains("model")) return true;
+    if (n.contains("body") && n["body"].is_array() && has_model_node_in(n["body"])) return true;
+  }
   return false;
+}
+
+bool has_model_node(Json const& ir_json) {
+  return has_model_node_in(ir_json.value("nodes", Json::array()));
 }
 
 }  // namespace
@@ -235,6 +245,13 @@ int main(int argc, char** argv) {
     } else {
       SessionLog slog(session_path(workdir, session_arg));
       recs = slog.records();
+      // 与 --all 分支对齐：run 带上会话前缀。否则前端"会话/轮次"二级选择器按
+      // run.split('/')[0] 分桶，每个 r-N 都会被当成一个独立会话（下拉里显示整串）。
+      for (Json& r : recs) {
+        r["session"] = session_arg;
+        std::string const run = r.value("run", "");
+        if (!run.empty() && run.find(session_arg + "/") != 0) r["run"] = session_arg + "/" + run;
+      }
     }
 
     Json const payload = build_debug_payload(*dir_ir, recs);
@@ -408,7 +425,15 @@ int main(int argc, char** argv) {
   }
   std::string const trig_desc =
       wf->trigger ? "trigger: schedule " + wf->trigger->schedule : "trigger: manual（wfr 拉起）";
-  std::println("workflow: {}（{}）  ·  {} 个节点", wf->ir_id, trig_desc, ir->nodes.size());
+  {
+    std::size_t count = 0;
+    cppchain::workflow::for_each_node(*ir, [&count](cppchain::workflow::NodeIR const&,
+                                                    cppchain::workflow::LoopScope const*) {
+      ++count;
+      return true;
+    });
+    std::println("workflow: {}（{}）  ·  {} 个节点", wf->ir_id, trig_desc, count);
+  }
   std::println("工作路径: {}", std::filesystem::absolute(workdir).string());
 
   // ---- 会话日志（.wfr/sessions/；session_path 已迁入 .wfr）----

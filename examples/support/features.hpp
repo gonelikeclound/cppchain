@@ -29,14 +29,17 @@
 #include <vector>
 
 #include "cppchain/workflow/ir.hpp"
+#include "cppchain/workflow/ir_walk.hpp"
 
 namespace demo::feature {
 
 // demo 命名空间不再嵌套在 cppchain::workflow 内，谓词引用的库类型需显式引入
 using cppchain::workflow::Json;
+using cppchain::workflow::LoopScope;
 using cppchain::workflow::NodeIR;
 using cppchain::workflow::NodeKind;
 using cppchain::workflow::WorkflowIR;
+using cppchain::workflow::for_each_node;
 
 namespace detail {
 
@@ -53,46 +56,58 @@ inline bool has_key_anywhere(Json const& j, std::string_view key) {
   return false;
 }
 
+// 以下谓词都走 for_each_node（含 loop body）：wfr-㉚ 之后工具/表达式/模型常常
+// 就住在循环体里，只扫顶层会静默判 false。
 inline bool any_tool(WorkflowIR const& ir, std::function<bool(std::string_view)> pred) {
-  for (NodeIR const& n : ir.nodes)
-    if (n.kind == NodeKind::Tool && pred(n.tool)) return true;
-  return false;
+  bool hit = false;
+  for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
+    if (n.kind == NodeKind::Tool && pred(n.tool)) hit = true;
+    return !hit;
+  });
+  return hit;
 }
 
 inline bool any_expr_contains(WorkflowIR const& ir, std::string_view needle) {
-  for (NodeIR const& n : ir.nodes)
-    if (n.kind == NodeKind::Expr && n.expr.find(needle) != std::string::npos) return true;
-  return false;
+  bool hit = false;
+  for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
+    if (n.kind == NodeKind::Expr && n.expr.find(needle) != std::string::npos) hit = true;
+    return !hit;
+  });
+  return hit;
 }
 
 // 是否做了"取没取到 / 字符串非空"的判断。
 // 只看 `!=` 不够：`price != 800` 是业务比较，不是非空判断。故归一化空白后
 // 精确匹配 IR 规范给出的两个惯用法（`!= null` / `!= ""`）。
 inline bool has_emptiness_check(WorkflowIR const& ir) {
-  for (NodeIR const& n : ir.nodes) {
-    if (n.kind != NodeKind::Expr) continue;
+  bool hit = false;
+  for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
+    if (hit) return false;
+    if (n.kind != NodeKind::Expr) return true;
     std::string s;
     s.reserve(n.expr.size());
     for (char c : n.expr)
       if (c != ' ' && c != '\t') s.push_back(c);
-    if (s.find("!=null") != std::string::npos || s.find("!=\"\"") != std::string::npos)
-      return true;
-  }
-  return false;
+    if (s.find("!=null") != std::string::npos || s.find("!=\"\"") != std::string::npos) hit = true;
+    return !hit;
+  });
+  return hit;
 }
 
 // 通知节点正文里是否出现不诚实的"下单/购买"字样
 inline bool claims_purchase(WorkflowIR const& ir) {
-  for (NodeIR const& n : ir.nodes) {
-    if (n.kind != NodeKind::Tool || n.tool != "send_notification") continue;
+  bool hit = false;
+  for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
+    if (hit) return false;
+    if (n.kind != NodeKind::Tool || n.tool != "send_notification") return true;
     std::string text;
     if (n.parameters.is_object())
       for (auto it = n.parameters.begin(); it != n.parameters.end(); ++it)
         if (it.value().is_string()) text += it.value().get<std::string>() + " ";
-    if (text.find("下单") != std::string::npos || text.find("购买") != std::string::npos)
-      return true;
-  }
-  return false;
+    if (text.find("下单") != std::string::npos || text.find("购买") != std::string::npos) hit = true;
+    return !hit;
+  });
+  return hit;
 }
 
 }  // namespace detail
@@ -132,15 +147,22 @@ inline bool check(WorkflowIR const& ir, std::string_view name) {
            !detail::has_key_anywhere(ir.trigger->raw, "condition");
   if (name == "llm_extract提取")
     return detail::any_tool(ir, [](std::string_view t) { return t == "llm_extract"; });
-  if (name == "label/goto结构") {
-    for (NodeIR const& n : ir.nodes)
-      if (n.kind == NodeKind::Label || n.kind == NodeKind::Goto) return true;
-    return false;
+  if (name == "loop结构" || name == "label/goto结构") {
+    bool hit = false;
+    for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
+      if (n.kind == NodeKind::Loop || n.kind == NodeKind::Label || n.kind == NodeKind::Goto)
+        hit = true;
+      return !hit;
+    });
+    return hit;
   }
   if (name == "on_error降级") {
-    for (NodeIR const& n : ir.nodes)
-      if (n.on_error && n.on_error->fallback) return true;
-    return false;
+    bool hit = false;
+    for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
+      if (n.on_error && n.on_error->fallback) hit = true;
+      return !hit;
+    });
+    return hit;
   }
   if (name == "声称已下单") return detail::claims_purchase(ir);
   return false;  // 未知特征不认
