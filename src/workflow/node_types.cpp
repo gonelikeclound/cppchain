@@ -19,6 +19,7 @@
 #include "cppchain/message/utf8.hpp"
 #include "cppchain/tool/tool_node.hpp"
 #include "cppchain/workflow/expr.hpp"
+#include "cppchain/workflow/ir_walk.hpp"
 #include "cppchain/workflow/refs.hpp"
 #include "cppchain/workflow/session_log.hpp"
 
@@ -116,6 +117,13 @@ std::size_t parse_history_budget(std::string const& text, std::string const& nod
   }
   throw tool::ToolException("load_history 节点 '" + node_id + "' 的 budget='" + text +
                             "' 不是正整数");
+}
+
+// wfr-㉚：边的 forward 判定。`_continue` 是回边（指向 loop 节点头），其余都是前向。
+// 只看向量本身 —— NodeType::edges() 只吃一个节点、拿不到作用域，也不需要。
+NodeType::Edge edge_to(std::string target, std::string label) {
+  bool const forward = !edge_is_backward(target);  // 必须在 move 之前算（moved-from 串是空的）
+  return {std::move(target), std::move(label), forward};
 }
 
 // ---- 类型专属校验（VN5–VN11）----
@@ -255,6 +263,70 @@ void v_run_tools(NodeIR const& n, NodeType::ValidateContext const&,
   if (n.next.empty()) err("VN10", "run_tools 节点 '" + n.id + "' 缺少 next");
 }
 
+// ---- wfr-㉚：loop 容器 ----
+
+void v_loop(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN15", "loop 节点 '" + n.id + "' 缺少 next（循环出口）");
+  if (n.max <= 0)
+    err("VN15", "loop 节点 '" + n.id + "' 的 max 必须是正整数（body 的最大执行次数）");
+  if (n.body.empty())
+    err("VN15", "loop 节点 '" + n.id + "' 的 body 不能为空（空循环没有意义）");
+  if (n.next == kContinueName || n.next == kBreakName)
+    err("VN15", "loop 节点 '" + n.id + "' 的 next 不能是保留名 " + n.next +
+                    "（出口要么是真节点、要么是 _turn_end / _fail）");
+
+  // VG11：不支持 loop 套 loop（本层直接可见就能判，不必等全图遍历）
+  for (NodeIR const& sub : n.body)
+    if (sub.kind == NodeKind::Loop)
+      err("VG11", "loop 节点 '" + n.id + "' 的 body 里又有 loop 节点 '" + sub.id +
+                      "'（不支持嵌套循环）");
+
+  // VG13：load_history 不得放进循环体 —— 每轮 replay 都会把整段历史再追加一遍，
+  // messages 会随迭代平方级膨胀。沿用 VG9 的"硬拒绝，读了没人用就是错"风格。
+  for (NodeIR const& sub : n.body)
+    if (sub.kind == NodeKind::LoadHistory)
+      err("VG13", "loop 节点 '" + n.id + "' 的 body 里有 load_history '" + sub.id +
+                      "'（循环体里读历史会让 messages 随迭代反复膨胀）");
+}
+
+std::vector<NodeType::Edge> e_loop(NodeIR const& n) {
+  std::vector<NodeType::Edge> out;
+  if (!n.body.empty()) out.push_back(edge_to(n.body.front().id, "body"));
+  if (!n.next.empty()) out.push_back(edge_to(n.next, "next"));
+  return out;
+}
+
+// loop 节点头 = 「计数 + 分支」。与 c_goto 同一手法：只注册节点、不加静态边，
+// 路由完全由 Command.goto_nodes 给出（graph 里它的优先级最高）。
+void c_loop(NodeIR const& n, NodeType::CompileContext& ctx) {
+  if (n.body.empty()) {
+    ctx.error = "loop 节点 '" + n.id + "' 的 body 为空";
+    return;
+  }
+  std::string const loop_id = n.id;
+  std::string const body_entry = n.body.front().id;
+  std::string const exit_target = n.next.empty() ? std::string(graph::kEnd) : ctx.resolve(n.next);
+  int const max = n.max;
+  ctx.graph.add_node(n.id, [loop_id, body_entry, exit_target, max](Json const& state,
+                                                                  NodeContext&) {
+    long cur = 0;
+    if (state.contains(kLoopCountsKey))
+      if (auto const& lc = state.at(kLoopCountsKey);
+          lc.is_object() && lc.contains(loop_id) && lc[loop_id].is_number())
+        cur = lc[loop_id].get<long>();
+    Command c;
+    // **先判后加**：cur 是"已完成的轮数"。超限直接走出口（不报错，与旧 goto 超 max 一致）。
+    if (cur >= max) {
+      c.goto_nodes = {exit_target};
+      return c;
+    }
+    c.update = Json{{kLoopCountsKey, Json{{loop_id, cur + 1}}}};
+    c.goto_nodes = {body_entry};
+    return c;
+  });
+  ++ctx.registered;
+}
+
 void v_load_history(NodeIR const& n, NodeType::ValidateContext const&,
                     NodeType::ErrorSink const& err) {
   if (n.path.empty()) err("VN11", "load_history 节点 '" + n.id + "' 缺少 path（工作路径）");
@@ -320,15 +392,15 @@ std::string last_ai_outcome(Json const& state) {
 // ---- 出边（通用图规则的唯一输入）----
 
 std::vector<NodeType::Edge> e_tool(NodeIR const& n) {
-  std::vector<NodeType::Edge> out{{n.next, "next", true}};
+  std::vector<NodeType::Edge> out{edge_to(n.next, "next")};
   // on_error.fallback 也是一条**前向边**：它必须是存在的节点，且算一条可达路径。
   // 把它渲染成边之后，VG7 的可达性判定就与节点类型完全无关了（原先要特判 tool）。
   if (n.on_error && n.on_error->fallback)
-    out.push_back({*n.on_error->fallback, "on_error.fallback", true});
+    out.push_back(edge_to(*n.on_error->fallback, "on_error.fallback"));
   return out;
 }
 std::vector<NodeType::Edge> e_expr(NodeIR const& n) {
-  return {{n.then, "then", true}, {n.else_, "else", true}};
+  return {edge_to(n.then, "then"), edge_to(n.else_, "else")};
 }
 std::vector<NodeType::Edge> e_label(NodeIR const& n) {
   if (n.next.empty()) return {};
@@ -340,11 +412,11 @@ std::vector<NodeType::Edge> e_label(NodeIR const& n) {
 std::vector<NodeType::Edge> e_goto(NodeIR const& n) {
   return {{n.goto_target, "goto", /*forward=*/false}};  // ← 回边，是循环的来源
 }
-std::vector<NodeType::Edge> e_next(NodeIR const& n) { return {{n.next, "next", true}}; }
+std::vector<NodeType::Edge> e_next(NodeIR const& n) { return {edge_to(n.next, "next")}; }
 std::vector<NodeType::Edge> e_route(NodeIR const& n) {
   std::vector<NodeType::Edge> out;
-  for (auto const& [k, v] : n.cases) out.push_back({v, "cases." + k, true});
-  if (!n.default_.empty()) out.push_back({n.default_, "default", true});
+  for (auto const& [k, v] : n.cases) out.push_back(edge_to(v, "cases." + k));
+  if (!n.default_.empty()) out.push_back(edge_to(n.default_, "default"));
   return out;
 }
 
@@ -754,6 +826,27 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) {
          return "goto " + n.goto_target + " (max " + std::to_string(n.max) + ")";
        }, v_goto, c_goto, e_goto, t_none},
+
+      // ---------------- loop（wfr-㉚，替代 label + goto）----------------
+      // 循环容器：body 是子树；`_continue` 回节点头（回边）、`_break` 去 next。
+      // 判定只认显式 kind（不拿 body 当决定性键 —— 动态节点也可能自带 body 字段）。
+      {NodeKind::Loop, "loop",
+       [](Json const& n) { return kind_is(n, "loop"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "next", out.next);
+         if (node.contains("max") && node["max"].is_number_integer())
+           out.max = node["max"].get<int>();
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "loop";
+         node["max"] = n.max;
+         node["next"] = n.next;
+         // body 由 ir.cpp 的 write_node_list 递归写（结构性字段）
+       },
+       [](NodeIR const& n) {
+         return "loop ×" + std::to_string(n.max) + " (" + std::to_string(n.body.size()) +
+                " nodes) → " + n.next;
+       }, v_loop, c_loop, e_loop, t_none},
 
       // ---------------- model（M12）----------------
       {NodeKind::Model, "model",

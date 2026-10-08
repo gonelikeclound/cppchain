@@ -40,6 +40,8 @@
 //   VG8 每个 label 至少被一个 goto / next / then / else 指向
 #include "cppchain/workflow/validator.hpp"
 
+#include "cppchain/workflow/ir_walk.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <functional>
@@ -167,14 +169,42 @@ bool has_key_anywhere(Json const& j, std::string_view key) {
 
 struct Ctx {
   WorkflowIR const& ir;
-  std::unordered_map<std::string, std::size_t> index;  // id → 数组下标
+  // 前序扁平遍历（含 loop body）。第二项是该节点所在的循环作用域，nullptr = 顶层。
+  std::vector<std::pair<NodeIR const*, LoopScope const*>> flat;
+  std::vector<std::unique_ptr<LoopScope>> scope_store;  // flat 里指针的稳定落点
+  std::unordered_map<std::string, std::size_t> index;   // id → 前序扁平序号
+  std::unordered_map<std::string, NodeIR const*> by_id; // id → 节点
   std::unordered_map<std::string, NodeKind> kind;       // id → 节点类型
+  std::unordered_map<std::string, std::string> owner;   // id → 所属 loop id（顶层不在表里）
+  std::unordered_map<std::string, LoopScope const*> scope_of;  // id → 作用域
   ValidationResult out;
+
+  explicit Ctx(WorkflowIR const& w) : ir(w) {}
 
   void err(std::string rule, std::string message) {
     out.errors.push_back({std::move(rule), std::move(message)});
   }
 };
+
+// 建索引：前序遍历一次填平 flat / index / by_id / kind / owner。
+void build_index(Ctx& c) {
+  c.index = flatten_index(c.ir);
+  for_each_node(c.ir, [&c](NodeIR const& n, LoopScope const* scope) {
+    LoopScope const* stable = nullptr;
+    if (scope != nullptr) {
+      c.scope_store.push_back(std::make_unique<LoopScope>(*scope));
+      stable = c.scope_store.back().get();
+    }
+    c.flat.push_back({&n, stable});
+    c.by_id[n.id] = &n;
+    c.kind[n.id] = n.kind;
+    if (scope != nullptr) {
+      c.owner[n.id] = scope->loop_id;
+      c.scope_of[n.id] = stable;
+    }
+    return true;
+  });
+}
 
 // 计算每个 label 的续接节点（D2：整体求解；不要求 label 先于 goto）。
 // 规则：label L 的续接 = 数组里 L 之后第一个非 label 节点。
@@ -194,9 +224,13 @@ void resolve_labels(Ctx& c) {
   }
 }
 
-// 指针目标替换：_turn_end → 终止 id；label → 续接。
-std::string resolve_target(Ctx const& c, std::string const& t) {
+// 指针目标替换：_turn_end → 终止 id；label → 续接；loop 保留名 → 节点头/出口。
+// scope 非空表示"这个节点在某个 loop 的 body 里"。
+std::string resolve_target(Ctx const& c, std::string const& t, LoopScope const* scope = nullptr) {
   if (t == kTurnEnd) return kEndId;
+  if (t == kContinueName) return scope != nullptr ? scope->loop_id : t;  // 回边 → loop 节点头
+  if (t == kBreakName)
+    return scope != nullptr ? resolve_target(c, scope->exit_target, nullptr) : t;
   auto it = c.kind.find(t);
   if (it != c.kind.end() && it->second == NodeKind::Label) {
     // 续接由 resolve_labels 保证存在（label 之后必有非 label）
@@ -237,19 +271,15 @@ std::string ValidationResult::describe() const {
 }
 
 ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
-  Ctx c{ir, {}, {}, {}};
+  Ctx c{ir};
 
   // ---- V：id 与顶层的合法键 ----
   if (ir.id.empty()) c.err("V1", "workflow id 为空");
   if (ir.id == "result" || is_internal_key(ir.id))
     c.err("V3", "workflow id '" + ir.id + "' 是保留名/内部状态键");
 
-  // ---- 建索引 ----
-  for (std::size_t i = 0; i < ir.nodes.size(); ++i) {
-    NodeIR const& n = ir.nodes[i];
-    c.index[n.id] = i;
-    c.kind[n.id] = n.kind;
-  }
+  // ---- 建索引（前序扁平，含 loop body）----
+  build_index(c);
 
   // ---- VT：trigger（可选；省略 = 宿主手工触发，wfr 直接拉起）----
   if (ir.trigger) {
@@ -289,9 +319,10 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     }
   }
 
-  // ---- VN：节点 ----
-  for (std::size_t i = 0; i < ir.nodes.size(); ++i) {
-    NodeIR const& n = ir.nodes[i];
+  // ---- VN：节点（含 loop body 里的节点）----
+  for (auto const& [np, scope] : c.flat) {
+    NodeIR const& n = *np;
+    (void)scope;
 
     if (!is_ident(n.id))
       c.err("VN1", "节点 id '" + n.id + "' 不符合 [A-Za-z][A-Za-z0-9_]*（无前导 _）");
@@ -327,16 +358,17 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   // ---- 唯一性 ----
   {
     std::vector<std::string> ids;
-    ids.reserve(ir.nodes.size());
-    for (NodeIR const& n : ir.nodes) ids.push_back(n.id);
+    ids.reserve(c.flat.size());
+    for (auto const& [np, _s] : c.flat) ids.push_back(np->id);
     std::sort(ids.begin(), ids.end());
     for (std::size_t i = 1; i < ids.size(); ++i)
       if (ids[i] == ids[i - 1])
-        c.err("VN2", "节点 id '" + ids[i] + "' 重复（全图唯一，含 label/goto）");
+        c.err("VN2", "节点 id '" + ids[i] + "' 重复（全图唯一，含 loop body 内的节点）");
   }
 
   // ---- VH：on_error ----
-  for (NodeIR const& n : ir.nodes)
+  for (auto const& [np, _s] : c.flat) {
+    NodeIR const& n = *np;
     if (n.on_error) {
       // retry 必须在 [0, kMaxRetry] 内。判定回读 raw 的**原始数值**，而不是解析结果：
       // ir.cpp 用 get<int>() 取值，超出 int 范围的数字会被静默截断
@@ -364,6 +396,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                            "'（应为节点 id 或 _turn_end）");
       }
     }
+  }
 
   // ---- VG：指针、label 消解、环、可达性 ----
   resolve_labels(c);
@@ -372,11 +405,24 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   // （见 02-arch-design/12 §4.2：原先它们按 kind 各写一遍，是 28 处 if 链的来源。）
 
   // VG1：每条边的目标必须存在（或为保留名）
-  for (NodeIR const& n : ir.nodes) {
+  for (auto const& [np, scope] : c.flat) {
+    NodeIR const& n = *np;
     NodeType const* t = node_type_of_ir(n);
     if (t == nullptr || !t->edges) continue;
     for (NodeType::Edge const& e : t->edges(n)) {
       if (e.target.empty()) continue;  // 缺字段由各类型的 validate 报（VN*）
+      // VG10：loop 保留名只能出现在循环体里；body 里的指针也不许指向 body 外的普通节点
+      //（那多半是漏写 `_break` 造成的意外逃逸）。
+      if (e.target == kContinueName || e.target == kBreakName) {
+        if (scope == nullptr)
+          c.err("VG10", "节点 '" + n.id + "' 的 " + e.label + " 指向 " + e.target +
+                            "，但它不在任何 loop 的 body 里");
+        continue;
+      }
+      if (scope != nullptr && c.by_id.count(e.target) != 0 && c.owner.count(e.target) == 0)
+        c.err("VG10", "loop '" + scope->loop_id + "' 的 body 节点 '" + n.id + "' 的 " + e.label +
+                          " 指向 body 外的节点 '" + e.target +
+                          "'（要跳出循环请用 _break，要下一轮请用 _continue）");
       if (e.target == "_turn_start") {
         c.err("VG1", "节点 '" + n.id + "' 的 " + e.label + " 指向保留名 _turn_start（不允许）");
       } else if (e.target != kTurnEnd && e.target != kFailName &&
@@ -398,42 +444,62 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
   // VG8：label 必须被引用（**任何边的目标**都算，不再按 kind 分支）
   {
     std::unordered_map<std::string, bool> targeted;
-    for (NodeIR const& m : ir.nodes) {
-      NodeType const* t = node_type_of_ir(m);
+    for (auto const& [mp, _s] : c.flat) {
+      NodeType const* t = node_type_of_ir(*mp);
       if (t == nullptr || !t->edges) continue;
-      for (NodeType::Edge const& e : t->edges(m)) targeted[e.target] = true;
+      for (NodeType::Edge const& e : t->edges(*mp)) targeted[e.target] = true;
     }
-    for (NodeIR const& n : ir.nodes)
-      if (n.kind == NodeKind::Label && targeted.find(n.id) == targeted.end())
-        c.err("VG8", "label '" + n.id + "' 没有被任何边指向（死 label）");
+    for (auto const& [np, _s] : c.flat)
+      if (np->kind == NodeKind::Label && targeted.find(np->id) == targeted.end())
+        c.err("VG8", "label '" + np->id + "' 没有被任何边指向（死 label）");
   }
 
   // ---- VG9：load_history 必须在消费 messages 的节点之前 ----
   // 顺序用**数组下标**判定（与 VR2 的"上游/更早"同一套约定）。读了没人用就是编排错误，
   // 硬拒绝比告警好：告警会被忽略，而这条错会让"历史明明加载了却没进上下文"变成谜案。
   {
-    auto first_of = [&](bool (*pred)(NodeIR const&)) -> std::optional<std::size_t> {
-      for (std::size_t i = 0; i < ir.nodes.size(); ++i)
-        if (pred(ir.nodes[i])) return i;
-      return std::nullopt;
+    // 按作用域判：顶层 + 每个 loop body 各算一处。作用域里"有消费者但没有 load_history"
+    // **不报** —— 历史可以在祖先作用域加载（chat 就是 recall 在 loop 之前）。
+    auto first_of_in = [&](LoopScope const* want, bool (*pred)(NodeIR const&))
+        -> std::optional<std::size_t> {
+      std::optional<std::size_t> best;
+      for (auto const& [np, sc] : c.flat) {
+        if (sc != want) continue;
+        if (!pred(*np)) continue;
+        auto const at = c.index.at(np->id);
+        if (!best || at < *best) best = at;
+      }
+      return best;
     };
-    auto const load_i = first_of([](NodeIR const& n) { return n.kind == NodeKind::LoadHistory; });
-    auto const use_i = first_of(
-        [](NodeIR const& n) { return n.kind == NodeKind::Model || n.kind == NodeKind::RunTools; });
-    if (load_i && use_i && *load_i > *use_i)
-      c.err("VG9", "load_history 节点 '" + ir.nodes[*load_i].id +
-                       "' 出现在消费 messages 的节点之后：历史加载了也没人用");
+    std::vector<LoopScope const*> scopes{nullptr};
+    for (auto const& [np, sc] : c.flat) {
+      (void)np;
+      if (sc != nullptr && std::find(scopes.begin(), scopes.end(), sc) == scopes.end())
+        scopes.push_back(sc);
+    }
+    for (LoopScope const* sc : scopes) {
+      auto const load_i =
+          first_of_in(sc, [](NodeIR const& n) { return n.kind == NodeKind::LoadHistory; });
+      auto const use_i = first_of_in(sc, [](NodeIR const& n) {
+        return n.kind == NodeKind::Model || n.kind == NodeKind::RunTools;
+      });
+      if (load_i && use_i && *load_i > *use_i) {
+        std::string const where = sc == nullptr ? std::string("顶层") : ("loop '" + sc->loop_id + "'");
+        c.err("VG9", where + "：load_history 出现在消费 messages 的节点之后：历史加载了也没人用");
+      }
+    }
   }
 
   // ---- VG2：前向边无环（label 已替换） ----
   {
     std::unordered_map<std::string, std::vector<std::string>> adj;
-    for (NodeIR const& n : ir.nodes) {
+    for (auto const& [np, scope] : c.flat) {
+      NodeIR const& n = *np;
       NodeType const* t = node_type_of_ir(n);
       if (t == nullptr || !t->edges) continue;
       for (NodeType::Edge const& e : t->edges(n)) {
-        if (!e.forward) continue;  // 回边（goto）不参与前向环判定
-        std::string const to = resolve_target(c, e.target);
+        if (!e.forward) continue;  // 回边（_continue / goto）不参与前向环判定
+        std::string const to = resolve_target(c, e.target, scope);
         if (to != kEndId) adj[n.id].push_back(to);
       }
     }
@@ -457,7 +523,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     for (auto const& [v, _] : adj)
       if (!color.count(v)) dfs(v);
     if (cycle)
-      c.err("VG2", "前向边出现环（" + cycle_at + "）：循环只能通过 label + goto 表达，"
+      c.err("VG2", "前向边出现环（" + cycle_at + "）：循环只能用 loop 节点表达，"
                    "禁止 expr/tool 自环或绕路");
   }
 
@@ -495,31 +561,36 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       stack.pop_back();
       auto it = c.kind.find(v);
       if (it == c.kind.end() || it->second == NodeKind::Label) continue;
-      NodeIR const& node = ir.nodes[c.index.at(v)];
+      NodeIR const& node = *c.by_id.at(v);
       NodeType const* t = node_type_of_ir(node);
       if (t == nullptr || !t->edges) continue;
+      auto const sit = c.scope_of.find(v);
+      LoopScope const* const sc = sit == c.scope_of.end() ? nullptr : sit->second;
       for (NodeType::Edge const& e : t->edges(node)) {
         if (!e.forward) continue;  // 回边不参与"从入口可达"的展开
-        push(resolve_target(c, e.target));
+        push(resolve_target(c, e.target, sc));
       }
     }
-    // 死节点检查
-    for (NodeIR const& n : ir.nodes)
-      if (n.kind != NodeKind::Label && !seen[n.id])
-        c.err("VG7", "节点 '" + n.id + "' 从入口不可达且不是任何可达节点的 on_error.fallback 目标（死节点）");
+    // 死节点检查（含 loop body 内的节点）
+    for (auto const& [np, _s] : c.flat)
+      if (np->kind != NodeKind::Label && !seen[np->id])
+        c.err("VG7", "节点 '" + np->id +
+                         "' 从入口不可达且不是任何可达节点的 on_error.fallback 目标（死节点）");
   }
 
   // ---- VR：引用 ----
   // VR1：本节点所有"可能含引用"的文本片段里，$/@config 片段必须语法合法。
   // 走 NodeType::ref_texts —— 与下面的引用收集**同一个钩子**，不会再出现某类节点漏检。
-  for (NodeIR const& n : ir.nodes) {
+  for (auto const& [np, _s] : c.flat) {
+    NodeIR const& n = *np;
     NodeType const* t = node_type_of_ir(n);
     if (t == nullptr || !t->ref_texts) continue;
     for (std::string const& text : t->ref_texts(n))
       if (auto p = ref_syntax_problem(text))
         c.err("VR1", "节点 '" + n.id + "' 的引用语法错误：" + *p);
   }
-  for (NodeIR const& n : ir.nodes) {
+  for (auto const& [np, _s] : c.flat) {
+    NodeIR const& n = *np;
     std::vector<std::pair<std::string, Ref>> refs;
     find_refs_in_node(refs, n);
     for (auto const& [_, r] : refs) {
@@ -547,7 +618,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
           if (it == c.index.end())
             c.err("VR2", "节点 '" + n.id + "' 引用了不存在的节点 '" + r.node + "'");
           else {
-            NodeIR const& target = ir.nodes[it->second];
+            NodeIR const& target = *c.by_id.at(r.node);
             // 可引用 result 的节点：tool（output_schema 声明字段）+ model / run_tools
             //（wfr-㉗：模型/工具阶段发布 thinking/文本/调用摘要，字段运行时定义）
             // + load_history（wfr-㉙：发布历史压缩统计，供 echo 打印"修改过程"）。
@@ -570,14 +641,16 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
           break;
         }
         case RefKind::LastResult: {
+          // 前序扁平序：$_ 认"更早出现过的任意 tool"（含 loop body 里的）
           bool declared = false;
           std::size_t const my = c.index.at(n.id);
-          for (std::size_t k = 0; k < my; ++k)
-            if (ir.nodes[k].kind == NodeKind::Tool &&
-                schema_declares(ir.nodes[k].output_schema, r.field)) {
+          for (auto const& [mp, _s] : c.flat) {
+            if (c.index.at(mp->id) >= my) continue;
+            if (mp->kind == NodeKind::Tool && schema_declares(mp->output_schema, r.field)) {
               declared = true;
               break;
             }
+          }
           if (!declared)
             c.err("VR3", "节点 '" + n.id + "' 的 $_" + ".result." + r.field +
                              " 未被任何上游 tool 的 output_schema 声明");

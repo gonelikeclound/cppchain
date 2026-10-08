@@ -1,6 +1,8 @@
 // cppchain —— src/workflow/compiler.cpp
 #include "cppchain/workflow/compiler.hpp"
 
+#include "cppchain/workflow/ir_walk.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <exception>
@@ -165,20 +167,43 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   auto sink = std::make_shared<SessionSink>();
   LoggingStateGraph g(std::move(schema));
   g.sink = sink;
-  for (NodeIR const& n : ir.nodes) {  // 预登记 node_kind（wrapper 在运行期查表；按名分发含动态节点）
-    NodeType const* t = node_type_of_name(type_name_of(n));
-    if (t != nullptr) g.note_kind(n.id, t->name);
-  }
-
-  // 3) 逐节点编译：走**注册表**（加一种节点不必再改这里）
+  // 3) 逐节点编译：走**注册表**（加一种节点不必再改这里）。loop 的 body 递归进来 ——
+  //    编译每个节点前把 `resolve` 按当前作用域包一层，于是 `_continue` / `_break`
+  //    在**编译期**就解析成图目标（body 之外的保留名是错误，fail-closed）。
+  std::string compile_error;
+  // 一份 cctx 复用（registered 要累加），只按当前作用域换 resolve。
   NodeType::CompileContext cctx{g, &registry, opts.components, resolve, 0, {}, sink};
-  for (NodeIR const& n : ir.nodes) {
-    NodeType const* type = node_type_of_name(type_name_of(n));
-    if (type == nullptr || !type->compile)
-      return invalid("internal: 该节点类型没有注册 compile（node '" + n.id + "'）");
-    type->compile(n, cctx);
-    if (!cctx.error.empty()) return invalid(cctx.error);
-  }
+  std::function<void(std::vector<NodeIR> const&, LoopScope const*)> compile_list =
+      [&](std::vector<NodeIR> const& nodes, LoopScope const* scope) {
+        for (NodeIR const& n : nodes) {
+          if (!compile_error.empty()) return;
+          // 预登记 node_kind（wrapper 在运行期查表；按名分发含动态节点）
+          NodeType const* type = node_type_of_name(type_name_of(n));
+          if (type == nullptr || !type->compile) {
+            compile_error = "internal: 该节点类型没有注册 compile（node '" + n.id + "'）";
+            return;
+          }
+          g.note_kind(n.id, type->name);
+          cctx.resolve = [&resolve, scope](std::string const& t) {
+            if (scope == nullptr) return resolve(t);  // 顶层：保留名由 validator 拦
+            if (t == kContinueName) return scope->loop_id;  // 回边 → loop 节点头
+            if (t == kBreakName) return resolve(scope->exit_target);
+            return resolve(t);
+          };
+          cctx.error.clear();
+          type->compile(n, cctx);
+          if (!cctx.error.empty()) {
+            compile_error = cctx.error;
+            return;
+          }
+          if (n.kind == NodeKind::Loop && !n.body.empty()) {
+            LoopScope const inner{n.id, n.next};
+            compile_list(n.body, &inner);
+          }
+        }
+      };
+  compile_list(ir.nodes, nullptr);
+  if (!compile_error.empty()) return invalid(compile_error);
 
   // 3.5) _fail 的落地节点：只有真的被引用才注册（不污染 registered_nodes 计数）。
   //      语义 = 以错误终止本次触发（fail-closed），错误里带 IR id 便于定位；

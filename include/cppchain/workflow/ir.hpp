@@ -24,6 +24,9 @@ using Json = nlohmann::json;
 // ---- M12：保留目标名（编译期映射，不是节点）----
 inline constexpr char kTurnEndName[] = "_turn_end";  // 正常终止
 inline constexpr char kFailName[] = "_fail";         // 以错误终止（route 的 fail-closed 档）
+// ---- wfr-㉚：loop 体内的两个保留目标 ----
+inline constexpr char kContinueName[] = "_continue";  // 下一轮（回 loop 节点头；算回边）
+inline constexpr char kBreakName[] = "_break";        // 跳出循环（去 loop 的 next）
 
 // ---- M12：route 的判别式与 outcome（**封闭词表**）----
 // 判别式用 cppchain 自己归一化过的 outcome，不用端点给的自由字符串（如 finish_reason）——
@@ -56,6 +59,10 @@ enum class NodeKind {
   Expr,
   Label,
   Goto,
+  // ---- wfr-㉚：循环容器（替代 label + goto，见 02-arch-design/16）----
+  // loop 是**真实图节点**：节点头自己做「计数 + 分支」（Command.goto_nodes），
+  // body 是它的子树；body 里的 `_continue` 回节点头（回边）、`_break` 跳到 loop 的 next。
+  Loop,
   // ---- M12（组件化与命令行 agent，见 02-arch-design/11）----
   Model,     // 一次 LLM 调用：读 state.messages → 追加回复（不循环）
   Route,     // match 分派：按 last_ai_outcome 选下一跳
@@ -100,6 +107,10 @@ struct NodeIR {
   // Goto 节点
   std::string goto_target;                   // 指向一个 label 节点的 id（§4）
   int max = 0;                               // 循环有界（正整数）
+
+  // Loop 节点（wfr-㉚）：循环容器。id 全局唯一、**不 mangle**（图/日志/results 键按 id 对齐）。
+  // 复用 next（循环出口）与 max（body 最大执行次数）；body 非空、max>0、next 必填。
+  std::vector<NodeIR> body;                  // 循环体子树（不得再含 loop）
 
   // Model 节点（M12）：一次模型调用。model/toolset 都是**组件名**（宿主注册，见 components.hpp）
   std::string model;                         // 必填：模型组件名

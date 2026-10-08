@@ -144,6 +144,7 @@ add_executable(workflow_tests
   wf/echo_test.cpp
   wf/debug_view_test.cpp
   wf/model_params_test.cpp
+  wf/loop_test.cpp
   wf/wfr_lookup_test.cpp)
 
 target_include_directories(workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)

@@ -3,8 +3,10 @@
 
 #include "cppchain/workflow/node_type.hpp"
 
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace cppchain::workflow {
 
@@ -36,6 +38,73 @@ void fill_timing(TriggerIR& out, Json const& trig) {
   }
 }
 
+// 递归解析**一层**节点数组。loop 的 body 也走这里 —— 嵌套是 IR 的结构性关注，
+// 不放进 NodeType::parse（那个钩子没有错误通道，报不出 body 内的坏节点）。
+std::optional<std::vector<NodeIR>> parse_node_list(Json const& arr, std::string& error) {
+  if (!arr.is_array()) {
+    error = "nodes is not an array";
+    return std::nullopt;
+  }
+  std::vector<NodeIR> out;
+  for (Json const& node : arr) {
+    if (!node.is_object()) {
+      error = "nodes[?] is not an object";
+      return std::nullopt;
+    }
+    if (!node.contains("id") || !node["id"].is_string()) {
+      error = "node has no id (string)";
+      return std::nullopt;
+    }
+    std::string id = node["id"].get<std::string>();
+    // 判别由注册表驱动（内置按 matches、导入按显式 kind 名）—— 与 classify 的区别
+    // 是它能认出动态节点；classify 保留给"内置 only"的语义（生成器/测试仍可用）。
+    NodeType const* type = node_type_for_node(node);
+    if (type == nullptr) {
+      auto kind = WorkflowIR::classify(node);  // 产出可回喂的错误信息
+      if (!kind) {
+        error = std::string(kind.error()) + " (node '" + id + "')";
+        return std::nullopt;
+      }
+      error = "internal: 已分类但找不到 NodeType（node '" + id + "'）";
+      return std::nullopt;
+    }
+    NodeIR n;
+    n.raw = node;
+    n.id = std::move(id);
+    n.kind = type->kind;
+    type->parse(n, node);  // 类型专属字段
+    if (n.kind == NodeKind::Loop) {
+      auto const bit = node.find("body");
+      if (bit != node.end() && !bit->is_null()) {
+        std::string berr;
+        auto sub = parse_node_list(*bit, berr);
+        if (!sub) {
+          error = "loop '" + n.id + "' 的 body：" + berr;
+          return std::nullopt;
+        }
+        n.body = std::move(*sub);
+      }
+    }
+    out.push_back(std::move(n));
+  }
+  return out;
+}
+
+// 一层节点数组 → JSON（loop 的 body 递归）。
+Json write_node_list(std::vector<NodeIR> const& nodes) {
+  Json arr = Json::array();
+  for (NodeIR const& n : nodes) {
+    Json node{{"id", n.id}};
+    // 按名分发：动态节点（NodeKind::Dynamic）也能序列化回原形状
+    NodeType const* type = node_type_of_name(type_name_of(n));
+    if (type != nullptr) type->write(node, n);
+    // body 由这里写（结构性字段，不由 loop 类型自己写），空 body 也如实写出
+    if (n.kind == NodeKind::Loop) node["body"] = write_node_list(n.body);
+    arr.push_back(std::move(node));
+  }
+  return arr;
+}
+
 }  // namespace
 
 std::expected<NodeKind, std::string> WorkflowIR::classify(Json const& node) {
@@ -54,8 +123,8 @@ std::expected<NodeKind, std::string> WorkflowIR::classify(Json const& node) {
     return std::unexpected("unknown node kind: '" + node["kind"].get<std::string>() +
                            "'（见 node_types.cpp 的注册表）");
   return std::unexpected(
-      "unknown node: no decisive key (kind=label|goto|expr|tool|model|route|run_tools|"
-      "load_history, 或 goto/expr/tool 键)");
+      "unknown node: no decisive key (kind=loop|label|goto|expr|tool|model|route|"
+      "run_tools|load_history, 或 goto/expr/tool 键)");
 }
 
 std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
@@ -101,42 +170,16 @@ std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
     }
   }
 
-  Json const& nodes = j["nodes"];
-  for (Json const& node : nodes) {
-    if (!node.is_object()) return err("nodes[?] is not an object");
-    if (!node.contains("id") || !node["id"].is_string())
-      return err("node has no id (string)");
-    std::string id = node["id"].get<std::string>();
-    // 判别由注册表驱动（内置按 matches、导入按显式 kind 名）—— 与 classify 的区别
-    // 是它能认出动态节点；classify 保留给"内置 only"的语义（生成器/测试仍可用）。
-    NodeType const* type = node_type_for_node(node);
-    if (type == nullptr) {
-      auto kind = classify(node);  // 产出可回喂的错误信息（unknown kind / no key / ambiguous）
-      if (!kind) return err(std::string(kind.error()) + " (node '" + id + "')");
-      return err("internal: 已分类但找不到 NodeType（node '" + id + "'）");
-    }
-    NodeIR n;
-    n.raw = node;
-    n.id = std::move(id);
-    n.kind = type->kind;
-    type->parse(n, node);  // 类型专属字段
-    out.nodes.push_back(std::move(n));
-  }
+  std::string perr;
+  auto parsed = parse_node_list(j["nodes"], perr);
+  if (!parsed) return err(perr);
+  out.nodes = std::move(*parsed);
 
   return out;
 }
 
 Json WorkflowIR::to_json() const {
-  Json nodes = Json::array();
-  for (NodeIR const& n : this->nodes) {
-    Json node{{"id", n.id}};
-    // 按名分发：动态节点（NodeKind::Dynamic）也能序列化回原形状
-    NodeType const* type = node_type_of_name(type_name_of(n));
-    if (type != nullptr) type->write(node, n);
-    nodes.push_back(std::move(node));
-  }
-
-  Json out{{"id", id}, {"nodes", std::move(nodes)}};
+  Json out{{"id", id}, {"nodes", write_node_list(this->nodes)}};
   if (trigger) {  // 无 trigger 时省略键（= 手工触发）
     Json t = Json::object();
     t["source"] = trigger->source;
