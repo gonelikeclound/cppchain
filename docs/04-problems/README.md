@@ -28,6 +28,7 @@
 | [12](12-主动智能proactive命令行demo落地与验收记录.md) | 主动智能 proactive 命令行 demo 落地与验收 | 🟢 真机矩阵 |
 | [13](13-M10图运行时补全落地与验收记录.md) | M10 图运行时补全落地与验收（Streaming / Interrupt / Send / 时间旅行） | 🟢 全仓 422 全绿 + 4 离线 demo |
 | [14](14-wfr-chat2思考历史对比落地与验收记录.md) | wfr-chat2 思考历史对比（历史三档压缩 + reasoning 回传 / 参数透传开关） | 🟢 495 全绿 + 真机三档对照 |
+| [15](15-loop节点落地与label-goto迁移记录.md) | loop 节点落地与 label/goto 迁移（IR/validator/compiler/调试台/import/生成器 + 四个 workflow） | 🟢 517 全绿 + 真机 |
 
 ## 文件列表
 
@@ -47,3 +48,4 @@
 | 12 | [12-主动智能proactive命令行demo落地与验收记录.md](12-主动智能proactive命令行demo落地与验收记录.md) | **proactive CLI**：`ask_user` 菜单澄清 → 易读 IR；交互/批量/矩阵三模式 | 🟢 真机矩阵 |
 | 13 | [13-M10图运行时补全落地与验收记录.md](13-M10图运行时补全落地与验收记录.md) | **M10 图运行时补全**：Streaming / Interrupt（真 HITL 原语）/ Send 动态 fan-out / 时间旅行；checkpoint 包队列契约 | 🟢 全仓 422 全绿 + 4 离线 demo |
 | 14 | [14-wfr-chat2思考历史对比落地与验收记录.md](14-wfr-chat2思考历史对比落地与验收记录.md) | **wfr-㉙**：思考模型的历史形态三档对照（full / drop_round / keep_evidence）+ `reasoning_content` 回传与厂商参数透传开关；含协议问句的探针答案 | 🟢 495 全绿 + 真机三档对照 |
+| 15 | [15-loop节点落地与label-goto迁移记录.md](15-loop节点落地与label-goto迁移记录.md) | **wfr-㉚**：循环从 label+goto 换成 loop 容器；`on_max` 分离出口；调试台按迭代分组；含四个被测试逼出来的真 bug 复盘 | 🟢 517 全绿 + 真机 |

@@ -1,5 +1,11 @@
 # 11 · 主动智能 Workflow 模块落地与验收记录（`cppchain_workflow`）
 
+> **wfr-㉚ 追记**：本文里 D2 的"label 整体求解"已随 label 的删除而消失（`loop` 容器
+> 自带 body 边界，不再需要"label 的续接 = 其后第一个非 label"这套推断）。相关段落的
+> 机制描述保留作演进记录；现状见 [02-arch-design/16](../02-arch-design/16-loop节点与迭代分组设计.md)
+> 与 [15](15-loop节点落地与label-goto迁移记录.md)。
+
+
 > 规范来源：仓库根 `主动智能/11-ir-syntax.md`（IR 语法）与 `12-generation-process.md`（生成过程）。
 > 本文件是 cppchain 侧落地记录的验收结论：**离线单测全绿、零告警**
 > （M11 写作时 40/40、全仓 323/323；后续复验与判据修订见 §5）。

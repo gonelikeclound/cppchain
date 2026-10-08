@@ -269,8 +269,7 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 |---|---|---|
 | `tool` | `tool` 键（或 `kind:"tool"`） | 调用一个目录内工具，产物进 `results[<id>]` |
 | `expr` | `expr` 键（或 `kind:"expr"`） | 条件判定，二选一出口 |
-| `label` | `kind:"label"` | 循环/汇合目标（可被 goto 指向） |
-| `goto` | `goto` 键（或 `kind:"goto"`） | 有界跳转回 label |
+| `loop` | `kind:"loop"` | **循环容器**：自带 `body` 子树 + 有界计数（wfr-㉚ 取代 label/goto） |
 | `model` | `kind:"model"` | **一次** LLM 调用（M12） |
 | `route` | `kind:"route"` | match 分派：按判别式选下一跳（M12） |
 | `run_tools` | `kind:"run_tools"` | 执行最后一条 AI 消息的 tool_calls（M12） |
@@ -278,7 +277,7 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 **判定规则（fail-closed，不是"第一个命中即定"）**：
 
 - `kind` 是**通用**判别键，上表七种都可用它显式声明；`kind` 的值不在表内 → **编译期拒绝**。
-- 也支持历史写法：靠 `goto` / `expr` / `tool` 键判别（不带 `kind`）。
+- 也支持靠键判别（不带 `kind`）：`expr` / `tool`。**`label`/`goto` 已废弃**——写了会在 parse 期被拒，报错会提示改用 `kind:"loop"` + `body`。
 - **歧义即错**：与 `kind` **冲突**的键、或多个判别键并存 → 拒绝。
   （与声明**一致**的冗余键不算冲突，如 `{"kind":"tool","tool":...}` 合法。）
 
@@ -288,6 +287,8 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 |---|---|
 | `_turn_end` | 正常终止本次触发 |
 | `_fail` | **以错误终止**本次触发（fail-closed；错误信息带 IR id + 节点 id，细节见 `state.messages`） |
+| `_continue` | **仅 loop 的 body 内**：进入下一轮（回 loop 节点头） |
+| `_break` | **仅 loop 的 body 内**：跳出循环，去 loop 的 `next` |
 
 ## 4. 各类型节点的字段
 
@@ -314,19 +315,25 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 
 - `expr` 是受限文法（见 §6）；`then`/`else` 必填，各指向一个节点 id（可为 `_turn_end`）。
 
-**label 节点**
+**loop 节点（wfr-㉚）**
 
 ```jsonc
-{ "id": "poll_start", "kind": "label" }
+{ "id": "poll", "kind": "loop", "max": 4, "next": "notify", "on_max": "_turn_end",
+  "body": [
+    { "id": "fetch_st", "tool": "fetch_price", "parameters": { "item_id": "@config.product_id" },
+      "output_schema": { "price": "number", "in_stock": "boolean" }, "next": "check_st" },
+    { "id": "check_st", "expr": "$fetch_st.result.in_stock == true",
+      "then": "_break", "else": "_continue" }
+  ] }
 ```
 
-**goto 节点**
-
-```jsonc
-{ "id": "goto_poll", "goto": "poll_start", "max": 4 }
-```
-
-- `goto` 必须指向一个 **label** 节点的 id；`max` 必须是正整数（循环有界）。
+- `body` 是**子树**（循环体），不得为空、**不得再含 loop**（不支持嵌套）。
+- `max` 是 body 的最大执行次数（正整数）。
+- `next` 是**正常出口**（`_break` 去这里）；`on_max` 是**跑满 max 仍没 break** 时的落点，
+  缺省 `_turn_end`。两者可以不同（"查到了就通知" vs "查满次数还没到货"）。
+- body 内的节点指针：同 body 节点 id / `_continue` / `_break` / `_turn_end` / `_fail`；
+  **不得指向 body 外的普通节点**（那是漏写 `_break`）。
+- `load_history` 不得放进 body（每轮 replay 会让 messages 反复膨胀）。
 
 **model 节点（M12）**
 
@@ -381,19 +388,20 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 
 ```jsonc
 { "nodes": [
-  { "id": "L",     "kind": "label" },
-  { "id": "think", "kind": "model", "model": "main", "tools": "ts", "next": "route" },
-  { "id": "route", "kind": "route", "on": "last_ai_outcome",
-    "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "_turn_end" },
-    "default": "_fail" },
-  { "id": "act",   "kind": "run_tools", "next": "loop" },
-  { "id": "loop",  "kind": "goto", "goto": "L", "max": 8 }
+  { "id": "loop", "kind": "loop", "max": 8, "next": "_turn_end",
+    "body": [
+      { "id": "think", "kind": "model", "model": "main", "tools": "ts", "next": "route" },
+      { "id": "route", "kind": "route", "on": "last_ai_outcome",
+        "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "_turn_end" },
+        "default": "_fail" },
+      { "id": "act",   "kind": "run_tools", "next": "_continue" }
+    ] }
 ]}
 ```
 
-`think → route → act → loop →（回 L）think` 就是**循环本身**；`max` 是循环上界
-（等价于 langgraph 的 `recursion_limit`，但写在 IR 里）。注意 `act` 的 `next` 指向
-`loop`（goto）而非直接指回 `L` —— 见 §7 的链约束。
+`think → route → act →（_continue 回节点头）think` 就是**循环本身**；`max` 是循环上界
+（等价于 langgraph 的 `recursion_limit`，但写在 IR 里）。`act` 的 `next` 写 `_continue`
+而不是直接指回 `think` —— 后者会被判为前向环（见 §7 的链约束）。
 
 ## 5. 数据流与参数引用
 
@@ -414,15 +422,15 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 
 ## 7. 名称规则与链约束
 
-- id：`[A-Za-z][A-Za-z0-9_]*`；**不以 `_` 开头**；不得叫 `result`；全图唯一（含 label/goto）。
-- 保留名：`_turn_start`、`_turn_end`、`_fail`。
+- id：`[A-Za-z][A-Za-z0-9_]*`；**不以 `_` 开头**；不得叫 `result`；全图唯一（**含 loop body 内的节点**）。
+- 保留名：`_turn_start`、`_turn_end`、`_fail`，以及只在 loop body 内可用的 `_continue`、`_break`。
 - 每个 tool/model/run_tools 必须有 `next`；每个 expr 必须有 `then` 和 `else`；
   route 必须有 `cases`（覆盖全部 outcome）或 `default`。每个指针指向**紧接着要写的那一个**节点，
   链尾到 `_turn_end`；全部节点要连成单链，无死节点。
-- 循环只能用 `label + goto` 表达，禁止用 `expr` 自环或绕路。**前向边（`next`/`then`/`else`/
-  `cases`/`default`，label 解析之后）不得成环** —— 所以回边必须经由 `goto` 节点：
-  在 M12 的 ReAct 写法里，`run_tools` 的 `next` 指向 **goto 节点**，而不是直接指回循环头的 label，
-  否则会被判为前向环而拒绝。
+- 循环只能用 `loop` 节点表达，禁止用 `expr`/`tool` 自环或绕路。**前向边
+  （`next`/`then`/`else`/`cases`/`default`/`on_max`）不得成环** —— 唯一的回边是 body 内
+  指针写 `_continue` 的那些边（指向 loop 节点头）。在 ReAct 写法里，`run_tools` 的 `next`
+  写 **`_continue`**，而不是直接指回循环体入口。
 - 通知文案只描述**实际发生**的事：没有 "下单/购买" 工具时不得写"已自动下单"，这类意图应写"提醒用户确认"。
 
 ## 8. 可用工具（tool 节点能引用的名字，必须与目录完全同名）

@@ -1,0 +1,103 @@
+# 15 · loop 节点落地与 label/goto 迁移记录（wfr-㉚）
+
+> 五个提交把循环从 `label` + `goto` 换成 `loop` 容器并删除旧机制。设计见
+> [02-arch-design/16](../02-arch-design/16-loop节点与迭代分组设计.md)。
+
+## 一、分步与提交
+
+| 步 | 内容 | 提交 |
+|---|---|---|
+| ① ② | IR + 遍历助手 + validator/compiler 递归化 | `d6b62e9` |
+| ③ | 调试台按 loop 迭代分组 + 宿主扫描递归化 | `647c32f` |
+| ④ | 迁移四个生产 workflow + `on_max` + import/生成器递归化 | `ecd7ef4` |
+| ⑤ | 删除 label/goto | `269846b` |
+
+**顺序不是随意的**：③（宿主扫描）**必须早于**④（迁移）。`has_model_node` 与
+`features.hpp` 的谓词都只扫顶层，迁移后 model/工具都在 loop body 里 —— 漏改是**静默**
+错误（`wfr chat` 被误判"无需 LLM key"、eval 谓词全 false），不报错只跑错。
+
+## 二、过程中被测试/真机逼出来的四个问题
+
+### 1. `edge_to()` 读到了被搬空的字符串（①，测试抓的）
+
+```cpp
+// 错：聚合初始化的求值顺序是左→右，std::move(target) 先把 target 搬空，
+// 再拿它算 forward 就是拿空串去比 —— 回边判定恒为 false。
+NodeType::Edge edge_to(std::string target, std::string label) {
+  return {std::move(target), std::move(label), !edge_is_backward(target)};
+}
+```
+
+`WfLoop.continue_is_the_only_backward_target` 抓到（`forward` 期望 false 实得 true）。
+修法：先算 `forward` 再 move。
+
+### 2. VR2/VR3 拿前序序号去索引顶层数组（②）
+
+`Ctx.index` 从"数组下标"换成"前序扁平序号"（为了支持嵌套）后，VR2 里的
+`ir.nodes[it->second]` 会取错节点（越界或拿到别的）。改成按 id 取（`by_id`），
+VR3 的"更早的 tool"改成扫 `flat`。这条不修的话，`$<id>.result.<f>` 在 loop body 里
+会静默查错节点。
+
+### 3. `label`/`goto` 与 `c_echo` 在同一个删除区间里（⑤）
+
+按"从 `c_label` 删到 `c_model`"的区间删代码时，把夹在中间的 `c_echo` 一起删了。
+构建立刻报 `c_echo was not declared`，从 git 取回即可。**教训**：删代码用内容块匹配，
+别用"起点到终点"的区间。
+
+### 4. `on_max`：`_break` 与"跑满 max"不能共用一个出口（④，迁移 loop_wf 时暴露）
+
+这是**计划里漏掉的一处语义缺口**。原设计 `_break` → `loop.next`，跑满 max 也 → `loop.next`。
+但 `loop_wf` 里两者结局不同：
+
+- 查到货了（`ck.then = _break`）→ 通知；
+- 查满 3 次仍没货 → **不该通知**（旧 `goto max=3` 超限是跳 kEnd）。
+
+于是拆成 `next`（正常出口 / `_break` 落点）与 `on_max`（跑满落点，缺省 `_turn_end`）。
+缺省值让三个 chat 类 workflow 不写 `on_max` 就与旧行为逐字一致。
+
+### 5. `import` 的指针键白名单漏了 `on_max`（⑤）
+
+`is_pointer_key` 决定 import 前缀化时改写哪些字段。`on_max` 也是节点引用，漏了会让
+被 import 的 loop 里 `on_max` 指向子链节点时不加前缀 —— 静默断链。
+
+## 三、验收
+
+**离线**：全仓 **517 测试全绿、零告警**。
+
+| 测试 | 覆盖 |
+|---|---|
+| `tests/wf/loop_test.cpp`（18 例） | 解析/序列化往返（body 保真、坏节点报错带 loop 名）、v_loop 与 VG10/11/13 负例、边的前向/回边判定、遍历助手（前序顺序 / loop_owner / flatten_index）、多轮 `_continue` 跑满 max、`_break` 早退、`on_max` 重定向、计数键是 loop 节点 id |
+| `DebugView`（+3 例） | loop 平铺导出 + body 归属字段；边解析（body/next 前向、`_continue` 回边、`_break` 前向）；HTML 里的 kind-loop 配色与分组维度 |
+| `WfAgentLoop` | classify 对 `label`/`goto` 两种废弃写法都拒且报错点名 loop |
+| `WfIr` | loop 解析 + 废弃写法 parse 期被拒 |
+| 各迁移用例 | compiler/agent_loop/history_nodes/debug_view/ir_validator/plugin_import 的 IR 字面量全部换成 loop 形态 |
+
+**迁移期的一条关键测试（已按计划删除）**：同一语义分别用旧 `label`+`goto` 与新 `loop`
+构建，跑同一组桩数据，断言缺货/有货两种情形下**工具调用次数与通知次数完全一致**
+（缺货 4 次 0 通知；有货 1 次 1 通知）。它在 ④ 时通过，证明等价性；⑤ 删掉旧写法后
+不可解析，故移除 —— 它的使命就是"把重新实现循环从看着对变成对得上"。
+
+**真机**：
+
+```
+wfr chat  "北京天气怎么样？" → 💭 思考 → 🔧 get_weather → 回答（ReAct 循环经 loop 跑通）
+wfr chat2 --set history_mode=keep_evidence "上海呢？" → 历史压缩开关在 loop 形态下仍工作
+wfr debug chat --session s1 → 节点 recall/loop/think/echo_think/route/act/echo_tool，
+                              唯一回边 echo_tool→loop，日志分 iter1/iter2 两组
+```
+
+## 四、迁移后的资产形态
+
+| 文件 | 迁移前 | 迁移后 |
+|---|---|---|
+| `share/wfr/workflows/chat.json` | 8 节点（含 label L + goto loop） | 2 顶层节点（recall + loop），body 5 个 |
+| `share/wfr/workflows/chat2.json` | 9 节点 | 3 顶层（recall + echo_hist + loop） |
+| `examples/workflow_cli/wf.json` | 6 节点 | 2 顶层（recall + loop），body 3 个 |
+| `examples/wfr_demo/.wfr/workflows/loop_wf.json` | 4 节点（label + poll + ck + goto） | 1 顶层（loop），body 2 个；`next:"n"` + `on_max:"_turn_end"` |
+
+## 五、遗留
+
+- 不支持嵌套循环（VG11）、不做 for-each。
+- `load_history` 禁止放进 body（VG13）—— 需要时放开即可，代价是 messages 膨胀。
+- 图仍是平铺的（不做容器框）；若要"框住 body"，前端布局算法要改成递归嵌套布局。
+- 计数随快照持久化，checkpoint 续跑从上次计数继续（与旧 goto 相同）。

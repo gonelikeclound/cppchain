@@ -103,6 +103,13 @@ IR ──debug_view_graph──▶ {nodes, edges}       边=NodeType::edges()，
 - 防注入：`script_data_escape`（`<`→`\u003c` 等）；`html.ends_with("</html>")` 等测试锁。
 - 调试台展示**展开后**的扁平图（import 节点带前缀显形：demo 里 `notify_wf__n`）。
 
+> **wfr-㉚ 追加**：调试台的"循环分组"维度从**回边的 from 节点**改成 **`kind=="loop"` 的
+> 节点**（`loop_counts` 的键现在就是 loop 节点 id，迭代号直接可读）；节点列表里 body 内
+> 的节点带一个 `loop` 归属字段（复用 import `origin_wf` 那套扁平归属）。图仍平铺
+> （loop 是普通节点 + 一条回边弧线），不做容器框。`wfr debug --session NAME` 的会话
+> 选择器 bug（run 无会话前缀 → 每个 r-N 被当成独立会话）也顺手修了。详见
+> [16](16-loop节点与迭代分组设计.md) §5。
+
 ## 5. 验收
 
 - **全仓 449 测试全绿、clean-first 零告警**；新增项（wfr 相关单测）：
