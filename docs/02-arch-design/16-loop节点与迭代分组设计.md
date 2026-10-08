@@ -168,6 +168,31 @@ cur >= max → goto on_max（缺省 _turn_end）
        iter2 = [loop, think, echo_think, route]
 ```
 
+### 5.2 图上标出本轮**实际走过**的边
+
+静态图把 IR 里**所有**边都画出来，看不出这一轮到底走了哪条 —— 调 ReAct 循环时最想知道的
+就是"这轮回边走了几次、最后是从哪儿收尾的"。现在：
+
+- **数据**：`debug_view_logs` 为每个 run 附一份 `edges: [{from,to,count}]`，来源是引擎的
+  `enter` 序列（相邻两个执行节点 = 走了一条边）。终端边（`_turn_end`/`_fail`）不产生
+  enter 记录，用两个只在"明确"时才采信的来源补：① 最后一个执行节点的 exit update 里
+  发布了 `target`（route 就是这么发布的）；② 该节点在图上只有**一条** terminal 出边
+  且本轮最后一条记录是成功 exit。两条都不满足 → 不猜。
+- **呈现**：走过的边加粗变蓝并标 `×N`（次数），未走过的保持灰/红细线；图例末尾有一行说明。
+- **联动**：切换"会话 / 轮次"时只更新边的类与角标（不重建 SVG），所以节点选中态与布局
+  都不受影响。
+
+实测（真机 chat 一轮）：
+
+```
+__input__ → recall ×1     recall → loop ×1      loop → think ×2
+think → echo_think ×2     echo_think → route ×2 route → act ×1
+act → echo_tool ×1        echo_tool → loop ×1   route → _turn_end ×1
+```
+
+`echo_tool → loop ×1` 就是那一轮的回边；`route → _turn_end ×1` 是收尾边（靠 route 发布的
+target 补上的）。
+
 ## 6. 开放点
 
 1. **不支持嵌套循环**（VG11 硬拒）。要支持的话调试分组要变成 `loop1.loop2` 的路径形式。

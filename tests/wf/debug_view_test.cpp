@@ -278,3 +278,70 @@ TEST(DebugView, embedded_js_braces_are_balanced) {
   // 无论基准是多少，**只要有人改出不平衡，这个数就会变** —— 这才是要守的性质。
   EXPECT_EQ(depth, 1) << "内嵌 JS 的括号不平衡（浏览器里会整页空白）";
 }
+
+// wfr-㉞：本轮**实际走过哪些边、各多少次** —— 从引擎的 enter 序列推出（相邻两个执行节点
+// 就是走了一条边）。终端边（_turn_end/_fail）不产生 enter，靠"唯一 terminal 出边"补上。
+TEST(DebugView, edge_usage_is_derived_from_the_enter_sequence) {
+  auto ir = WorkflowIR::parse(loop_node_ir_json());
+  ASSERT_TRUE(ir) << ir.error();
+
+  // 一轮就跑完：__input__ → loop → fetch → ck（_break）→ notify → _turn_end
+  std::vector<Json> records;
+  auto enter = [&](std::string const& n) { records.push_back(rec("r-1", n, "enter")); };
+  auto exit_ = [&](std::string const& n, Json u = Json::object()) {
+    records.push_back(rec("r-1", n, "exit", std::move(u)));
+  };
+  enter("__input__"); exit_("__input__");
+  enter("loop"); exit_("loop", Json{{"loop_counts", Json{{"poll", 1}}}});
+  enter("fetch"); exit_("fetch", Json{{"results", Json{{"fetch", Json{{"price", 10}}}}}});
+  enter("ck"); exit_("ck", Json::object());
+  enter("notify"); exit_("notify", Json::object());
+
+  Json runs = debug_view_logs(records, *ir);
+  ASSERT_EQ(runs.size(), 1u);
+  auto const& uses = runs[0]["edges"];
+  auto count_of = [&](std::string const& a, std::string const& b) -> int {
+    for (Json const& u : uses)
+      if (u["from"] == a && u["to"] == b) return u["count"].get<int>();
+    return 0;
+  };
+  EXPECT_EQ(count_of("__input__", "loop"), 1);
+  EXPECT_EQ(count_of("loop", "fetch"), 1);   // 节点头把控制流送进 body
+  EXPECT_EQ(count_of("fetch", "ck"), 1);
+  EXPECT_EQ(count_of("ck", "notify"), 1);    // ck 的 then 是 _break → loop.next
+  EXPECT_EQ(count_of("notify", "_turn_end"), 1) << "终端边应被补上";
+}
+
+TEST(DebugView, edge_usage_counts_repeated_traversals) {
+  auto ir = WorkflowIR::parse(loop_node_ir_json());
+  ASSERT_TRUE(ir) << ir.error();
+
+  // 两轮：第 1 轮 ck 走 _continue 回 loop 节点头，第 2 轮才 _break
+  std::vector<Json> records;
+  auto enter = [&](std::string const& n) { records.push_back(rec("r-1", n, "enter")); };
+  auto exit_ = [&](std::string const& n, Json u = Json::object()) {
+    records.push_back(rec("r-1", n, "exit", std::move(u)));
+  };
+  enter("__input__"); exit_("__input__");
+  enter("loop"); exit_("loop", Json{{"loop_counts", Json{{"poll", 1}}}});
+  enter("fetch"); exit_("fetch");
+  enter("ck");    exit_("ck");
+  enter("loop");  exit_("loop", Json{{"loop_counts", Json{{"poll", 2}}}});
+  enter("fetch"); exit_("fetch");
+  enter("ck");    exit_("ck");
+  enter("notify"); exit_("notify");
+
+  Json runs = debug_view_logs(records, *ir);
+  auto const& uses = runs[0]["edges"];
+  auto count_of = [&](std::string const& a, std::string const& b) -> int {
+    for (Json const& u : uses)
+      if (u["from"] == a && u["to"] == b) return u["count"].get<int>();
+    return 0;
+  };
+  EXPECT_EQ(count_of("loop", "fetch"), 2);
+  EXPECT_EQ(count_of("fetch", "ck"), 2);
+  // 第 1 轮 ck 走 _continue 回节点头；第 2 轮 ck 走 _break 去 notify —— 各一次
+  EXPECT_EQ(count_of("ck", "loop"), 1);
+  EXPECT_EQ(count_of("ck", "notify"), 1);
+  EXPECT_EQ(count_of("__input__", "loop"), 1);
+}

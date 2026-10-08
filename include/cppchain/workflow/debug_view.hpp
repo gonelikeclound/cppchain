@@ -9,7 +9,8 @@
 //                              每条记录内嵌 `loop`（该时刻快照）以及 **`loop_id`/`iter`**
 //                              （该记录属于哪个 loop 的第几轮 —— 前端据此把日志树按
 //                              ↺ loop:1 / ↺ loop:2 /（循环外）分组）
-//   build_debug_payload     — {graph, ir, runs, trimmed_node_logs}；records 过大时裁 source=node
+//   build_debug_payload     — {graph, ir, runs[{run, records, edges}], trimmed_node_logs}；
+//                             records 过大时裁 source=node
 //   render_debug_html       — 单 HTML（纯 JS/SVG：三栏可拖布局、树形日志 轮次→loop 迭代→节点、
 //                             选中节点 JSON 描述、选中日志下半区美化 JSON、点 node↔log 联动、
 //                             循环 1,2,3.. 分组）
@@ -31,6 +32,8 @@ struct WorkflowIR;
 [[nodiscard]] Json debug_view_graph(WorkflowIR const& ir);
 
 // 日志 → 按 seq 分 run；每条记录内嵌：
+//   edges   本轮**实际走过**的边及其次数（从引擎 enter 序列推；终端边靠节点发布的
+//           target 或"唯一 terminal 出边"补）—— 前端据此高亮走过的边并标 ×N
 //   loop    该时刻 loop_counts 快照（重放 update.loop_counts，merge_slots 覆盖合并）
 //   loop_id 该记录所属的 loop 节点 id（不在任何循环里则无此键）
 //   iter    该记录属于该 loop 的第几轮（1 起；同上，不在循环里则无此键）

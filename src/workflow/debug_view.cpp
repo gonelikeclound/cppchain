@@ -102,8 +102,26 @@ Json debug_view_logs(std::vector<Json> const& records, WorkflowIR const& ir) {
     return std::nullopt;
   };
 
+  // 每条出边的目标名（原始写法，与 debug_view_graph 导出的 to 对齐）——用来把"最后一个
+  // 执行节点"的收尾边也标出来（终端边没有 enter 记录，光靠相邻 enter 推不出来）。
+  std::unordered_map<std::string, std::vector<std::string>> out_targets;
+  for_each_node(ir, [&](NodeIR const& n, LoopScope const* scope) {
+    NodeType const* t = node_type_of_name(type_name_of(n));
+    if (t == nullptr || !t->edges) return true;
+    for (NodeType::Edge const& e : t->edges(n)) {
+      // 与 debug_view_graph 同一套就地解析：_continue → loop 节点头、_break → loop 的 next
+      std::string to = e.target;
+      if (scope != nullptr && e.target == kContinueName) to = scope->loop_id;
+      else if (scope != nullptr && e.target == kBreakName) to = scope->exit_target;
+      out_targets[n.id].push_back(std::move(to));
+    }
+    return true;
+  });
+
   std::vector<std::string> order;
   std::map<std::string, Json> by_run;
+  std::map<std::string, std::vector<std::pair<std::string, std::string>>> run_edges;  // run → 有序的 (from,to)
+  std::map<std::string, std::string> run_last;                                        // run → 上一个执行节点
   for (std::size_t i = 0; i < records.size(); ++i) {
     Json const& r = records[i];
     std::string run = r.value("run", "");
@@ -123,10 +141,72 @@ Json debug_view_logs(std::vector<Json> const& records, WorkflowIR const& ir) {
       }
     }
     by_run[key].push_back(std::move(rec));
+
+    // 边使用统计：引擎的 enter 序列里，相邻两个节点 = 走了一条边（含 __input__ → 首节点）。
+    // 这是**运行期真实走的路**，与静态图上的全部边相对照 —— 调试时最想知道的就是这个。
+    if (r.value("source", "") == "engine" && r.value("phase", "") == "enter") {
+      std::string const cur = r.value("node", "");
+      if (!cur.empty()) {
+        auto const it = run_last.find(key);
+        if (it != run_last.end() && it->second != cur) run_edges[key].emplace_back(it->second, cur);
+        run_last[key] = cur;  // 首个执行节点只记起点，不产生边
+      }
+    }
   }
+
+  // 收尾边：终端目标（_turn_end/_fail/__end__）不产生 enter 记录，靠相邻 enter 推不出来。
+  // 两个来源，都只在"明确"时才标：
+  //   ① 最后一个执行节点的 exit update 里发布了 target（route 就是这么发布的）→ 直接采信；
+  //   ② 该节点在图上只有**一条** terminal 出边，且本轮最后一条记录是成功 exit → 必然是它。
+  for (std::string const& k : order) {
+    auto& seq = run_edges[k];
+    auto const lit = run_last.find(k);
+    if (lit == run_last.end()) continue;
+    std::string const last = lit->second;
+    auto const ot = out_targets.find(last);
+    if (ot == out_targets.end()) continue;
+    auto const is_term = [](std::string const& t) {
+      return t == "__end__" || t == "__fail__" || t == "_turn_end" || t == "_fail";
+    };
+    std::string picked;
+    for (Json const& rec : by_run[k])
+      if (rec.value("source", "") == "engine" && rec.value("phase", "") == "exit" &&
+          rec.value("node", "") == last)
+        if (auto const u = rec.find("update"); u != rec.end() && u->is_object())
+          if (auto const rs = u->find(kResultsKey); rs != u->end() && rs->is_object())
+            if (auto const f = rs->find(last); f != rs->end() && f->is_object())
+              if (auto const t = f->find("target"); t != f->end() && t->is_string())
+                picked = t->get<std::string>();
+    if (picked.empty()) {
+      int terms = 0;
+      for (std::string const& t : ot->second)
+        if (is_term(t)) {
+          ++terms;
+          picked = t;
+        }
+      if (terms != 1) continue;  // 多条终端边且没发布 target → 不猜
+      bool const ended_ok = !by_run[k].empty() &&
+                            by_run[k].back().value("source", "") == "engine" &&
+                            by_run[k].back().value("phase", "") == "exit";
+      if (!ended_ok) continue;
+    }
+    for (std::string const& t : ot->second)
+      if (t == picked) {
+        seq.emplace_back(last, picked);
+        break;
+      }
+  }
+
   Json out = Json::array();
-  for (std::string const& k : order)
-    out.push_back(Json{{"run", k}, {"records", by_run[k]}});
+  for (std::string const& k : order) {
+    // 折叠成 {from,to,count}
+    Json uses = Json::array();
+    std::map<std::pair<std::string, std::string>, long> agg;
+    for (auto const& e : run_edges[k]) agg[e] += 1;
+    for (auto const& [pair, cnt] : agg)
+      uses.push_back(Json{{"from", pair.first}, {"to", pair.second}, {"count", cnt}});
+    out.push_back(Json{{"run", k}, {"records", by_run[k]}, {"edges", std::move(uses)}});
+  }
   return out;
 }
 
@@ -222,6 +302,10 @@ path.e.term{fill:none;stroke:#b0b3b8;stroke-width:1.2;stroke-dasharray:5 4}
 .nodeitem{padding:2px 4px;cursor:pointer;border-radius:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;justify-content:space-between;gap:6px}
 .nodeitem:hover,.nodeitem.on{background:var(--hl)}
 .nodeitem .cnt{color:#999;font-weight:600}
+.e.took{stroke:var(--acc);stroke-width:2.8}
+.elabel.took{fill:var(--acc);font-weight:700}
+.ecount{font:10px system-ui;fill:#fff;font-weight:700}
+.ecountbg{fill:var(--acc)}
 .gototab{margin-top:4px}
 .loopit{padding:2px 6px;border:1px solid #ccc;border-radius:4px;margin:2px 2px 2px 0;display:inline-block;cursor:pointer;background:#fff}
 .loopit.on{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -325,6 +409,11 @@ function renderLegend(){
     const t=document.createElement('span'); t.textContent=k;
     it.appendChild(d); it.appendChild(t); box.appendChild(it);
   });
+  const hint=document.createElement('span'); hint.className='item';
+  const hd=document.createElement('span'); hd.className='dot';
+  hd.style.background='#1a73e8'; hd.style.borderColor='#1a73e8';
+  const ht=document.createElement('span'); ht.textContent='加粗蓝线 = 本轮走过的边（×N 为次数）';
+  hint.appendChild(hd); hint.appendChild(ht); box.appendChild(hint);
 }
 function layout(){
   const ids=G.nodes.map(n=>n.id); const first=ids[0];
@@ -371,6 +460,7 @@ function boxEdge(cx,cy,dx,dy){
   const t=Math.min((NODE_W/2)/Math.abs(dx),(NODE_H/2)/Math.abs(dy));
   return {x:cx+dx*t, y:cy+dy*t};
 }
+const EDGE_EL=[];   // 每条边画出来的元素（按轮次标「走过」用）
 function renderSVG(){
   const size=layout();
   svg.setAttribute('width',size.w); svg.setAttribute('height',size.h); svg.setAttribute('viewBox','0 0 '+size.w+' '+size.h);
@@ -420,11 +510,20 @@ function renderSVG(){
     const p=el('path'); p.setAttribute('d',d); p.setAttribute('class',cls);
     if(b && !e.terminal) p.setAttribute('marker-end', e.forward?'url(#arr)':'url(#arrg)');
     svg.appendChild(p);
+    let lt=null;
     if(e.label && e.label!=='next'){
-      const t=el('text'); t.setAttribute('x',lx); t.setAttribute('y',ly);
-      t.setAttribute('text-anchor','middle'); t.setAttribute('class','elabel');
-      t.textContent=e.label; svg.appendChild(t);
+      lt=el('text'); lt.setAttribute('x',lx); lt.setAttribute('y',ly);
+      lt.setAttribute('text-anchor','middle'); lt.setAttribute('class','elabel');
+      lt.textContent=e.label; svg.appendChild(lt);
     }
+    // 次数角标：本轮走过才显示（内容由 applyEdgeUsage 填）
+    const bg=el('rect'); bg.setAttribute('rx',6); bg.setAttribute('class','ecountbg');
+    bg.setAttribute('height',12); bg.setAttribute('width',0);
+    bg.setAttribute('x',lx-6); bg.setAttribute('y',ly+3);
+    const cn=el('text'); cn.setAttribute('text-anchor','middle'); cn.setAttribute('class','ecount');
+    cn.setAttribute('x',lx); cn.setAttribute('y',ly+12);
+    svg.appendChild(bg); svg.appendChild(cn);
+    EDGE_EL.push({key:e.from+'|'+e.to, path:p, label:lt, badge:bg, text:cn, x:lx, y:ly});
   });
   ALLNODES.forEach(n=>{
     const p=pos[n.id];
@@ -568,6 +667,30 @@ function renderLog(){
     box.appendChild(rd);
   });
   if(shown===0) box.textContent='（无记录）';
+}
+// 按**当前选中的轮次**标出真实走过的边与次数（数据来自 C++ 侧从引擎 enter 序列推出的
+// run.edges；终端边靠「最后一个节点发布的 target」或「唯一 terminal 出边」补上）。
+function applyEdgeUsage(){
+  const run=(curRunIdx>=0)?RUNS[curRunIdx]:null;
+  const map={};
+  if(run && run.edges) run.edges.forEach(u=>{ map[u.from+'|'+u.to]=u.count; });
+  EDGE_EL.forEach(E=>{
+    const c=map[E.key]||0;
+    const base=E.path.getAttribute('class').replace(' took','');
+    if(c>0){
+      E.path.setAttribute('class',base+' took');
+      if(E.label) E.label.setAttribute('class','elabel took');
+      const s2='×'+c, w=s2.length*7+6;
+      E.text.textContent=s2;
+      E.badge.setAttribute('width',String(w));
+      E.badge.setAttribute('x',String(E.x-w/2));
+    } else {
+      E.path.setAttribute('class',base);
+      if(E.label) E.label.setAttribute('class','elabel');
+      E.text.textContent='';
+      E.badge.setAttribute('width',0);
+    }
+  });
 }
 function recordRow(r){
   const frag=document.createDocumentFragment();
@@ -721,10 +844,10 @@ function bindRunSelectors(){
   const ss=document.getElementById('sessSel'), rs=document.getElementById('runSel');
   ss.addEventListener('change',()=>{
     const runs=(SESS[ss.value]||[]); curRunIdx = runs.length? runs[0] : -1;
-    renderRunSelectors(); renderLog(); renderGotoTabs();
+    renderRunSelectors(); renderLog(); renderGotoTabs(); applyEdgeUsage();
   });
   rs.addEventListener('change',()=>{
-    curRunIdx=Number(rs.value); renderLog(); renderGotoTabs();
+    curRunIdx=Number(rs.value); renderLog(); renderGotoTabs(); applyEdgeUsage();
   });
 }
 /* ---------- 分栏拖动 + 尺寸持久化（localStorage 尽力而为）---------- */
@@ -769,7 +892,7 @@ function initSplitters(){
 }
 /* ---------- 启动 ---------- */
 try {
-  layout(); renderSVG(); renderLegend(); renderRunSelectors(); bindRunSelectors();
+  layout(); renderSVG(); applyEdgeUsage(); renderLegend(); renderRunSelectors(); bindRunSelectors();
   renderNodeList(); renderGotoTabs(); renderLog(); renderDetail(''); renderLogDetail(null);
   if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
   initSplitters();
