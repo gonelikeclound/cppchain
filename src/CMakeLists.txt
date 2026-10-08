@@ -145,7 +145,8 @@ add_library(cppchain_agent STATIC
   agent/stale.cpp
   agent/subagent.cpp
   agent/tokens.cpp
-  agent/artifact.cpp)
+  agent/artifact.cpp
+  agent/history.cpp)
 
 target_include_directories(cppchain_agent PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
@@ -188,6 +189,7 @@ target_link_libraries(cppchain_workflow PUBLIC
   cppchain_tool
   cppchain_model
   cppchain_state
+  cppchain_agent
   nlohmann_json::nlohmann_json)
 
 target_compile_options(cppchain_workflow PRIVATE -Wall -Wextra -Wpedantic)

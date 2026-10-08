@@ -217,3 +217,95 @@ TEST(Wire, parse_chunk_usage_only_frame) {
   ASSERT_TRUE(c->usage.has_value());
   EXPECT_EQ(c->usage->total_tokens, 7);
 }
+
+// ---------- 出站 reasoning_content（wfr-㉙）----------
+//
+// 默认档必须与引入前**逐字节一致**（既有调用点与测试一行不改的前提）；
+// 另两档是"思考模式下带 tool_calls 的 assistant 须回传 reasoning"的可选实现。
+
+namespace {
+
+message::Message ai_with_reasoning(std::string reasoning, std::string text,
+                                   bool with_tool_call = false) {
+  message::Message m;
+  m.type = message::Role::Ai;
+  if (!reasoning.empty())
+    m.content.push_back(message::ReasoningBlock{std::move(reasoning), std::nullopt});
+  m.content.push_back(message::TextBlock{std::move(text), std::nullopt});
+  if (with_tool_call)
+    m.tool_calls.push_back(message::ToolCall{"call_1", "get_weather",
+                                             nlohmann::json{{"city", "SF"}}});
+  return m;
+}
+
+}  // namespace
+
+TEST(Wire, outbound_drops_reasoning_by_default) {
+  auto const m = ai_with_reasoning("let me think", "42", /*with_tool_call=*/true);
+  auto const j = openai::message_to_openai(m);
+  EXPECT_FALSE(j.contains("reasoning_content"));
+  EXPECT_EQ(j.at("content"), "42");  // reasoning 不进 content
+}
+
+TEST(Wire, outbound_always_echoes_reasoning_when_asked) {
+  auto const m = ai_with_reasoning("let me think", "42");
+  auto const j = openai::message_to_openai(m, ReasoningEcho::Always);
+  ASSERT_TRUE(j.contains("reasoning_content"));
+  EXPECT_EQ(j.at("reasoning_content"), "let me think");
+}
+
+TEST(Wire, outbound_joins_multiple_reasoning_blocks_without_a_separator) {
+  // 流式分块是无缝拼接的：回传时必须还原原文，加分隔符就改了内容
+  message::Message m;
+  m.type = message::Role::Ai;
+  m.content.push_back(message::ReasoningBlock{"先", std::nullopt});
+  m.content.push_back(message::ReasoningBlock{"想再答", std::nullopt});
+  m.content.push_back(message::TextBlock{"答", std::nullopt});
+  auto const j = openai::message_to_openai(m, ReasoningEcho::Always);
+  EXPECT_EQ(j.at("reasoning_content"), "先想再答");
+}
+
+TEST(Wire, tool_calls_mode_only_echoes_on_tool_calling_turns) {
+  auto const with_tc = ai_with_reasoning("r1", "", /*with_tool_call=*/true);
+  auto const without_tc = ai_with_reasoning("r2", "final answer");
+  EXPECT_TRUE(openai::message_to_openai(with_tc, ReasoningEcho::ToolCalls)
+                  .contains("reasoning_content"));
+  EXPECT_FALSE(openai::message_to_openai(without_tc, ReasoningEcho::ToolCalls)
+                   .contains("reasoning_content"));
+}
+
+TEST(Wire, outbound_never_echoes_reasoning_on_non_ai_messages) {
+  // 任何档位下，非 AI 消息都不该冒出这个字段
+  for (ReasoningEcho const echo : {ReasoningEcho::Drop, ReasoningEcho::ToolCalls,
+                                   ReasoningEcho::Always}) {
+    for (message::Message const& m :
+         {message::system_message("sys"), message::human_message("hi"),
+          message::tool_message("result", "call_1")}) {
+      EXPECT_FALSE(openai::message_to_openai(m, echo).contains("reasoning_content"))
+          << openai::message_to_openai(m, echo).dump();
+    }
+  }
+}
+
+TEST(Wire, outbound_omits_the_field_when_the_message_has_no_reasoning) {
+  auto const m = ai_with_reasoning("", "plain");
+  EXPECT_FALSE(openai::message_to_openai(m, ReasoningEcho::Always).contains("reasoning_content"));
+}
+
+TEST(Wire, build_request_wires_the_reasoning_echo_option) {
+  ModelConfig cfg;
+  cfg.model = "deepseek-flash";
+  auto const m = ai_with_reasoning("let me think", "42", /*with_tool_call=*/true);
+
+  CallOptions opts;
+  opts.reasoning_echo = ReasoningEcho::Always;
+  auto const body = openai::build_request(std::span<message::Message const>(&m, 1), opts, cfg,
+                                          /*stream=*/false);
+  ASSERT_TRUE(body.at("messages").is_array());
+  EXPECT_EQ(body.at("messages").at(0).at("reasoning_content"), "let me think");
+
+  // 默认档走同一条路径 → 不带该字段
+  auto const plain = openai::build_request(std::span<message::Message const>(&m, 1), CallOptions{},
+                                           cfg, /*stream=*/false);
+  EXPECT_FALSE(plain.at("messages").at(0).contains("reasoning_content"));
+}

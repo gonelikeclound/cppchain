@@ -27,6 +27,7 @@
 | [11](11-主动智能Workflow模块落地与验收记录.md) | 主动智能 Workflow 模块落地与验收 | 🟢 真机 12 例矩阵 |
 | [12](12-主动智能proactive命令行demo落地与验收记录.md) | 主动智能 proactive 命令行 demo 落地与验收 | 🟢 真机矩阵 |
 | [13](13-M10图运行时补全落地与验收记录.md) | M10 图运行时补全落地与验收（Streaming / Interrupt / Send / 时间旅行） | 🟢 全仓 422 全绿 + 4 离线 demo |
+| [14](14-wfr-chat2思考历史对比落地与验收记录.md) | wfr-chat2 思考历史对比（历史三档压缩 + reasoning 回传 / 参数透传开关） | 🟢 495 全绿 + 真机三档对照 |
 
 ## 文件列表
 
@@ -45,3 +46,4 @@
 | 11 | [11-主动智能Workflow模块落地与验收记录.md](11-主动智能Workflow模块落地与验收记录.md) | **主动智能（M11）**：IR → 校验 → 编译成图 → 生成端；规范来源见 `主动智能/`；12 例固件矩阵 | 🟢 真机 12 例矩阵 |
 | 12 | [12-主动智能proactive命令行demo落地与验收记录.md](12-主动智能proactive命令行demo落地与验收记录.md) | **proactive CLI**：`ask_user` 菜单澄清 → 易读 IR；交互/批量/矩阵三模式 | 🟢 真机矩阵 |
 | 13 | [13-M10图运行时补全落地与验收记录.md](13-M10图运行时补全落地与验收记录.md) | **M10 图运行时补全**：Streaming / Interrupt（真 HITL 原语）/ Send 动态 fan-out / 时间旅行；checkpoint 包队列契约 | 🟢 全仓 422 全绿 + 4 离线 demo |
+| 14 | [14-wfr-chat2思考历史对比落地与验收记录.md](14-wfr-chat2思考历史对比落地与验收记录.md) | **wfr-㉙**：思考模型的历史形态三档对照（full / drop_round / keep_evidence）+ `reasoning_content` 回传与厂商参数透传开关；含协议问句的探针答案 | 🟢 495 全绿 + 真机三档对照 |

@@ -35,6 +35,12 @@
 |---|---|---|---|
 | 1 | 崩溃：`semaphore: Assertion '__update >= 0'` | 同步投递时 2 个 delta + 1 个 done 的 `release()` 早于消费，`binary_semaphore`（上限 1）溢出 | 换 `counting_semaphore<>` |
 | 2 | `finish_reason` / `usage` 拿不到 | `invoke()` 经 `stream()` 生成器转发，而生成器**只传 delta、丢弃终态 Message** | `invoke()` 改为直接建在回调内核上，取权威终态 |
+> **wfr-㉙ 追加**：出站原先**无条件只发文本块**（`message_to_openai` 丢掉所有
+> `ReasoningBlock`）。现在由 `CallOptions::reasoning_echo`（`Drop` 默认 / `ToolCalls` /
+> `Always`）决定是否作为 `reasoning_content` 回传；多块**无分隔符**拼接（流式分块本就无缝，
+> 加分隔符会改变原文）。默认档与引入前逐字节一致。详见
+> [02-arch-design/15](../02-arch-design/15-思考模型推理回传与历史压缩策略设计.md) §4。
+
 | 3 | DeepSeek reasoner 的推理内容被拆成 150+ 碎块 | `merge_content` 只合并相邻 `TextBlock`，未合并 `ReasoningBlock`（M1 当时的简化） | 相邻同类型块（text / reasoning）都合并 + 回归测试 |
 | 4 | SSL 校验失败（企业网络） | `api.deepseek.com` 被企业代理 MITM（证书 issuer = Xiaomi CA），系统 CA store 不含该企业 CA | `HttpRequest.ca_info` + `ModelConfig.ca_info` + demo 读 `LLM_CA_BUNDLE`（本机自动探测 `~/.geo/corp-ca.pem`） |
 

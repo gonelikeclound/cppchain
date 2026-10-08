@@ -26,6 +26,10 @@
 //   VN10 M12 节点：model 组件名/tools 工具集名必须在注册表；route 的 on/cases 键走封闭词表，
 //        且 cases 必须覆盖全部 outcome 或显式给 default（禁止"漏一档静默走 else"）
 //   VN11 M12 history 节点：path/next 必填
+//   VN13 wfr-㉙ model 节点：params 必须是对象且不含请求体保留键（extra 合并是右胜）；
+//        reasoning_echo 为字面量时 ∈ {drop,tool_calls,always}（整串 @config 引用留给运行期）
+//   VN14 wfr-㉙ load_history 节点：mode 为字面量时 ∈ {full,drop_round,keep_evidence}；
+//        budget 为字面量时须为正整数（引用留给运行期，缺省→full/200、非法→硬错）
 //   VG9  load_history 必须在消费 messages 的节点之前（Q8：硬拒绝，读了没人用就是错）
 //   VH1 on_error：retry ≥ 0；fallback 为存在节点 id 或 _turn_end
 //   VG1 指针目标：next/then/else 为存在节点或 _turn_end；goto 必须指向 label
@@ -545,13 +549,16 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
           else {
             NodeIR const& target = ir.nodes[it->second];
             // 可引用 result 的节点：tool（output_schema 声明字段）+ model / run_tools
-            //（wfr-㉗：模型/工具阶段发布 thinking/文本/调用摘要，字段运行时定义）。
+            //（wfr-㉗：模型/工具阶段发布 thinking/文本/调用摘要，字段运行时定义）
+            // + load_history（wfr-㉙：发布历史压缩统计，供 echo 打印"修改过程"）。
             bool const result_ok = target.kind == NodeKind::Tool ||
                                    target.kind == NodeKind::Model ||
-                                   target.kind == NodeKind::RunTools;
+                                   target.kind == NodeKind::RunTools ||
+                                   target.kind == NodeKind::LoadHistory;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
-                               "' 指向非 result 节点（仅 tool / model / run_tools 发布 result）");
+                               "' 指向非 result 节点（仅 tool / model / run_tools / "
+                               "load_history 发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");

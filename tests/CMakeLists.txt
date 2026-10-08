@@ -98,7 +98,8 @@ add_executable(agent_tests
   agent/tokens_test.cpp
   agent/trim_token_test.cpp
   agent/truncate_artifact_test.cpp
-  agent/approval_memo_test.cpp)
+  agent/approval_memo_test.cpp
+  agent/history_compress_test.cpp)
 
 target_link_libraries(agent_tests PRIVATE
   cppchain_agent
@@ -142,6 +143,7 @@ add_executable(workflow_tests
   wf/import_workflow_test.cpp
   wf/echo_test.cpp
   wf/debug_view_test.cpp
+  wf/model_params_test.cpp
   wf/wfr_lookup_test.cpp)
 
 target_include_directories(workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)

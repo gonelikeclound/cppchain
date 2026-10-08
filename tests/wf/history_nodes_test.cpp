@@ -406,3 +406,206 @@ TEST(WfHistoryNodes, session_log_path_migrated_to_wfr_root) {
   EXPECT_TRUE(gi.find("sessions/") != std::string::npos);
   EXPECT_TRUE(gi.find("checkpoints/") != std::string::npos);
 }
+
+// ---- wfr-㉙：历史渲染三档（full / drop_round / keep_evidence）----
+//
+// 压缩是**投影的渲染期变换**：同一条日志、同一句话，只换 mode，断言"模型实际收到了什么"。
+// 这也是 chat2 对照实验的离线底座（真机版见 docs/04-problems/14）。
+namespace {
+
+// 一段"工具轮"历史：human → ai(带 tool_calls + reasoning) → tool → ai(带 reasoning)
+Json beijing_history() {
+  using cppchain::message::Message;
+  using cppchain::message::ReasoningBlock;
+  using cppchain::message::Role;
+  using cppchain::message::TextBlock;
+  using cppchain::message::ToolCall;
+
+  Message call;
+  call.type = Role::Ai;
+  call.content.push_back(ReasoningBlock{"用户问天气，需要调用 fetch_price", std::nullopt});
+  call.content.push_back(TextBlock{"", std::nullopt});
+  call.tool_calls.push_back(ToolCall{"call_1", "fetch_price", Json{{"symbol", "BJ"}}});
+
+  Message answer;
+  answer.type = Role::Ai;
+  answer.content.push_back(ReasoningBlock{"拿到结果，可直接回答", std::nullopt});
+  answer.content.push_back(TextBlock{"北京今天 12°C，晴。", std::nullopt});
+
+  return Json::array({cppchain::message::human_message("北京天气怎么样？"), call,
+                      cppchain::message::tool_message("price=12 晴", "call_1"), answer});
+}
+
+// 预置一条 engine 的 input 事件（= 上次"命令"留下的历史）
+void seed_history(std::string const& log_path, Json const& messages) {
+  SessionLog log(log_path);
+  log.engine_enter("r-1", "__input__", "input");
+  log.engine_exit("r-1", "__input__", "input", true, "ok", 0, Json{{"messages", messages}});
+}
+
+Json ir_with_mode(std::string const& mode_spec) {
+  Json ir_json = history_react_ir();
+  ir_json["nodes"][0]["mode"] = mode_spec;  // nodes[0] = recall
+  return ir_json;
+}
+
+std::size_t count_reasoning_blocks(std::vector<Message> const& msgs) {
+  std::size_t n = 0;
+  for (Message const& m : msgs)
+    for (auto const& b : m.content)
+      if (std::holds_alternative<cppchain::message::ReasoningBlock>(b)) ++n;
+  return n;
+}
+
+}  // namespace
+
+TEST(WfHistoryNodes, history_mode_full_replays_everything_including_reasoning) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, beijing_history());
+
+  Fixture f;
+  f.model.replies.push_back(cppchain::message::ai_message("ok"));
+  SessionLog slog(path);
+  auto ir = WorkflowIR::parse(ir_with_mode("full"));
+  ASSERT_TRUE(ir) << ir.error();
+  CompileOptions co;
+  co.components = &f.components;
+  auto wf = compile_workflow(*ir, f.registry, nullptr, co);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  FireOptions fo;
+  fo.log = &slog;
+  fo.input_messages = Json::array({cppchain::message::human_message("那上海呢？")});
+  auto r = fire_once(*wf, f.config(tmp.str()), std::move(fo));
+  ASSERT_TRUE(r) << r.error().message;
+
+  ASSERT_EQ(f.model.last_received.size(), 5u);  // 4 条历史 + 本轮输入
+  EXPECT_EQ(f.model.last_received[0].text(), "北京天气怎么样？");
+  EXPECT_EQ(f.model.last_received[3].text(), "北京今天 12°C，晴。");
+  EXPECT_EQ(f.model.last_received[4].text(), "那上海呢？");
+  EXPECT_EQ(count_reasoning_blocks(f.model.last_received), 2u);
+  EXPECT_EQ((*r)["results"]["recall"]["mode"], "full");
+}
+
+TEST(WfHistoryNodes, history_mode_drop_round_removes_the_tool_round) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, beijing_history());
+
+  Fixture f;
+  f.model.replies.push_back(cppchain::message::ai_message("ok"));
+  SessionLog slog(path);
+  auto ir = WorkflowIR::parse(ir_with_mode("drop_round"));
+  ASSERT_TRUE(ir) << ir.error();
+  CompileOptions co;
+  co.components = &f.components;
+  auto wf = compile_workflow(*ir, f.registry, nullptr, co);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  FireOptions fo;
+  fo.log = &slog;
+  fo.input_messages = Json::array({cppchain::message::human_message("那上海呢？")});
+  auto r = fire_once(*wf, f.config(tmp.str()), std::move(fo));
+  ASSERT_TRUE(r) << r.error().message;
+
+  ASSERT_EQ(f.model.last_received.size(), 3u);  // 工具轮整组没了
+  EXPECT_EQ(f.model.last_received[0].text(), "北京天气怎么样？");
+  EXPECT_EQ(f.model.last_received[1].text(), "北京今天 12°C，晴。");
+  EXPECT_EQ(f.model.last_received[2].text(), "那上海呢？");
+  for (Message const& m : f.model.last_received) EXPECT_TRUE(m.tool_calls.empty());
+  EXPECT_EQ((*r)["results"]["recall"]["dropped_msgs"], 2);
+}
+
+TEST(WfHistoryNodes, history_mode_keep_evidence_keeps_the_call_but_drops_reasoning) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, beijing_history());
+
+  Fixture f;
+  f.model.replies.push_back(cppchain::message::ai_message("ok"));
+  SessionLog slog(path);
+  auto ir = WorkflowIR::parse(ir_with_mode("keep_evidence"));
+  ASSERT_TRUE(ir) << ir.error();
+  CompileOptions co;
+  co.components = &f.components;
+  auto wf = compile_workflow(*ir, f.registry, nullptr, co);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  FireOptions fo;
+  fo.log = &slog;
+  fo.input_messages = Json::array({cppchain::message::human_message("那上海呢？")});
+  auto r = fire_once(*wf, f.config(tmp.str()), std::move(fo));
+  ASSERT_TRUE(r) << r.error().message;
+
+  // 条数与 full 相同 —— 这是它和 drop_round 的本质区别：模型仍看得见"我调用过工具"
+  ASSERT_EQ(f.model.last_received.size(), 5u);
+  EXPECT_EQ(count_reasoning_blocks(f.model.last_received), 0u);
+  ASSERT_EQ(f.model.last_received[1].tool_calls.size(), 1u);
+  EXPECT_EQ(f.model.last_received[1].tool_calls[0].name, "fetch_price");
+  EXPECT_EQ(f.model.last_received[2].text(), "price=12 晴");  // 短结果逐字保留
+  EXPECT_EQ((*r)["results"]["recall"]["rewritten_msgs"], 0);
+  EXPECT_LT((*r)["results"]["recall"]["after_tokens"].get<int>(),
+            (*r)["results"]["recall"]["before_tokens"].get<int>());
+}
+
+TEST(WfHistoryNodes, compressed_history_is_never_written_back_to_the_log) {
+  // 哨兵：压缩结果若落进日志，下次 replay 会把整段消息再追加一遍（add_messages 对无 id 消息是追加）。
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, beijing_history());
+
+  Fixture f;
+  f.model.replies.push_back(cppchain::message::ai_message("ok"));
+  SessionLog slog(path);
+  auto ir = WorkflowIR::parse(ir_with_mode("@config.history_mode"));
+  ASSERT_TRUE(ir) << ir.error();
+  CompileOptions co;
+  co.components = &f.components;
+  auto wf = compile_workflow(*ir, f.registry, nullptr, co);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  FireOptions fo;
+  fo.log = &slog;
+  fo.input_messages = Json::array({cppchain::message::human_message("那上海呢？")});
+  Json cfg = f.config(tmp.str());
+  cfg["history_mode"] = "drop_round";
+  auto r = fire_once(*wf, cfg, std::move(fo));
+  ASSERT_TRUE(r) << r.error().message;
+
+  for (Json const& e : engine_ok_exits(slog.records())) {
+    if (e.value("node_kind", "") == "load_history") {
+      EXPECT_FALSE(e.contains("update")) << "load_history 的 update 不应落盘";
+    }
+  }
+
+  // 日志里仍是 4 条历史 + 1 条本轮输入 + 1 条本轮回复（未被压缩结果污染；
+  // 若回声落了盘，drop_round 那 3 条会再追加一遍，这里就会明显大于 6）。
+  EXPECT_EQ(replay_session_messages(path).size(), 6u);
+}
+
+TEST(WfHistoryNodes, unknown_history_mode_is_a_hard_error) {
+  // fail-closed：拼错的 --set history_mode=keep_evidnce 必须报出来，而不是静默当 full 跑。
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, beijing_history());
+
+  Fixture f;
+  f.model.replies.push_back(cppchain::message::ai_message("ok"));
+  SessionLog slog(path);
+  auto ir = WorkflowIR::parse(ir_with_mode("@config.history_mode"));
+  ASSERT_TRUE(ir) << ir.error();
+  CompileOptions co;
+  co.components = &f.components;
+  auto wf = compile_workflow(*ir, f.registry, nullptr, co);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  FireOptions fo;
+  fo.log = &slog;
+  fo.input_messages = Json::array({cppchain::message::human_message("那上海呢？")});
+  Json cfg = f.config(tmp.str());
+  cfg["history_mode"] = "keep_evidnce";
+  auto r = fire_once(*wf, cfg, std::move(fo));
+  ASSERT_FALSE(r);
+  EXPECT_NE(r.error().message.find("不在词表里"), std::string::npos) << r.error().message;
+}

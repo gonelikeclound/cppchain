@@ -33,7 +33,31 @@ inline ModelError parse_error(std::string msg, nlohmann::json const& raw) {
 
 // ---- 出站：Message → OpenAI messages 元素 ----
 
-inline nlohmann::json message_to_openai(Message const& m) {
+// 把一条消息里的 ReasoningBlock 拼回原文。**不加分隔符**：流式分块本就是无缝拼接的
+// （chunk.hpp 会把相邻 ReasoningBlock 合并），加分隔符反而改变了原文。
+inline std::string reasoning_text(Message const& m) {
+  std::string out;
+  for (auto const& b : m.content)
+    if (auto const* r = std::get_if<ReasoningBlock>(&b)) out += r->reasoning;
+  return out;
+}
+
+// 该消息出站时是否要带上 reasoning_content（策略见 model::ReasoningEcho）。
+inline bool echoes_reasoning(Message const& m, ReasoningEcho echo) {
+  if (m.type != Role::Ai) return false;
+  switch (echo) {
+    case ReasoningEcho::Drop:
+      return false;
+    case ReasoningEcho::ToolCalls:
+      return !m.tool_calls.empty() || !m.invalid_tool_calls.empty();
+    case ReasoningEcho::Always:
+      return true;
+  }
+  return false;
+}
+
+inline nlohmann::json message_to_openai(Message const& m,
+                                        ReasoningEcho echo = ReasoningEcho::Drop) {
   nlohmann::json j = nlohmann::json::object();
   switch (m.type) {
     case Role::System: j["role"] = "system"; break;
@@ -42,8 +66,14 @@ inline nlohmann::json message_to_openai(Message const& m) {
     case Role::Tool: j["role"] = "tool"; break;
     case Role::Chat: j["role"] = m.custom_role.value_or("user"); break;
   }
-  // 出站只发文本块（reasoning/多模态暂不外发）；文本块拼为字符串，兼容性最好。
+  // 出站只发文本块（多模态暂不外发）；文本块拼为字符串，兼容性最好。
+  // reasoning 单独走 reasoning_content（见下）——DeepSeek 方言的非标准字段。
   j["content"] = m.text();
+
+  if (echoes_reasoning(m, echo)) {
+    std::string const r = reasoning_text(m);
+    if (!r.empty()) j["reasoning_content"] = r;
+  }
 
   if (!m.tool_calls.empty()) {
     auto calls = nlohmann::json::array();
@@ -65,7 +95,7 @@ inline nlohmann::json build_request(std::span<Message const> msgs, CallOptions c
   body["model"] = opts.model.value_or(cfg.model);
 
   auto arr = nlohmann::json::array();
-  for (auto const& m : msgs) arr.push_back(message_to_openai(m));
+  for (auto const& m : msgs) arr.push_back(message_to_openai(m, opts.reasoning_echo));
   body["messages"] = std::move(arr);
 
   // 流式默认不回传 usage（多数兼容端点在终态给 usage-only 帧需要显式请求）。

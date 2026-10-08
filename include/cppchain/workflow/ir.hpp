@@ -105,6 +105,11 @@ struct NodeIR {
   std::string model;                         // 必填：模型组件名
   std::string toolset;                       // 可选：工具集组件名（空 = 不带工具）
   std::string system_prompt;                 // 可选：本节点追加的 system 提示
+  // wfr-㉙：厂商私有参数，原样并入请求体（→ CallOptions::extra）。值是运行期参数，
+  // 可含 `@config.*`；解析为 null 的**顶层键会被丢弃**（不把 "k":null 发给端点）。
+  Json model_params = Json::object();
+  // wfr-㉙：出站是否回传 reasoning_content（drop / tool_calls / always，可写 `@config.*`）。
+  std::string reasoning_echo;
 
   // Route 节点（M12）：match 分派。判别式与 outcome 都是**封闭词表**
   std::string on;                            // 判别式名，初版只有 "last_ai_outcome"
@@ -115,6 +120,10 @@ struct NodeIR {
   // （可写 `@config.workspace` 这类引用，与该层其它参数同一套解析；历史即日志的投影）
   std::string path;
   std::string session;
+  // wfr-㉙：读出来的历史按策略渲染（full / drop_round / keep_evidence，可写 `@config.*`）。
+  // 压缩是**投影的渲染期变换**：结果绝不落盘（回声抑制见 compiler.cpp），故不影响 replay。
+  std::string history_mode;
+  std::string history_budget;                // keep_evidence 的单条工具结果内联 token 预算（可选）
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

@@ -103,8 +103,15 @@ workflow 用 **state 在节点间传参**；没有特殊节点，全部平级：
 - **`run_tools`**：执行那条消息里的 `tool_calls`，把 ToolMessage 追进 `messages`。
 - **回边**：回到 `model` 再发一轮。**这就是"循环"**——与 langgraph 的 `tools → agent` 等价。
 - **`save_history`**：(D 阶段设计；**④ 起已取消**，见 12 §7.2 —— 历史是日志的投影，不再单独落盘。
+
   原语义：把 `state.messages` 写回工作路径。位置自由：放 `model` 前就先存下用户
   输入（中途崩了也不丢），放 `route` 后则存完整一轮。)
+
+> **wfr-㉙ 追加**：`load_history` 的语义从"加载"扩到"**加载 + 按策略渲染**"——
+> `mode`（full / drop_round / keep_evidence）与 `budget` 两个运行期参数。关键不变量没变：
+> 它读的仍是日志投影，**压缩结果绝不落盘**（编译器对它省略 `update` 的回声抑制照旧生效），
+> 所以 replay 不会因为压缩而双写。见 [15](15-思考模型推理回传与历史压缩策略设计.md) §3。
+
 
 **关于"结果存 state.result"**：M11 已有的约定是按节点分槽 `state.results[<节点 id>]`。
 agent 轮的最终答复就在最后一条 AI 消息里，落盘与引用都走 `messages` 通道，不需要额外结果槽。

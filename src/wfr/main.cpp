@@ -57,9 +57,6 @@ using cppchain::wfr::load_dotenv;
 
 namespace {
 
-std::string clip(std::string_view s, std::size_t max) {
-  return s.size() <= max ? std::string(s) : std::string(s.substr(0, max)) + "…";
-}
 
 std::string last_ai_text(Json const& state) {
   if (!state.contains("messages") || !state["messages"].is_array()) return {};
@@ -130,7 +127,9 @@ int main(int argc, char** argv) {
         "  wfr debug <name-or-path> [--session N|--all] [--out F] [--open]\n"
         "  wfr -h | --help\n"
         "内置（发布自带 share/wfr/workflows）：chat（最简单聊天，多轮续聊；需 LLM key，"
-        "见 .env.example）。\n"
+        "见 .env.example）；chat2（chat 的超集：历史渲染三档 + 思考回传/厂商参数开关，"
+        "用 --set 切换 —— history_mode=full|drop_round|keep_evidence、"
+        "reasoning_echo=drop|tool_calls|always、reasoning_effort=…）。\n"
         "<name> 查找顺序：显式路径 → <ws>/.wfr/settings.json 的 workflow_dirs → "
         "<ws>/.wfr/workflows → ~/.wfr/workflows → 发布自带。\n"
         "workspace 的 .wfr 路径本身不可被覆盖；settings 只能追加 workflow_dirs。\n"

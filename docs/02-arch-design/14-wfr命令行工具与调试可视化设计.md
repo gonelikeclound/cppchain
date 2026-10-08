@@ -120,6 +120,25 @@ IR ──debug_view_graph──▶ {nodes, edges}       边=NodeType::edges()，
     选中日志美化 JSON）；纯 tool 的离线 `paramcombo`（import 子链 + `with` 传参）
     能跑通并能在调试台看到带 `origin_wf` 的子链分支。
 
+## 5.5 chat2：把历史形态做成可对比的自变量（wfr-㉙）
+
+`share/wfr/workflows/chat2.json` 是内置 `chat` 的**超集**（多一个 `echo_hist` 节点，
+把历史渲染统计打在终端上），`chat.json` 原样不动 —— 修改过程与新旧对比本身可回看。
+细节与三档定义见 [15](15-思考模型推理回传与历史压缩策略设计.md)。
+
+三档全部走 `@config.*`，所以**不用编辑 JSON** 就能切：
+
+```bash
+wfr chat2 --session s "北京天气怎么样？"                                  # 缺省 = 现有 chat 行为
+wfr chat2 --session s --set history_mode=drop_round     "你刚才说多少度？"
+wfr chat2 --session s --set history_mode=keep_evidence --set evidence_budget=50 "…"
+wfr chat2 --session s --set reasoning_echo=always --set reasoning_effort=high "…"
+```
+
+A/B 的正确姿势是**同一段历史 × 同一句话 × 不同渲染**：把同一份 `.wfr/sessions/session-X.log.jsonl`
+复制三份，分别用三档问同一句话，再 `wfr debug chat2 --all --open` 三份并排
+（点 `recall` 节点看渲染统计 JSON）。
+
 ## 6. 开放点
 
 1. `$_` 跨 import 边界语义放宽（位置概念可能越界到子链/父链）——文档化，v1 接受。

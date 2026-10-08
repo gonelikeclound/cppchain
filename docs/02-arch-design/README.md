@@ -22,3 +22,4 @@
 | 12 | [12-节点接口与注册表.md](12-节点接口与注册表.md) | 节点接口 `NodeType` + 工厂动态注册（内置 / 动态库 import）+ **统一日志**（history 改为日志投影）| ✅ ①–⑤ 全部实现（注册表 / `edges()` / `session_log` / replay 投影 / A0+A1 导入枚举） |
 | 13 | [13-graph运行时补全设计.md](13-graph运行时补全设计.md) | **M10 运行时补全**：包队列执行器 + Streaming / Interrupt / Send / 时间旅行；checkpoint 的 next 升为包队列 | ✅ 已实现（438 全绿 + 4 离线 demo） |
 | 14 | [14-wfr命令行工具与调试可视化设计.md](14-wfr命令行工具与调试可视化设计.md) | **wfr 系列**：命令行运行器（按名执行）+ trigger 可选 / import 复用 + 单 HTML 调试台；`.wfr/` 统一元数据目录 | ✅ 已实现（438 全绿 + `wfr_demo`） |
+| 15 | [15-思考模型推理回传与历史压缩策略设计.md](15-思考模型推理回传与历史压缩策略设计.md) | **wfr-㉙**：历史压缩三档（full / drop_round / keep_evidence）+ `ReasoningEcho` 出站三档 + model 节点厂商参数透传；chat2 对照 workflow | ✅ 已实现（495 全绿 + 真机三档对照） |

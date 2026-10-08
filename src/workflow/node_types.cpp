@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "cppchain/agent/history.hpp"
 #include "cppchain/message/content_block.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/message/utf8.hpp"
@@ -68,6 +69,53 @@ bool is_ident_chars(std::string_view s) {
   for (char c : s)
     if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
   return true;
+}
+
+std::string as_string(Json const& v) { return v.is_string() ? v.get<std::string>() : v.dump(); }
+
+// ---- wfr-㉙：运行期参数解析 ----
+//
+// 新增的参数都是"字面量或整串 @config 引用"的双态值，且**缺省与非法语义不同**：
+//   缺省（未设 / 空 / @config 缺键解析成 null）→ 回落默认值（安全基线）；
+//   非空但拼错 → 抛硬错（fail-closed：`--set history_mode=keep_evidnce` 不该被静默吞掉）。
+// 注意 @config 缺键会经 resolve_ref 得到 Json(nullptr)，as_string 再 dump 成字符串 "null"
+// —— 这正是"缺省"的识别依据（refs.hpp 的宽松语义）。
+
+std::string resolve_text_parameter(std::string const& spec, Json const& state) {
+  if (spec.empty()) return {};
+  return as_string(resolve_parameter(Json(spec), state));
+}
+
+// 该参数是否写成了整串引用（是 → 编译期不判词表，留给运行期）。
+bool is_whole_ref(std::string const& spec) { return parse_ref(spec).has_value(); }
+
+model::ReasoningEcho parse_reasoning_echo(std::string const& text, std::string const& node_id) {
+  if (text.empty() || text == "null") return model::ReasoningEcho::Drop;
+  if (text == "drop") return model::ReasoningEcho::Drop;
+  if (text == "tool_calls") return model::ReasoningEcho::ToolCalls;
+  if (text == "always") return model::ReasoningEcho::Always;
+  throw tool::ToolException("model 节点 '" + node_id + "' 的 reasoning_echo='" + text +
+                            "' 不在词表里（drop / tool_calls / always）");
+}
+
+agent::HistoryMode parse_history_mode_arg(std::string const& text, std::string const& node_id) {
+  if (text.empty() || text == "null") return agent::HistoryMode::Full;
+  if (auto const mode = agent::parse_history_mode(text)) return *mode;
+  throw tool::ToolException("load_history 节点 '" + node_id + "' 的 mode='" + text +
+                            "' 不在词表里（full / drop_round / keep_evidence）");
+}
+
+std::size_t parse_history_budget(std::string const& text, std::string const& node_id) {
+  if (text.empty() || text == "null") return 200;
+  try {
+    std::size_t pos = 0;
+    long const v = std::stol(text, &pos);
+    if (pos == text.size() && v > 0) return static_cast<std::size_t>(v);
+  } catch (std::exception const&) {
+    // 落到下面的统一报错
+  }
+  throw tool::ToolException("load_history 节点 '" + node_id + "' 的 budget='" + text +
+                            "' 不是正整数");
 }
 
 // ---- 类型专属校验（VN5–VN11）----
@@ -151,6 +199,31 @@ void v_model(NodeIR const& n, NodeType::ValidateContext const& ctx,
           err("VN10", "工具集 '" + n.toolset + "' 里的工具 '" + t + "' 不在工具注册表里");
     }
   }
+
+  // VN13（wfr-㉙）：params 原样并入请求体（build_request 的 extra 合并是**右胜**），
+  // 所以必须挡住会覆盖请求体结构字段的键；reasoning_echo 为字面量时须在词表内。
+  if (!n.model_params.is_object()) {
+    err("VN13", "model 节点 '" + n.id + "' 的 params 必须是对象");
+  } else {
+    static constexpr std::string_view kReserved[] = {
+        "model",       "messages",     "stream",     "stream_options", "tools",
+        "tool_choice", "response_format", "temperature", "max_tokens",  "stop"};
+    for (auto it = n.model_params.begin(); it != n.model_params.end(); ++it) {
+      if (it.key().empty()) {
+        err("VN13", "model 节点 '" + n.id + "' 的 params 含空键");
+        continue;
+      }
+      for (std::string_view const r : kReserved)
+        if (it.key() == r)
+          err("VN13", "model 节点 '" + n.id + "' 的 params 含保留键 '" + it.key() +
+                          "'（会覆盖请求体结构字段；请用节点自身字段设置）");
+    }
+  }
+  if (!n.reasoning_echo.empty() && !is_whole_ref(n.reasoning_echo) &&
+      n.reasoning_echo != "drop" && n.reasoning_echo != "tool_calls" &&
+      n.reasoning_echo != "always")
+    err("VN13", "model 节点 '" + n.id + "' 的 reasoning_echo='" + n.reasoning_echo +
+                    "' 不在词表里（drop / tool_calls / always）");
 }
 
 void v_echo(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
@@ -186,6 +259,25 @@ void v_load_history(NodeIR const& n, NodeType::ValidateContext const&,
                     NodeType::ErrorSink const& err) {
   if (n.path.empty()) err("VN11", "load_history 节点 '" + n.id + "' 缺少 path（工作路径）");
   if (n.next.empty()) err("VN11", "load_history 节点 '" + n.id + "' 缺少 next");
+
+  // VN14（wfr-㉙）：历史渲染策略。字面量须在词表内；写成整串 @config 引用则留给运行期判
+  // （运行期缺省→full、非法→硬错，见 parse_history_mode_arg）。
+  if (!n.history_mode.empty() && !is_whole_ref(n.history_mode) &&
+      !agent::parse_history_mode(n.history_mode))
+    err("VN14", "load_history 节点 '" + n.id + "' 的 mode='" + n.history_mode +
+                    "' 不在词表里（full / drop_round / keep_evidence）");
+  if (!n.history_budget.empty() && !is_whole_ref(n.history_budget)) {
+    std::size_t pos = 0;
+    long v = 0;
+    try {
+      v = std::stol(n.history_budget, &pos);
+    } catch (std::exception const&) {
+      pos = 0;
+    }
+    if (pos != n.history_budget.size() || v <= 0)
+      err("VN14", "load_history 节点 '" + n.id + "' 的 budget='" + n.history_budget +
+                      "' 不是正整数");
+  }
 }
 
 // ---- 编译期助手（自 compiler.cpp 搬来）----
@@ -225,8 +317,6 @@ std::string last_ai_outcome(Json const& state) {
   return {};
 }
 
-std::string as_string(Json const& v) { return v.is_string() ? v.get<std::string>() : v.dump(); }
-
 // ---- 出边（通用图规则的唯一输入）----
 
 std::vector<NodeType::Edge> e_tool(NodeIR const& n) {
@@ -241,8 +331,11 @@ std::vector<NodeType::Edge> e_expr(NodeIR const& n) {
   return {{n.then, "then", true}, {n.else_, "else", true}};
 }
 std::vector<NodeType::Edge> e_label(NodeIR const& n) {
-  return n.next.empty() ? std::vector<NodeType::Edge>{}
-                        : std::vector<NodeType::Edge>{{n.next, "next", /*forward=*/true}};
+  if (n.next.empty()) return {};
+  // 用 push_back 而非嵌套花括号：后者会让 GCC 报 -Wdangling-pointer（初始化列表的临时数组）
+  std::vector<NodeType::Edge> out;
+  out.push_back({n.next, "next", /*forward=*/true});
+  return out;
 }
 std::vector<NodeType::Edge> e_goto(NodeIR const& n) {
   return {{n.goto_target, "goto", /*forward=*/false}};  // ← 回边，是循环的来源
@@ -259,6 +352,17 @@ std::vector<NodeType::Edge> e_route(NodeIR const& n) {
 
 std::vector<std::string> t_none(NodeIR const&) { return {}; }
 
+// 递归收集 JSON 里所有字符串叶（VR1 语法检查 + @config 契约检查的输入）。
+void collect_strings(Json const& v, std::vector<std::string>& out) {
+  if (v.is_string()) {
+    out.push_back(v.get<std::string>());
+  } else if (v.is_object()) {
+    for (auto it = v.begin(); it != v.end(); ++it) collect_strings(it.value(), out);
+  } else if (v.is_array()) {
+    for (Json const& e : v) collect_strings(e, out);
+  }
+}
+
 // echo 的 text 模板作为引用文本（VR1 语法检查 + VR2 校验内嵌 $/@config 引用是否合法）
 std::vector<std::string> t_echo(NodeIR const& n) {
   if (n.raw.is_object() && n.raw.contains("text") && n.raw["text"].is_string())
@@ -268,22 +372,26 @@ std::vector<std::string> t_echo(NodeIR const& n) {
 
 std::vector<std::string> t_tool(NodeIR const& n) {
   std::vector<std::string> out;
-  std::function<void(Json const&)> walk = [&](Json const& v) {
-    if (v.is_string()) {
-      out.push_back(v.get<std::string>());
-    } else if (v.is_object()) {
-      for (auto it = v.begin(); it != v.end(); ++it) walk(it.value());
-    } else if (v.is_array()) {
-      for (Json const& e : v) walk(e);
-    }
-  };
-  walk(n.parameters);
+  collect_strings(n.parameters, out);
   return out;
 }
+
+// wfr-㉙：model 的 params（厂商私有参数）与 reasoning_echo 也是引用文本。
+// 少了这个钩子，新字段里的 @config.* 既不过 VR1 语法检查、也不参与 VR4 契约核对。
+std::vector<std::string> t_model(NodeIR const& n) {
+  std::vector<std::string> out;
+  collect_strings(n.model_params, out);
+  if (!n.reasoning_echo.empty()) out.push_back(n.reasoning_echo);
+  return out;
+}
+
 std::vector<std::string> t_expr(NodeIR const& n) { return {n.expr}; }
 std::vector<std::string> t_history(NodeIR const& n) {
   std::vector<std::string> out{n.path};
   if (!n.session.empty()) out.push_back(n.session);
+  // wfr-㉙：mode/budget 同样是运行期参数（可写 @config.*）
+  if (!n.history_mode.empty()) out.push_back(n.history_mode);
+  if (!n.history_budget.empty()) out.push_back(n.history_budget);
   return out;
 }
 
@@ -410,19 +518,33 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
           tools_json.push_back(sp->to_openai());
   std::string const sys = n.system_prompt;
   std::string const model_name = n.model;
+  Json const params = n.model_params;          // wfr-㉙：运行期解析后并入 CallOptions.extra
+  std::string const echo_spec = n.reasoning_echo;
   auto sink_p = ctx.sink;  // 触发期注入的 NodeLog（docs/12 §6.4：source=node 的诊断日志）
 
-  ctx.graph.add_node(n.id, [m, tools_json, sys, model_name, sink_p, node_id = n.id](
-                              Json const& state, NodeContext& nc) {
+  ctx.graph.add_node(n.id, [m, tools_json, sys, model_name, params, echo_spec, sink_p,
+                            node_id = n.id](Json const& state, NodeContext& nc) {
     std::vector<message::Message> msgs = messages_from_state(state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
     model::CallOptions co;
     co.tools = tools_json;
+    // 厂商私有参数：逐键解析引用；解析为 null（@config 缺键）的**顶层键直接丢弃** ——
+    // 不把 "reasoning_effort": null 发给端点（那会被当成显式设值）。
+    for (auto it = params.begin(); it != params.end(); ++it) {
+      Json v = resolve_parameter(it.value(), state);
+      if (v.is_null()) continue;
+      co.extra[it.key()] = std::move(v);
+    }
+    std::string const echo_text = resolve_text_parameter(echo_spec, state);
+    co.reasoning_echo = parse_reasoning_echo(echo_text, node_id);
     auto r = m->invoke(msgs, co);
     if (!r) throw tool::ToolException("model 节点调用失败：" + r.error().message);
     // **只发一次**：回复追加进 messages，循环由 route + 回边负责
     sink_p->log_node(nc.node_name, "info", "model '" + model_name + "' 完成一次调用",
-                     Json{{"in_msg", msgs.size()}, {"tool_calls", !r->tool_calls.empty()}});
+                     Json{{"in_msg", msgs.size()},
+                          {"tool_calls", !r->tool_calls.empty()},
+                          {"extra_keys", co.extra.size()},
+                          {"reasoning_echo", echo_text.empty() ? "drop" : echo_text}});
     // 发布可引用 result（echo 节点 $引用打印）：thinking / 正文 / 工具调用摘要
     std::string thinking;
     for (auto const& blk : r->content)
@@ -438,6 +560,7 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     frame["thinking"] = std::move(thinking);
     frame["text"] = r->text();
     frame["tool_calls"] = std::move(tcalls);
+    frame["extra"] = co.extra;  // 生效的厂商参数（调试台/echo 可见）
     Json results = Json::object();
     results[node_id] = std::move(frame);
     Json update = Json::object();
@@ -474,8 +597,9 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
       }
     if (calls.empty())
       throw tool::ToolException("run_tools 节点：最后一条 AI 消息没有 tool_calls");
+    std::vector<message::Message> tool_msgs = tn.run(calls);
     Json arr = Json::array();
-    for (message::Message& m : tn.run(calls)) {
+    for (message::Message& m : tool_msgs) {
       // 工具输出（含 CJK/截断字节）可能非法 UTF-8 → 净化后再进 state，避免 dump 崩溃
       for (auto& blk : m.content)
         if (auto* tb = std::get_if<message::TextBlock>(&blk)) message::sanitize_utf8(tb->text);
@@ -485,7 +609,7 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
     std::unordered_map<std::string, message::ToolCall const*> by_id;
     for (auto const& tc : calls) by_id[tc.id] = &tc;
     Json summary = Json::array();
-    for (message::Message const& m : arr) {
+    for (message::Message const& m : tool_msgs) {
       std::string name = "tool", args;
       if (m.tool_call_id)
         if (auto const it = by_id.find(*m.tool_call_id); it != by_id.end()) {
@@ -514,21 +638,39 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
 void c_load_history(NodeIR const& n, NodeType::CompileContext& ctx) {
   Json const path_expr = Json(n.path);
   Json const sess_expr = Json(n.session);
+  std::string const mode_spec = n.history_mode;
+  std::string const budget_spec = n.history_budget;
   auto sink_p = ctx.sink;
   // ④：history = 日志的投影 —— 读本会话日志 → replay → 取 messages（docs/12 §7）。
   // 与 D 阶段的"读 history 文件"差别：文件是 append-only 日志，宿主不再单独 save；
   // 本轮输入也已由 fire_once 写成 input 事件排在日志里，replay 天然含它。
-  ctx.graph.add_node(n.id, [path_expr, sess_expr, sink_p](Json const& state, NodeContext& nc) {
+  // wfr-㉙：拿到 messages 后按 mode 渲染（纯变换，无 IO）。压缩结果**不落盘** ——
+  // 本节点的 update 是"回声"，编译器已把它从日志里摘掉（compiler.cpp 的两处 kind 判断）。
+  ctx.graph.add_node(n.id, [path_expr, sess_expr, mode_spec, budget_spec, sink_p, node_id = n.id](
+                              Json const& state, NodeContext& nc) {
     std::string const ws = as_string(resolve_parameter(path_expr, state));
     std::string const sess = as_string(resolve_parameter(sess_expr, state));
-    auto const hist = replay_session_messages(session_path(ws, sess));
+    std::string const log_path = session_path(ws, sess);
+    std::vector<message::Message> hist = replay_session_messages(log_path);
+
+    std::string const mode_text = resolve_text_parameter(mode_spec, state);
+    agent::HistoryMode const mode = parse_history_mode_arg(mode_text, node_id);
+    std::size_t const budget = parse_history_budget(resolve_text_parameter(budget_spec, state),
+                                                   node_id);
+    agent::HistoryStats const stats = agent::compress_history(hist, mode, budget, log_path);
+
     sink_p->log_node(nc.node_name, "info",
-                     "load_history: replay " + std::to_string(hist.size()) + " messages",
-                     Json{{"workspace", ws}, {"session", sess}});
+                     "load_history: replay " + std::to_string(stats.before_msgs) + " → " +
+                         std::to_string(stats.after_msgs) + " messages（" +
+                         std::string(agent::history_mode_name(mode)) + "）",
+                     agent::history_stats_json(stats));
     Json arr = Json::array();
     for (message::Message const& m : hist) arr.push_back(m);
     // 走 messages 通道 → add_messages 与本次输入合并（同 id 覆盖、无 id 追加）
-    return Command::with_update(Json{{kMessagesKey, std::move(arr)}});
+    Json results = Json::object();
+    results[node_id] = agent::history_stats_json(stats);
+    return Command::with_update(Json{{kMessagesKey, std::move(arr)},
+                                     {kResultsKey, std::move(results)}});
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
   ++ctx.registered;
@@ -621,18 +763,26 @@ std::vector<NodeType> const& builtin_node_types() {
          get_str(out, node, "tools", out.toolset);  // 工具集**组件名**
          get_str(out, node, "system_prompt", out.system_prompt);
          get_str(out, node, "next", out.next);
+         get_str(out, node, "reasoning_echo", out.reasoning_echo);
+         // 原样收下（含非对象）：让 VN13 报错，而不是这里静默丢掉。
+         if (node.contains("params") && !node["params"].is_null()) out.model_params = node["params"];
        },
        [](Json& node, NodeIR const& n) {
          node["kind"] = "model";
          node["model"] = n.model;
          if (!n.toolset.empty()) node["tools"] = n.toolset;
          if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+         if (!n.model_params.empty()) node["params"] = n.model_params;
+         if (!n.reasoning_echo.empty()) node["reasoning_echo"] = n.reasoning_echo;
          node["next"] = n.next;
        },
        [](NodeIR const& n) {
-         return "model " + n.model + " (tools=" + (n.toolset.empty() ? "-" : n.toolset) + ") → " +
-                n.next;
-       }, v_model, c_model, e_next, t_none},
+         std::string desc = "model " + n.model + " (tools=" + (n.toolset.empty() ? "-" : n.toolset);
+         if (!n.model_params.empty()) desc += " params=" + std::to_string(n.model_params.size());
+         desc += ")";
+         if (!n.reasoning_echo.empty()) desc += " echo=" + n.reasoning_echo;
+         return desc + " → " + n.next;
+       }, v_model, c_model, e_next, t_model},
 
       // ---------------- route（M12）----------------
       {NodeKind::Route, "route",
@@ -675,17 +825,23 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR& out, Json const& node) {
          get_str(out, node, "path", out.path);
          get_str(out, node, "session", out.session);
+         get_str(out, node, "mode", out.history_mode);
+         get_str(out, node, "budget", out.history_budget);
          get_str(out, node, "next", out.next);
        },
        [](Json& node, NodeIR const& n) {
          node["kind"] = "load_history";
          node["path"] = n.path;
          if (!n.session.empty()) node["session"] = n.session;
+         if (!n.history_mode.empty()) node["mode"] = n.history_mode;
+         if (!n.history_budget.empty()) node["budget"] = n.history_budget;
          node["next"] = n.next;
        },
        [](NodeIR const& n) {
-         return "load_history path=" + n.path +
-                " session=" + (n.session.empty() ? "-" : n.session) + " → " + n.next;
+         std::string desc = "load_history path=" + n.path +
+                            " session=" + (n.session.empty() ? "-" : n.session);
+         if (!n.history_mode.empty()) desc += " mode=" + n.history_mode;
+         return desc + " → " + n.next;
        }, v_load_history, c_load_history, e_next, t_history},
       // ---------------- echo（wfr-㉗）----------------
       // 回显节点：text 模板（$节点.result.字段 / @config.*）解析后打印到终端并落一条
