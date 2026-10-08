@@ -109,7 +109,11 @@ struct NodeIR {
   int max = 0;                               // 循环有界（正整数）
 
   // Loop 节点（wfr-㉚）：循环容器。id 全局唯一、**不 mangle**（图/日志/results 键按 id 对齐）。
-  // 复用 next（循环出口）与 max（body 最大执行次数）；body 非空、max>0、next 必填。
+  //   next   = 循环的**正常出口**（`_break` 去这里，也是"循环成功结束"的落点）；
+  //   on_max = **跑满 max 仍没 break** 时的落点，缺省 `_turn_end`（= 旧 goto 超限跳 kEnd 的行为）。
+  // 两者必须分开：轮询"查到了就通知"与"查满次数还没到货"是不同结局（loop_wf 正是如此）。
+  // body 非空、max>0、next 必填；body 是子树，不得再含 loop。
+  std::string on_max;                        // 可选（缺省 = _turn_end）
   std::vector<NodeIR> body;                  // 循环体子树（不得再含 loop）
 
   // Model 节点（M12）：一次模型调用。model/toolset 都是**组件名**（宿主注册，见 components.hpp）

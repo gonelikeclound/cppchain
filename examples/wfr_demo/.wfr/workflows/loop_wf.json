@@ -2,12 +2,14 @@
   "id": "loop_wf",
   "import": { "workflow": "notify_wf" },
   "nodes": [
-    { "id": "l0", "kind": "label" },
-    { "id": "poll", "tool": "fetch_price",
-      "parameters": {"item_id": "P1"},
-      "output_schema": {"price": "number", "in_stock": "boolean"},
-      "next": "ck" },
-    { "id": "ck", "expr": "$poll.result.price < 500", "then": "n", "else": "gp" },
-    { "id": "gp", "goto": "l0", "max": 3 }
+    { "id": "loop", "kind": "loop", "max": 3, "next": "n", "on_max": "_turn_end",
+      "body": [
+        { "id": "poll", "tool": "fetch_price",
+          "parameters": {"item_id": "P1"},
+          "output_schema": {"price": "number", "in_stock": "boolean"},
+          "next": "ck" },
+        { "id": "ck", "expr": "$poll.result.price < 500",
+          "then": "_break", "else": "_continue" }
+      ] }
   ]
 }

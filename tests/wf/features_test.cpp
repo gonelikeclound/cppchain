@@ -49,7 +49,7 @@ TEST(WfFeatures, predicates) {
   EXPECT_TRUE(check(*ir, "无trigger.condition"));
   EXPECT_FALSE(check(*ir, "trigger.condition"));
   EXPECT_FALSE(check(*ir, "llm_extract提取"));
-  EXPECT_FALSE(check(*ir, "label/goto结构"));
+  EXPECT_FALSE(check(*ir, "loop结构"));
   EXPECT_FALSE(check(*ir, "声称已下单"));
 }
 

@@ -163,13 +163,17 @@ TEST(WfLoop, loop_edges_are_forward_body_and_next) {
   auto const& n = ir->nodes[0];
 
   auto const es = t->edges(n);
-  ASSERT_EQ(es.size(), 2u);
+  ASSERT_EQ(es.size(), 3u);
   EXPECT_EQ(es[0].target, "fetch_st");
   EXPECT_EQ(es[0].label, "body");
   EXPECT_TRUE(es[0].forward);
   EXPECT_EQ(es[1].target, "_turn_end");
-  EXPECT_EQ(es[1].label, "next");
+  EXPECT_EQ(es[1].label, "next");  // _break 的落点
   EXPECT_TRUE(es[1].forward);
+  // on_max 缺省 → _turn_end（旧 goto 超限跳 kEnd 的行为），也是可达性要看的一条出口边
+  EXPECT_EQ(es[2].target, "_turn_end");
+  EXPECT_EQ(es[2].label, "on_max");
+  EXPECT_TRUE(es[2].forward);
 }
 
 TEST(WfLoop, continue_is_the_only_backward_target) {
@@ -309,10 +313,34 @@ TEST(WfLoop, continue_back_edge_runs_the_body_up_to_max) {
 
   auto r = fire_once(*wf, Json{{"product_id", "P1"}});
   ASSERT_TRUE(r) << r.error().message;
-  // 缺货 → 每轮走 else→_continue；body 恰好跑 max 次，然后按 max 退出到 notify
+  // 缺货 → 每轮走 else→_continue；body 恰好跑 max 次，计数终值 = max
   EXPECT_EQ(calls, 4);
-  EXPECT_EQ(sinks.notifications.size(), 1u);
   EXPECT_EQ((*r)["loop_counts"]["poll"].get<long>(), 4);  // 键是 **loop 节点**的 id
+  // 关键：跑满 max 走的是 **on_max**（本合约缺省 _turn_end），不是 next（next 是 _break 的落点）
+  // —— 所以"查满 4 次仍没货"不会去 notify。这正是与旧 goto（超限跳 kEnd）行为对齐的地方。
+  EXPECT_TRUE(sinks.notifications.empty());
+}
+
+TEST(WfLoop, on_max_can_redirect_the_exhaustion_path) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  Json ir_json = poll_loop_full_ir();
+  ir_json["nodes"][0]["on_max"] = "notify";  // 显式把"跑满"也接到 notify
+  auto ir = WorkflowIR::parse(ir_json);
+  ASSERT_TRUE(ir) << ir.error();
+  auto wf = compile_workflow(*ir, reg);
+  ASSERT_TRUE(wf) << wf.error().message;
+
+  int calls = 0;
+  sinks.price_lookup = [&calls](std::string const&) {
+    ++calls;
+    return Json{{"price", 10}, {"in_stock", false}, {"currency", "CNY"}};
+  };
+  auto r = fire_once(*wf, Json{{"product_id", "P1"}});
+  ASSERT_TRUE(r) << r.error().message;
+  EXPECT_EQ(calls, 4);
+  EXPECT_EQ(sinks.notifications.size(), 1u);  // 这次跑满也通知
+  EXPECT_EQ((*r)["loop_counts"]["poll"].get<long>(), 4);
 }
 
 TEST(WfLoop, break_exits_the_loop_early) {
@@ -399,4 +427,91 @@ TEST(WfLoop, body_pointer_escaping_the_body_is_rejected) {
   auto const v = validate(*ir2);
   EXPECT_FALSE(v.ok());
   EXPECT_NE(v.describe().find("VG10"), std::string::npos) << v.describe();
+}
+
+// ---- C4：与旧 label+goto 的**行为等价对照** ----
+//
+// 迁移期最有价值的一条测试：同一语义分别用旧写法与新写法构建，跑同一组桩数据，
+// 断言结果完全一致。它把"重新实现循环"从"看着对"变成"对得上"。
+
+namespace {
+
+// 旧写法：l0 label → fetch_st → check_st(then notify / else gp) → gp(goto l0, max 4)
+Json legacy_goto_poll_ir() {
+  return Json{
+      {"id", "wf_poll_legacy"},
+      {"nodes", Json::array(
+                    {Json{{"id", "l0"}, {"kind", "label"}},
+                     Json{{"id", "fetch_st"}, {"tool", "fetch_price"},
+                          {"parameters", Json{{"item_id", "@config.product_id"}}},
+                          {"output_schema", Json{{"price", "number"}, {"in_stock", "boolean"}}},
+                          {"next", "check_st"}},
+                     Json{{"id", "check_st"}, {"expr", "$fetch_st.result.in_stock == true"},
+                          {"then", "notify"}, {"else", "gp"}},
+                     Json{{"id", "gp"}, {"goto", "l0"}, {"max", 4}},
+                     Json{{"id", "notify"}, {"tool", "send_notification"},
+                          {"parameters", Json{{"title", "到货了"}}},
+                          {"output_schema", Json{{"ok", "boolean"}}}, {"next", "_turn_end"}}})}};
+}
+
+// 新写法：loop{max:4, next:notify(=_break 落点), on_max:_turn_end(=旧 goto 超限的 kEnd)}
+Json new_loop_poll_ir() {
+  return Json{
+      {"id", "wf_poll_new"},
+      {"nodes", Json::array(
+                    {Json{{"id", "poll"}, {"kind", "loop"}, {"max", 4}, {"next", "notify"},
+                          {"on_max", "_turn_end"},
+                          {"body", Json::array(
+                                       {Json{{"id", "fetch_st"}, {"tool", "fetch_price"},
+                                             {"parameters", Json{{"item_id", "@config.product_id"}}},
+                                             {"output_schema", Json{{"price", "number"},
+                                                                    {"in_stock", "boolean"}}},
+                                             {"next", "check_st"}},
+                                        Json{{"id", "check_st"},
+                                             {"expr", "$fetch_st.result.in_stock == true"},
+                                             {"then", "_break"}, {"else", "_continue"}}})}},
+                     Json{{"id", "notify"}, {"tool", "send_notification"},
+                          {"parameters", Json{{"title", "到货了"}}},
+                          {"output_schema", Json{{"ok", "boolean"}}}, {"next", "_turn_end"}}})}};
+}
+
+struct Outcome {
+  int fetch_calls;
+  std::size_t notifications;
+};
+
+Outcome run_poll(Json const& ir_json, bool in_stock) {
+  FakeToolSinks sinks;
+  tool::ToolRegistry reg = make_fake_tools(sinks);
+  auto ir = WorkflowIR::parse(ir_json);
+  EXPECT_TRUE(ir) << (ir ? "" : ir.error());
+  auto wf = compile_workflow(*ir, reg);
+  EXPECT_TRUE(wf) << (wf ? "" : wf.error().message);
+  int calls = 0;
+  bool const stock = in_stock;
+  sinks.price_lookup = [&calls, stock](std::string const&) {
+    ++calls;
+    return Json{{"price", 10}, {"in_stock", stock}, {"currency", "CNY"}};
+  };
+  auto r = fire_once(*wf, Json{{"product_id", "P1"}});
+  EXPECT_TRUE(r) << (r ? "" : r.error().message);
+  return Outcome{calls, sinks.notifications.size()};
+}
+
+}  // namespace
+
+TEST(WfLoop, new_loop_matches_the_legacy_goto_behaviour) {
+  for (bool const in_stock : {false, true}) {
+    Outcome const legacy = run_poll(legacy_goto_poll_ir(), in_stock);
+    Outcome const modern = run_poll(new_loop_poll_ir(), in_stock);
+    EXPECT_EQ(modern.fetch_calls, legacy.fetch_calls)
+        << "in_stock=" << in_stock << "：工具调用次数应与旧写法一致";
+    EXPECT_EQ(modern.notifications, legacy.notifications)
+        << "in_stock=" << in_stock << "：通知次数应与旧写法一致";
+  }
+  // 具体值也钉一下（缺货跑满 4 轮不通知；有货第 1 轮就 break 去通知）
+  EXPECT_EQ(run_poll(new_loop_poll_ir(), false).fetch_calls, 4);
+  EXPECT_EQ(run_poll(new_loop_poll_ir(), false).notifications, 0u);
+  EXPECT_EQ(run_poll(new_loop_poll_ir(), true).fetch_calls, 1);
+  EXPECT_EQ(run_poll(new_loop_poll_ir(), true).notifications, 1u);
 }

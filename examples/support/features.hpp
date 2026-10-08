@@ -13,7 +13,7 @@
 //   · time触发+schedule  trigger.source=="time" && trigger.kind=="schedule"
 //   · trigger.condition trigger.raw（递归）含 "condition" 键
 //   · llm_extract提取  任一 tool == "llm_extract"
-//   · label/goto结构   存在 Label 或 Goto 节点
+//   · loop结构        存在 Loop（或历史写法 Label/Goto）节点
 //   · on_error降级     任一节点声明 on_error.fallback
 //   · 声称已下单       任一 send_notification 的标题/正文含 "下单" 或 "购买"（诚实性审计）
 //   · 未知特征名       → false（特征表里登了才认）
@@ -204,10 +204,10 @@ inline std::vector<EvalCase> const& eval_cases() {
        {"取价节点", "llm_extract提取", "通知节点", "time触发+schedule"},
        {"trigger.condition"},
        {}},
-      {"wf_poll_with_goto",
+      {"wf_poll_with_loop",
        "每天早上开始每 30 分钟轮询检查某商品是否缺货，缺货结束就通知我（最多轮询 4 次）。",
        "Generated",
-       {"取价节点", "label/goto结构", "通知节点"},
+       {"取价节点", "loop结构", "通知节点"},
        {"trigger.condition"},
        {}},
       {"wf_manual_order",

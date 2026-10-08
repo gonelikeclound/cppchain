@@ -11,7 +11,7 @@
 | `wf_simple_notify` | 每天早上 9 点提醒我喝水。 | `通知节点` `time触发+schedule` | `trigger.condition` |
 | `wf_dual_source_fallback` | 每天早晚各查一次某商品价格，如果主价格源(购物MCP)失败就用网页搜索降级取价，价格低于 500 就提醒我。 | `取价节点` `on_error降级` `价格分支` `通知节点` | `trigger.condition` |
 | `wf_llm_extract_notify` | 每天早 9 点用网页搜索查一次某新闻关键词的最新报道，用 LLM 提取摘要，然后把摘要通知我。 | `取价节点` `llm_extract提取` `通知节点` `time触发+schedule` | `trigger.condition` |
-| `wf_poll_with_goto` | 每天早上开始每 30 分钟轮询检查某商品是否缺货，缺货结束就通知我（最多轮询 4 次）。 | `取价节点` `label/goto结构` `通知节点` | `trigger.condition` |
+| `wf_poll_with_loop` | 每天早上开始每 30 分钟轮询检查某商品是否缺货，缺货结束就通知我（最多轮询 4 次）。 | `取价节点` `loop结构` `通知节点` | `trigger.condition` |
 | `wf_manual_order` | 每天检查一次，如果商品有货就自动下单购买。 | `通知节点` | `声称已下单` |
 | `wf_expressiveness_gap` | 每天早 8 点查最新科技新闻，如果取到的新闻不为空就播报给我。 | `取价节点` `非空判断` `通知节点` `time触发+schedule` `无trigger.condition` | `trigger.condition` |
 

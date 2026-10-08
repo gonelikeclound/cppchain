@@ -274,6 +274,8 @@ void v_loop(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSi
   if (n.next == kContinueName || n.next == kBreakName)
     err("VN15", "loop 节点 '" + n.id + "' 的 next 不能是保留名 " + n.next +
                     "（出口要么是真节点、要么是 _turn_end / _fail）");
+  if (!n.on_max.empty() && (n.on_max == kContinueName || n.on_max == kBreakName))
+    err("VN15", "loop 节点 '" + n.id + "' 的 on_max 不能是保留名 " + n.on_max);
 
   // VG11：不支持 loop 套 loop（本层直接可见就能判，不必等全图遍历）
   for (NodeIR const& sub : n.body)
@@ -293,6 +295,8 @@ std::vector<NodeType::Edge> e_loop(NodeIR const& n) {
   std::vector<NodeType::Edge> out;
   if (!n.body.empty()) out.push_back(edge_to(n.body.front().id, "body"));
   if (!n.next.empty()) out.push_back(edge_to(n.next, "next"));
+  // on_max 缺省时指向 _turn_end（也是可达性判定要看到的出口边）
+  out.push_back(edge_to(n.on_max.empty() ? std::string(kTurnEndName) : n.on_max, "on_max"));
   return out;
 }
 
@@ -305,19 +309,23 @@ void c_loop(NodeIR const& n, NodeType::CompileContext& ctx) {
   }
   std::string const loop_id = n.id;
   std::string const body_entry = n.body.front().id;
-  std::string const exit_target = n.next.empty() ? std::string(graph::kEnd) : ctx.resolve(n.next);
+  std::string const break_target =
+      n.next.empty() ? std::string(graph::kEnd) : ctx.resolve(n.next);
+  std::string const max_target =
+      n.on_max.empty() ? std::string(graph::kEnd) : ctx.resolve(n.on_max);
   int const max = n.max;
-  ctx.graph.add_node(n.id, [loop_id, body_entry, exit_target, max](Json const& state,
-                                                                  NodeContext&) {
+  ctx.graph.add_node(n.id, [loop_id, body_entry, break_target, max_target, max](Json const& state,
+                                                                               NodeContext&) {
     long cur = 0;
     if (state.contains(kLoopCountsKey))
       if (auto const& lc = state.at(kLoopCountsKey);
           lc.is_object() && lc.contains(loop_id) && lc[loop_id].is_number())
         cur = lc[loop_id].get<long>();
     Command c;
-    // **先判后加**：cur 是"已完成的轮数"。超限直接走出口（不报错，与旧 goto 超 max 一致）。
+    // **先判后加**：cur 是"已完成的轮数"。超限走 on_max（缺省 _turn_end）——
+    // 不报错，与旧 goto 超 max 跳 kEnd 的行为一致。
     if (cur >= max) {
-      c.goto_nodes = {exit_target};
+      c.goto_nodes = {max_target};
       return c;
     }
     c.update = Json{{kLoopCountsKey, Json{{loop_id, cur + 1}}}};
@@ -834,6 +842,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](Json const& n) { return kind_is(n, "loop"); },
        [](NodeIR& out, Json const& node) {
          get_str(out, node, "next", out.next);
+         get_str(out, node, "on_max", out.on_max);
          if (node.contains("max") && node["max"].is_number_integer())
            out.max = node["max"].get<int>();
        },
@@ -841,11 +850,13 @@ std::vector<NodeType> const& builtin_node_types() {
          node["kind"] = "loop";
          node["max"] = n.max;
          node["next"] = n.next;
+         if (!n.on_max.empty()) node["on_max"] = n.on_max;
          // body 由 ir.cpp 的 write_node_list 递归写（结构性字段）
        },
        [](NodeIR const& n) {
          return "loop ×" + std::to_string(n.max) + " (" + std::to_string(n.body.size()) +
-                " nodes) → " + n.next;
+                " nodes) break→" + n.next + " max→" +
+                (n.on_max.empty() ? std::string(kTurnEndName) : n.on_max);
        }, v_loop, c_loop, e_loop, t_none},
 
       // ---------------- model（M12）----------------

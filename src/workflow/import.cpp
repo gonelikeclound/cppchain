@@ -131,6 +131,17 @@ void bind_import_config(Json& node, Json const& with) {
   }
 }
 
+// 遍历一层 nodes 数组（并递归进 loop 的 body）。import 的前缀化/打标/传参都是
+// "整棵子树"语义，wfr-㉚ 之后子树还包含循环体，不能只看一层。
+template <typename F>
+void for_each_node_json(Json& nodes, F&& fn) {
+  for (Json& n : nodes) {
+    if (!n.is_object()) continue;
+    fn(n);
+    if (n.contains("body") && n["body"].is_array()) for_each_node_json(n["body"], fn);
+  }
+}
+
 // 给一棵子树整体加一层前缀：id 与子树内引用全部 `pfx__`，rename 值也跟随。
 struct Prefixed {
   Json nodes = Json::array();
@@ -140,13 +151,16 @@ Prefixed prepend_chunk(Json const& sub_nodes, RenameMap const& sub_renames, std:
   Prefixed out;
   out.nodes = sub_nodes;
   RenameMap id_map;  // 子树当前最终 id → 加前缀后
-  for (Json& node : out.nodes) {
-    std::string const old = node.at("id").get<std::string>();
+  // 先整棵子树（含 loop body）建好 id_map，再统一改写指针/引用 —— 顺序不能反。
+  for_each_node_json(out.nodes, [&](Json& node) {
+    if (!node.contains("id") || !node["id"].is_string()) return;
+    std::string const old = node["id"].get<std::string>();
     std::string const nw = pfx + "__" + old;
     node["id"] = nw;
     id_map[old] = nw;
-  }
-  for (Json& node : out.nodes) rewrite_node(node, id_map);  // 子树内指针/引用跟随前缀
+  });
+  // 顶层逐个 rewrite；rewrite_node 自己会递归进 body 的指针/引用
+  for (Json& node : out.nodes) rewrite_node(node, id_map);
   for (auto const& [k, v] : sub_renames) out.renames[k] = pfx + "__" + v;
   return out;
 }
@@ -173,10 +187,12 @@ std::expected<Expanded, std::string> expand(
   Expanded e;
   e.nodes = wf["nodes"];  // 拷一份（下面对它原地改写）
   RenameMap merged = e.renames;
-  // 本层 own id → 自身（最终不变）；冲突检测靠 VN2 或这里
-  for (Json const& node : e.nodes)
+  // 本层 own id → 自身（最终不变）；冲突检测靠 VN2 或这里。
+  // 含 loop body 里的节点：父层要能用它们的原始 id 引用，前缀化也要跟着走。
+  for_each_node_json(e.nodes, [&](Json& node) {
     if (node.contains("id") && node["id"].is_string())
       merged[node["id"].get<std::string>()] = node["id"].get<std::string>();
+  });
 
   if (wf.contains("import")) {
     Json import_decl = wf["import"];
@@ -241,13 +257,12 @@ std::expected<Expanded, std::string> expand(
       {
         std::string const origin =
             raw.contains("id") && raw["id"].is_string() ? raw["id"].get<std::string>() : pfx;
-        for (Json& n : pr.nodes)
-          if (n.is_object() && !n.contains("origin_wf")) n["origin_wf"] = origin;
+        for_each_node_json(pr.nodes, [&](Json& n) {
+          if (!n.contains("origin_wf")) n["origin_wf"] = origin;
+        });
       }
       // with 传参（展开期特化）：把整棵子链（含更深的 import 节点）的 @config.<键> 折叠/转发
-      if (!with.empty())
-        for (Json& n : pr.nodes)
-          if (n.is_object()) bind_import_config(n, with);
+      if (!with.empty()) for_each_node_json(pr.nodes, [&](Json& n) { bind_import_config(n, with); });
       for (auto const& [k, v] : pr.renames) {
         if (auto const dup = merged.find(k); dup != merged.end() && dup->second != v)
           return err("import 节点重名 '" + k + "'（两个来源都叫这个名字）");
