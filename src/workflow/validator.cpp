@@ -570,11 +570,12 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
             bool const result_ok = target.kind == NodeKind::Tool ||
                                    target.kind == NodeKind::Model ||
                                    target.kind == NodeKind::RunTools ||
-                                   target.kind == NodeKind::LoadHistory;
+                                   target.kind == NodeKind::LoadHistory ||
+                                   target.kind == NodeKind::Route;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
                                "' 指向非 result 节点（仅 tool / model / run_tools / "
-                               "load_history 发布 result）");
+                               "load_history / route 发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");

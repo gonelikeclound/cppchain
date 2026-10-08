@@ -617,3 +617,45 @@ TEST(WfHistoryNodes, unknown_history_mode_is_a_hard_error) {
   ASSERT_FALSE(r);
   EXPECT_NE(r.error().message.find("不在词表里"), std::string::npos) << r.error().message;
 }
+
+// wfr-㉝：route 节点把"命中哪一档 → 去哪"发布进 results，并写一条人可读的节点诊断。
+// 原先节点体返回空 Command，日志里完全看不出走了哪条分支 —— 调试 ReAct 循环时最想看的
+// 恰恰是"这轮为什么进了 act 而不是收尾"。
+TEST(WfHistoryNodes, route_publishes_and_logs_the_branch_it_took) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+
+  Fixture f;
+  f.model.replies.push_back(cppchain::message::ai_message("直接回答，不调工具"));
+
+  SessionLog slog(path);
+  auto wf = f.compile();
+  ASSERT_TRUE(wf) << wf.error().message;
+  FireOptions fo;
+  fo.log = &slog;
+  fo.input_messages = Json::array({cppchain::message::human_message("你好")});
+  auto r = fire_once(*wf, f.config(tmp.str()), std::move(fo));
+  ASSERT_TRUE(r) << r.error().message;
+
+  // 1) 发布进 results：下游/echo 可引用 $route.result.target
+  ASSERT_TRUE((*r)["results"].contains("route")) << (*r)["results"].dump();
+  auto const& frame = (*r)["results"]["route"];
+  EXPECT_EQ(frame["outcome"], "text");        // 模型回的是纯文本
+  EXPECT_EQ(frame["target"], "_turn_end");    // 所以走收尾
+  EXPECT_EQ(frame["matched"], true);
+  EXPECT_EQ(frame["on"], "last_ai_outcome");
+
+  // 2) 日志里有一条可读诊断（source=node，落在 route 节点分组下）
+  bool seen = false;
+  for (Json const& rec : slog.records()) {
+    if (rec.value("source", "") != "node" || rec.value("node", "") != "route") continue;
+    seen = true;
+    EXPECT_NE(rec.value("msg", "").find("last_ai_outcome = text"), std::string::npos)
+        << rec.value("msg", "");
+    EXPECT_NE(rec.value("msg", "").find("→ _turn_end"), std::string::npos)
+        << rec.value("msg", "");
+    EXPECT_EQ(rec["data"]["outcome"], "text");
+    EXPECT_EQ(rec["data"]["target"], "_turn_end");
+  }
+  EXPECT_TRUE(seen) << "route 没写节点诊断，日志里看不出走了哪条分支";
+}

@@ -610,8 +610,50 @@ void c_route(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::map<std::string, std::string> targets;
   for (auto const& [k, v] : n.cases) targets[k] = ctx.resolve(v);
   std::string const dflt = ctx.resolve(n.default_);
-  ctx.graph.add_node(n.id, [](Json const&, NodeContext&) { return Command{}; });
-  ctx.graph.add_conditional_edges(n.id, [targets, dflt](Json const& state) {
+  std::string const on = n.on;
+  std::string const node_id = n.id;
+  // 诊断/结果里发布的是**作者写的原始目标名**（_turn_end / act / _continue …）——
+  // 与 workflow JSON、图上的边标签一致，比解析后的图目标名（__end__）可读得多。
+  std::map<std::string, std::string> raw_targets = n.cases;
+  std::string const raw_dflt = n.default_;
+  auto sink_p = ctx.sink;
+
+  // 节点体：把"命中哪一档 → 去哪"算出来并**发布进 results**。两个好处：
+  //   · 会话日志的 exit update 里就带上了这次路由的决定（调试台点 route 节点直接看见）
+  //   · 下游/echo 可以用 $<route id>.result.target 引用它
+  // 同时写一条 source=node 诊断，让日志里有一行**人可读**的"走了哪条分支"。
+  ctx.graph.add_node(n.id, [node_id, on, raw_targets, raw_dflt, sink_p](Json const& state,
+                                                                       NodeContext& nc) {
+    std::string const outcome = last_ai_outcome(state);
+    auto const it = raw_targets.find(outcome);
+    bool const matched = (it != raw_targets.end());
+    std::string const target = matched ? it->second : raw_dflt;
+    sink_p->log_node(nc.node_name, "info",
+                     "route: " + on + " = " + (outcome.empty() ? "（无 AI 消息）" : outcome) +
+                         (matched ? "  → " : "（未命中，走 default）→ ") + target,
+                     Json{{"on", on}, {"outcome", outcome}, {"target", target},
+                          {"matched", matched}});
+    Json frame;
+    frame["on"] = on;
+    frame["outcome"] = outcome;
+    frame["target"] = target;
+    frame["matched"] = matched;
+    Json results = Json::object();
+    results[node_id] = std::move(frame);
+    return Command::with_update(Json{{kResultsKey, std::move(results)}});
+  });
+  // router：直接取节点体算好的决定（它在 update 合并**之后**才跑，所以取得到）。
+  // 取不到时兜底重算一遍，行为与原先一致。
+  ctx.graph.add_conditional_edges(n.id, [node_id, targets, dflt](Json const& state) {
+    // 节点体发布的 target 是**原始名**，这里要的是图目标名 → 用解析后的表按"同一个 outcome"
+    // 再查一次（而不是直接拿原始名去当节点 id）。
+    auto const raw_it = state.find(kResultsKey);
+    if (raw_it != state.end() && raw_it->is_object())
+      if (auto const f = raw_it->find(node_id); f != raw_it->end() && f->is_object())
+        if (auto const oc = f->find("outcome"); oc != f->end() && oc->is_string()) {
+          auto const t = targets.find(oc->get<std::string>());
+          return std::vector<std::string>{t != targets.end() ? t->second : dflt};
+        }
     std::string const outcome = last_ai_outcome(state);
     auto const it = targets.find(outcome);
     return std::vector<std::string>{it != targets.end() ? it->second : dflt};
