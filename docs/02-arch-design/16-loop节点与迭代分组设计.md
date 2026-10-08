@@ -109,6 +109,30 @@ cur >= max → goto on_max（缺省 _turn_end）
 
 ## 5. 调试台：分组维度从"回边"改成"loop 节点"
 
+### 5.1 日志树按迭代分组（三层 → 四层）
+
+日志树从 `run → workflow → 节点 → 记录` 变成
+**`run → ↺ loop:N → (workflow) → 节点 → 记录`**：
+
+```
+（循环外）      __input__ / recall
+↺ loop:1        loop / think / echo_think / route / act / echo_tool
+↺ loop:2        loop / think / echo_think / route / act / echo_tool
+↺ loop:3        loop / think / echo_think / route      ← 本轮 route 走 _turn_end，没到 act
+```
+
+- `workflow` 那一层**只在一次 run 里出现多个 workflow 时**才渲染（import 子链才需要），
+  单链场景不再多一层噪音。
+- 分组键 `loop_id` 与迭代号 `iter` 由 **C++ 侧**（`debug_view_logs`）算好写进每条记录，
+  前端只做分组 —— 因为 **loop 节点头的 enter 发生在自增之前**，只有拿着完整序列的
+  C++ 侧知道它该归到"将要跑的那一轮"（取"此后第一次自增后的值"）；body 节点取本条
+  之后快照里的计数即可。没有归属的记录（`__input__`、`recall`、loop 之后的节点）
+  归到 `（循环外）`。
+- 组的排序：按（loop id, 迭代号）升序，`（循环外）` 永远排最后。
+- 摘要行带条数：`↺ loop:1（15 条）`，run 行仍是 `总条数 · 节点数`。
+
+原有的"循环分组"页签保留（点 `1`/`2` 把整棵树筛到某一轮），与树内分组互补。
+
 - `debug_view_graph` 递归导出：body 里的节点多带一个 **`loop` 归属字段**（复用 import
   `origin_wf` 那套"节点级扁平归属"）；loop 自身与 loop 之后的节点不带。
 - 边就地解析成图目标：`_continue` → loop 节点头且 **forward=false**（前端据此画绕行

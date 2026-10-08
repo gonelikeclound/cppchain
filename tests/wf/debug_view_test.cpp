@@ -70,24 +70,46 @@ TEST(DebugView, graph_exports_nodes_and_edges) {
   EXPECT_TRUE(saw_continue_back) << "_continue 应导出为指向 loop 节点头的回边";
 }
 
-TEST(DebugView, logs_replay_loop_counts_per_record) {
-  std::vector<Json> records;
-  records.push_back(rec("r-1", "gp", "exit", Json{{"loop_counts", Json{{"gp", 1}}}}));
-  records.push_back(rec("r-1", "poll", "enter"));
-  records.push_back(rec("r-1", "gp", "exit", Json{{"loop_counts", Json{{"gp", 2}}}}));
-  records.push_back(rec("r-1", "poll", "enter"));
-  records.push_back(rec("r-host", "x", "enter", Json::object(), "node"));  // 无 update：沿用当前
+TEST(DebugView, logs_annotate_loop_iteration_per_record) {
+  // 一轮循环的日志形状：节点头 enter（此时还没自增）→ exit（自增）→ body 节点 …… 第二轮同理。
+  // loop 节点头的 enter 必须归到"它将要跑的那一轮"，这条只有 C++ 侧能算（前端看不到自增时机）。
+  auto ir = WorkflowIR::parse(loop_ir_json());
+  ASSERT_TRUE(ir) << ir.error();
 
-  Json runs = debug_view_logs(records);
-  ASSERT_EQ(runs.size(), 2u);  // r-1 + 非 run 组（node 诊断带 run → 并入 r-1）
-  // 注意：node 记录也带 run=r-host → 归到 r-host 组
-  Json const& r1 = runs[0];
-  EXPECT_EQ(r1["run"], "r-1");
-  ASSERT_EQ(r1["records"].size(), 4u);
-  EXPECT_EQ(r1["records"][0]["loop"]["gp"], 1);  // 首条 exit 自己挂上
-  EXPECT_EQ(r1["records"][1]["loop"]["gp"], 1);  // enter 沿用
-  EXPECT_EQ(r1["records"][2]["loop"]["gp"], 2);
-  EXPECT_EQ(r1["records"][3]["loop"]["gp"], 2);
+  std::vector<Json> records;
+  records.push_back(rec("r-1", "recall", "exit"));  // 循环外
+  records.push_back(rec("r-1", "poll", "enter"));   // [1] 第 1 轮：enter 在自增之前
+  records.push_back(rec("r-1", "poll", "exit", Json{{"loop_counts", Json{{"poll", 1}}}}));
+  records.push_back(rec("r-1", "fetch", "exit"));
+  records.push_back(rec("r-1", "ck", "exit"));
+  records.push_back(rec("r-1", "poll", "enter"));   // [5] 第 2 轮
+  records.push_back(rec("r-1", "poll", "exit", Json{{"loop_counts", Json{{"poll", 2}}}}));
+  records.push_back(rec("r-1", "fetch", "exit"));
+
+  Json runs = debug_view_logs(records, *ir);
+  ASSERT_EQ(runs.size(), 1u);
+  auto const& recs = runs[0]["records"];
+  ASSERT_EQ(recs.size(), 8u);
+
+  // loop 快照（前端"循环分组"页签用）：首轮 enter 时还没有计数
+  EXPECT_FALSE(recs[1]["loop"].contains("poll"));
+  EXPECT_EQ(recs[2]["loop"]["poll"], 1);
+  EXPECT_EQ(recs[4]["loop"]["poll"], 1);
+  EXPECT_EQ(recs[6]["loop"]["poll"], 2);
+
+  // 归属 + 迭代号：循环外的记录没有 loop_id
+  EXPECT_FALSE(recs[0].contains("loop_id"));
+  EXPECT_FALSE(recs[0].contains("iter"));
+  for (int i = 1; i < 8; ++i) {
+    EXPECT_EQ(recs[i]["loop_id"], "poll") << "idx " << i;
+  }
+  EXPECT_EQ(recs[1]["iter"], 1) << "节点头 enter 应归到它将要跑的第 1 轮";
+  EXPECT_EQ(recs[2]["iter"], 1);
+  EXPECT_EQ(recs[3]["iter"], 1);
+  EXPECT_EQ(recs[4]["iter"], 1);
+  EXPECT_EQ(recs[5]["iter"], 2) << "第 2 轮的节点头 enter";
+  EXPECT_EQ(recs[6]["iter"], 2);
+  EXPECT_EQ(recs[7]["iter"], 2);
 }
 
 TEST(DebugView, render_html_is_self_contained_and_escaped) {

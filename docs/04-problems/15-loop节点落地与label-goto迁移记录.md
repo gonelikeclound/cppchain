@@ -95,6 +95,30 @@ wfr debug chat --session s1 → 节点 recall/loop/think/echo_think/route/act/ec
 | `examples/workflow_cli/wf.json` | 6 节点 | 2 顶层（recall + loop），body 3 个 |
 | `examples/wfr_demo/.wfr/workflows/loop_wf.json` | 4 节点（label + poll + ck + goto） | 1 顶层（loop），body 2 个；`next:"n"` + `on_max:"_turn_end"` |
 
+## 四点五、日志树按迭代分组（追加）
+
+原先"循环分组"只是**页签筛选**（点 1/2 过滤），树本身仍是 run → workflow → 节点。
+现在树直接按迭代分层：`run → ↺ loop:N → (workflow) → 节点 → 记录`，"（循环外）"收
+`__input__`/`recall` 这类不属任何循环的记录。
+
+关键实现点：**迭代号由 C++ 侧算**（`debug_view_logs(records, ir)` 给每条记录写
+`loop_id`/`iter`）。原因见下面这条陷阱。
+
+### 陷阱：loop 节点头的 enter 在自增之前
+
+循环的日志形状是
+
+```
+第 1 轮： loop enter（此时计数还是空的） → loop exit（计数 = 1） → body 节点……
+第 2 轮： loop enter（计数还是 1）      → loop exit（计数 = 2） → body 节点……
+```
+
+所以节点头的 **enter 与 exit 跨在自增的两侧**：按"当前快照"贴标签会把 enter 归到上一轮
+（第 2 轮的 enter 会被算成第 1 轮）。前端只有每条记录的快照，看不出这个时机。
+C++ 侧拿得到完整序列，于是对**节点头**取"此后第一次自增后的值"，enter/exit 便都落在
+第 N 轮；body 节点取快照里的计数即可。跑满 max 后的那次节点判定没有自增，回落到快照值
+（= max），作为第 max 轮的收尾。
+
 ## 五、遗留
 
 - 不支持嵌套循环（VG11）、不做 for-each。

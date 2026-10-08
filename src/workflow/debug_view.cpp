@@ -8,7 +8,9 @@
 #include "cppchain/workflow/node_type.hpp"
 
 #include <map>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -58,21 +60,68 @@ Json debug_view_graph(WorkflowIR const& ir) {
   return Json{{"nodes", std::move(nodes)}, {"edges", std::move(edges)}};
 }
 
-Json debug_view_logs(std::vector<Json> const& records) {
-  Json loop = Json::object();  // 重放中的 loop_counts 快照（右胜左覆盖合并，merge_slots 同款）
-  std::vector<std::string> order;
-  std::map<std::string, Json> by_run;
-
+Json debug_view_logs(std::vector<Json> const& records, WorkflowIR const& ir) {
+  // 第一遍：逐条重放 loop_counts，记下每条**之后**（含它自己的 update）的快照 ——
+  // 后面的迭代号判定要用它。
+  std::vector<Json> after;
+  after.reserve(records.size());
+  Json loop = Json::object();
   for (Json const& r : records) {
     if (auto const it = r.find("update"); it != r.end() && it->is_object()) {
       if (auto const lc = it->find("loop_counts"); lc != it->end() && lc->is_object())
         for (auto k = lc->begin(); k != lc->end(); ++k) loop[k.key()] = k.value();
     }
+    after.push_back(loop);
+  }
+
+  // 节点归属：body 节点 → 所属 loop id；loop 节点头 → 它自己（节点头不带 `loop` 字段）。
+  auto const owner = loop_owner(ir);
+  std::unordered_map<std::string, bool> is_head;
+  for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
+    if (n.kind == NodeKind::Loop) is_head[n.id] = true;
+    return true;
+  });
+
+  // 某条记录属于 loop L 的第几轮。
+  auto iter_of = [&](std::size_t i, std::string const& L) -> std::optional<long> {
+    std::string const node = records[i].value("node", "");
+    if (is_head.count(node) != 0) {
+      // 节点头：enter 在自增之前、exit 才是那次自增 → 取"此后第一次自增后的值"，
+      // 于是 enter/exit 这对记录都归到第 N 轮；跑满后的最后一次判定没有自增 →
+      // 回落到快照值（= max，归到第 max 轮，作为那一轮的收尾）。
+      for (std::size_t j = i; j < records.size(); ++j) {
+        if (auto const it = records[j].find("update"); it != records[j].end() && it->is_object())
+          if (auto const lc = it->find("loop_counts"); lc != it->end() && lc->is_object())
+            if (lc->contains(L) && (*lc)[L].is_number()) return (*lc)[L].get<long>();
+      }
+    }
+    if (after[i].contains(L) && after[i][L].is_number()) return after[i][L].get<long>();
+    // 兜底（还没进过循环）：向后取第一个已定义值
+    for (std::size_t j = i; j < records.size(); ++j)
+      if (after[j].contains(L) && after[j][L].is_number()) return after[j][L].get<long>();
+    return std::nullopt;
+  };
+
+  std::vector<std::string> order;
+  std::map<std::string, Json> by_run;
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    Json const& r = records[i];
     std::string run = r.value("run", "");
     std::string const key = run.empty() ? "?" : run;
     if (by_run.find(key) == by_run.end()) order.push_back(key);
     Json rec = r;
-    rec["loop"] = loop;  // 该时刻 loop_counts 快照（每条记录内嵌，前端直接分组）
+    rec["loop"] = after[i];  // 该时刻 loop_counts 快照（前端"循环分组"页签用）
+    // 归属：body 节点看 owner；loop 节点头看它自己
+    std::string const node = r.value("node", "");
+    std::string lid;
+    if (auto const it = owner.find(node); it != owner.end()) lid = it->second;
+    else if (is_head.count(node) != 0) lid = node;
+    if (!lid.empty()) {
+      if (auto const n = iter_of(i, lid)) {
+        rec["loop_id"] = lid;
+        rec["iter"] = *n;
+      }
+    }
     by_run[key].push_back(std::move(rec));
   }
   Json out = Json::array();
@@ -82,7 +131,7 @@ Json debug_view_logs(std::vector<Json> const& records) {
 }
 
 Json build_debug_payload(WorkflowIR const& ir, std::vector<Json> const& records) {
-  Json runs = debug_view_logs(records);
+  Json runs = debug_view_logs(records, ir);
   bool trimmed = false;
   if (records.size() > 20000) {  // 超大会话：裁掉节点诊断，保结构事件
     for (Json& run : runs) {
@@ -177,7 +226,7 @@ path.e.term{fill:none;stroke:#b0b3b8;stroke-width:1.2;stroke-dasharray:5 4}
 .loopit{padding:2px 6px;border:1px solid #ccc;border-radius:4px;margin:2px 2px 2px 0;display:inline-block;cursor:pointer;background:#fff}
 .loopit.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 .small{color:#888;font:11px}
-/* ---- 日志树：run 轮 → 节点 → 记录 ---- */
+/* ---- 日志树：run 轮 → loop 迭代 → 节点 → 记录 ---- */
 #loglist{flex:1 1 auto;overflow:auto;margin-top:4px;min-height:0}
 #sh2{flex:none;height:6px;border-top:1px solid var(--e);margin-top:6px;cursor:row-resize}
 #logdetail{flex:none;height:200px;margin-top:0;display:flex;flex-direction:column;border-top:1px solid var(--e);padding-top:6px;min-height:0}
@@ -187,6 +236,9 @@ details.run>summary:hover{background:var(--hl)}
 details.node{margin:2px 2px 2px 6px}
 details.node>summary{list-style:none;cursor:pointer;padding:3px 6px;font-weight:600;color:#333;border-radius:3px}
 details.node>summary:hover{background:var(--hl)}
+details.loopg{margin:3px 2px 3px 7px}
+details.loopg>summary{list-style:none;cursor:pointer;padding:3px 6px;font-weight:600;color:#5b2c8e;background:#f6f2fd;border-radius:3px;font-size:12px}
+details.loopg>summary:hover{background:var(--hl)}
 details.wf{margin:1px 2px 1px 10px}
 details.wf>summary{list-style:none;cursor:pointer;padding:2px 6px;font-weight:600;color:#444;border-radius:3px;font-size:12px}
 details.wf>summary:hover{background:var(--hl)}
@@ -406,54 +458,82 @@ function renderLog(){
   let shown=0;
   RUNS.forEach((run,i)=>{
     if(curRunIdx>=0 && i!==curRunIdx) return;   // 只渲染选中会话下的选中 run（轮次）
-    // 轮次(会话/run) → workflow → 节点 → 记录（workflow 来自记录徽标，缺失则按节点归属推断）
-    const wfs={};
+    // 轮次(会话/run) → **loop 迭代**（↺ loop:1 / ↺ loop:2 /（循环外））→ workflow → 节点 → 记录。
+    // loop 归属与迭代号由 C++ 侧算好（rec.loop_id / rec.iter），前端不再自己推断 ——
+    // loop 节点头的 enter 在自增之前，只有 C++ 那边知道该归到哪一轮。
+    const groups={}, gorder=[];
     run.records.forEach(rc=>{
       if(curGoto&&curIt){
-    const v=rc.loop&&rc.loop[curGoto]; if(v===undefined||Number(v)!==curIt) return;
-    // 收紧：只有该 loop body 里的节点才属于这次迭代（loop 之后的节点不带 loop 归属）
-    const nd=NODES[rc.node]; if(nd && nd.loop!==curGoto) return;
-  }
+        const v=rc.loop&&rc.loop[curGoto]; if(v===undefined||Number(v)!==curIt) return;
+        if(rc.loop_id!==curGoto) return;   // 该 loop 自己的节点头也算本轮（它有 loop_id）
+      }
+      const gk=rc.loop_id ? (rc.loop_id+'#'+rc.iter) : '';
+      let g=groups[gk];
+      if(!g){
+        g=groups[gk]={lid:rc.loop_id||'', iter:(typeof rc.iter==='number'?rc.iter:-1),
+                      label:(rc.loop_id ? ('↺ '+rc.loop_id+':'+rc.iter) : '（循环外）'), wfs:{}};
+        gorder.push(gk);
+      }
       const n0=rc.node?NODES[rc.node]:null;
       // 归属优先级：节点 origin_wf（import 子链）→ 记录徽标（父 workflow）→ 按节点/页推断
       const wf=(n0&&n0.def&&n0.def.origin_wf)
           ? n0.def.origin_wf
           : (rc.workflow||(n0?PAGEID:'（其它）'));
-      const bucket=(wfs[wf]=(wfs[wf]||{}));
+      const bucket=(g.wfs[wf]=(g.wfs[wf]||{}));
       const k=rc.node||'（引擎）';
       (bucket[k]=(bucket[k]||[])).push(rc);
+    });
+    // 排序：循环组按（loop id, 迭代号）升序；"（循环外）"永远排最后
+    gorder.sort((a,b)=>{
+      const A=groups[a], B=groups[b];
+      if(A.lid==='') return 1;
+      if(B.lid==='') return -1;
+      return A.lid===B.lid ? (A.iter-B.iter) : (A.lid<B.lid?-1:1);
     });
     const rd=document.createElement('details'); rd.className='run'; rd.dataset.grp='r:'+run.run;
     if(open['r:'+run.run]!==undefined ? open['r:'+run.run] : true) rd.open=true;
     const rsum=document.createElement('summary');
     rd.appendChild(rsum);
     let disp=0, nNodes=0;
-    Object.keys(wfs).forEach(wf=>{
-      const nodesMap=wfs[wf];
-      const wd=document.createElement('details'); wd.className='wf'; wd.dataset.grp='wf:'+wf;
-      if(rd.open && (open['wf:'+wf]!==undefined ? open['wf:'+wf] : true)) wd.open=true;
-      const wsum=document.createElement('summary');
-      wsum.textContent=wf;
-      wd.appendChild(wsum);
-      Object.keys(nodesMap).forEach(node=>{
-        const recs=nodesMap[node]; nNodes++; disp+=recs.length;
-        const nd=document.createElement('details'); nd.className='node'; nd.dataset.grp='n:'+node;
-        if(wd.open && (open['n:'+node]!==undefined ? open['n:'+node] : true)) nd.open=true;
-        const nsum=document.createElement('summary');
-        nsum.textContent=node+'（'+recs.length+' 条）';
-        nd.appendChild(nsum);
-        recs.forEach(r=>{
-          const row=document.createElement('div'); row.className='rec';
-          if(curNode && node===curNode) row.classList.add('hit');
-          if(curLog && curLog===recKey(r)) row.classList.add('sel');
-          row.dataset.node=r.node||''; row.dataset.seq=String(r.seq!==undefined?r.seq:'');
-          row.appendChild(recordRow(r));
-          row.addEventListener('click',()=>pickRecord(r));
-          nd.appendChild(row);
+    gorder.forEach(gk=>{
+      const g=groups[gk];
+      const gd=document.createElement('details'); gd.className='loopg'; gd.dataset.grp='g:'+gk;
+      if(rd.open && (open['g:'+gk]!==undefined ? open['g:'+gk] : true)) gd.open=true;
+      const gsum=document.createElement('summary');
+      gd.appendChild(gsum);
+      const wfKeys=Object.keys(g.wfs);
+      let gcount=0;
+      wfKeys.forEach(wf=>{
+        const nodesMap=g.wfs[wf];
+        let parent=gd;
+        if(wfKeys.length>1){   // 多个 workflow（import 子链）时才多这一层，单链场景不添噪音
+          const wd=document.createElement('details'); wd.className='wf'; wd.dataset.grp='wf:'+gk+':'+wf;
+          if(gd.open && (open['wf:'+gk+':'+wf]!==undefined ? open['wf:'+gk+':'+wf] : true)) wd.open=true;
+          const wsum=document.createElement('summary');
+          wsum.textContent=wf;
+          wd.appendChild(wsum); gd.appendChild(wd); parent=wd;
+        }
+        Object.keys(nodesMap).forEach(node=>{
+          const recs=nodesMap[node]; nNodes++; gcount+=recs.length; disp+=recs.length;
+          const nd=document.createElement('details'); nd.className='node'; nd.dataset.grp='n:'+gk+':'+node;
+          if(parent.open && (open['n:'+gk+':'+node]!==undefined ? open['n:'+gk+':'+node] : true)) nd.open=true;
+          const nsum=document.createElement('summary');
+          nsum.textContent=node+'（'+recs.length+' 条）';
+          nd.appendChild(nsum);
+          recs.forEach(r=>{
+            const row=document.createElement('div'); row.className='rec';
+            if(curNode && node===curNode) row.classList.add('hit');
+            if(curLog && curLog===recKey(r)) row.classList.add('sel');
+            row.dataset.node=r.node||''; row.dataset.seq=String(r.seq!==undefined?r.seq:'');
+            row.appendChild(recordRow(r));
+            row.addEventListener('click',()=>pickRecord(r));
+            nd.appendChild(row);
+          });
+          parent.appendChild(nd);
         });
-        wd.appendChild(nd);
       });
-      rd.appendChild(wd);
+      gsum.innerHTML=esc(g.label)+' <span class="cnt">（'+gcount+' 条）</span>';
+      rd.appendChild(gd);
     });
     if(nNodes===0) return;                       // 本 run 被过滤空 → 不显示
     rsum.innerHTML=esc(run.run)+' <span class="cnt">（'+disp+' 条 · '+nNodes+' 节点）</span>';
