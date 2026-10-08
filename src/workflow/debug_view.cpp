@@ -236,9 +236,10 @@ details.run>summary:hover{background:var(--hl)}
 details.node{margin:2px 2px 2px 6px}
 details.node>summary{list-style:none;cursor:pointer;padding:3px 6px;font-weight:600;color:#333;border-radius:3px}
 details.node>summary:hover{background:var(--hl)}
-details.loopg{margin:3px 2px 3px 7px}
-details.loopg>summary{list-style:none;cursor:pointer;padding:3px 6px;font-weight:600;color:#5b2c8e;background:#f6f2fd;border-radius:3px;font-size:12px}
-details.loopg>summary:hover{background:var(--hl)}
+details.loopnode>summary{color:#5b2c8e}
+details.iter{margin:2px 2px 2px 8px}
+details.iter>summary{list-style:none;cursor:pointer;padding:2px 6px;font-weight:600;color:#5b2c8e;background:#f6f2fd;border-radius:3px;font-size:12px}
+details.iter>summary:hover{background:var(--hl)}
 details.wf{margin:1px 2px 1px 10px}
 details.wf>summary{list-style:none;cursor:pointer;padding:2px 6px;font-weight:600;color:#444;border-radius:3px;font-size:12px}
 details.wf>summary:hover{background:var(--hl)}
@@ -458,68 +459,58 @@ function renderLog(){
   let shown=0;
   RUNS.forEach((run,i)=>{
     if(curRunIdx>=0 && i!==curRunIdx) return;   // 只渲染选中会话下的选中 run（轮次）
-    // 轮次(会话/run) → **loop 迭代**（↺ loop:1 / ↺ loop:2 /（循环外））→ workflow → 节点 → 记录。
-    // loop 归属与迭代号由 C++ 侧算好（rec.loop_id / rec.iter），前端不再自己推断 ——
-    // loop 节点头的 enter 在自增之前，只有 C++ 那边知道该归到哪一轮。
-    const groups={}, gorder=[];
+    // 轮次(会话/run) → **按执行顺序的真实层级**：
+    //   普通节点直接成组；循环的记录收进"该 loop 节点"这个容器，容器下再按迭代分组。
+    //   容器名 = **真实的 loop 节点 id**；顶层顺序 = 各实体**首次出现**的顺序（即执行顺序），
+    //   所以 __input__ / recall 排在 loop 之上、循环之后的节点排在 loop 之下。
+    //   loop 归属与迭代号由 C++ 侧算好（rec.loop_id / rec.iter）。
+    const tops=new Map(), torder=[];
+    const touch=(key, make)=>{ let e=tops.get(key); if(!e){ e=make(); tops.set(key,e); torder.push(key); } return e; };
+    const bucketOf=(maps, wf, node)=>{ const b=(maps[wf]=(maps[wf]||{})); (b[node]=(b[node]||[])).push; return b; };
     run.records.forEach(rc=>{
       if(curGoto&&curIt){
         const v=rc.loop&&rc.loop[curGoto]; if(v===undefined||Number(v)!==curIt) return;
         if(rc.loop_id!==curGoto) return;   // 该 loop 自己的节点头也算本轮（它有 loop_id）
-      }
-      const gk=rc.loop_id ? (rc.loop_id+'#'+rc.iter) : '';
-      let g=groups[gk];
-      if(!g){
-        g=groups[gk]={lid:rc.loop_id||'', iter:(typeof rc.iter==='number'?rc.iter:-1),
-                      label:(rc.loop_id ? ('↺ '+rc.loop_id+':'+rc.iter) : '（循环外）'), wfs:{}};
-        gorder.push(gk);
       }
       const n0=rc.node?NODES[rc.node]:null;
       // 归属优先级：节点 origin_wf（import 子链）→ 记录徽标（父 workflow）→ 按节点/页推断
       const wf=(n0&&n0.def&&n0.def.origin_wf)
           ? n0.def.origin_wf
           : (rc.workflow||(n0?PAGEID:'（其它）'));
-      const bucket=(g.wfs[wf]=(g.wfs[wf]||{}));
-      const k=rc.node||'（引擎）';
-      (bucket[k]=(bucket[k]||[])).push(rc);
+      const node=rc.node||'（引擎）';
+      const put=(maps)=>{ const b=(maps[wf]=maps[wf]||{}); (b[node]=b[node]||[]).push(rc); };
+      if(rc.loop_id){
+        const e=touch('L:'+rc.loop_id, ()=>({kind:'loop', lid:rc.loop_id, iters:new Map()}));
+        let it=e.iters.get(rc.iter);
+        if(!it){ it={iter:rc.iter, wfs:{}}; e.iters.set(rc.iter, it); }
+        put(it.wfs);
+      } else {
+        const e=touch('N:'+node, ()=>({kind:'node', node:node, wfs:{}}));
+        put(e.wfs);
+      }
     });
-    // 排序：循环组按（loop id, 迭代号）升序；"（循环外）"永远排最后
-    gorder.sort((a,b)=>{
-      const A=groups[a], B=groups[b];
-      if(A.lid==='') return 1;
-      if(B.lid==='') return -1;
-      return A.lid===B.lid ? (A.iter-B.iter) : (A.lid<B.lid?-1:1);
-    });
-    const rd=document.createElement('details'); rd.className='run'; rd.dataset.grp='r:'+run.run;
-    if(open['r:'+run.run]!==undefined ? open['r:'+run.run] : true) rd.open=true;
-    const rsum=document.createElement('summary');
-    rd.appendChild(rsum);
-    let disp=0, nNodes=0;
-    gorder.forEach(gk=>{
-      const g=groups[gk];
-      const gd=document.createElement('details'); gd.className='loopg'; gd.dataset.grp='g:'+gk;
-      if(rd.open && (open['g:'+gk]!==undefined ? open['g:'+gk] : true)) gd.open=true;
-      const gsum=document.createElement('summary');
-      gd.appendChild(gsum);
-      const wfKeys=Object.keys(g.wfs);
-      let gcount=0;
+
+    // 渲染一个 {wf → {node → [recs]}} 集合：多于一个 wf 时才多一层（import 子链才需要）
+    function renderMaps(parent, scope, wfs){
+      const wfKeys=Object.keys(wfs);
+      let cnt=0, nodes=0;
       wfKeys.forEach(wf=>{
-        const nodesMap=g.wfs[wf];
-        let parent=gd;
-        if(wfKeys.length>1){   // 多个 workflow（import 子链）时才多这一层，单链场景不添噪音
-          const wd=document.createElement('details'); wd.className='wf'; wd.dataset.grp='wf:'+gk+':'+wf;
-          if(gd.open && (open['wf:'+gk+':'+wf]!==undefined ? open['wf:'+gk+':'+wf] : true)) wd.open=true;
-          const wsum=document.createElement('summary');
-          wsum.textContent=wf;
-          wd.appendChild(wsum); gd.appendChild(wd); parent=wd;
+        let holder=parent;
+        if(wfKeys.length>1){
+          const wk='wf:'+scope+':'+wf;
+          const wd=document.createElement('details'); wd.className='wf'; wd.dataset.grp=wk;
+          if(parent.open && (open[wk]!==undefined ? open[wk] : true)) wd.open=true;
+          const ws=document.createElement('summary'); ws.textContent=wf;
+          wd.appendChild(ws); parent.appendChild(wd); holder=wd;
         }
-        Object.keys(nodesMap).forEach(node=>{
-          const recs=nodesMap[node]; nNodes++; gcount+=recs.length; disp+=recs.length;
-          const nd=document.createElement('details'); nd.className='node'; nd.dataset.grp='n:'+gk+':'+node;
-          if(parent.open && (open['n:'+gk+':'+node]!==undefined ? open['n:'+gk+':'+node] : true)) nd.open=true;
-          const nsum=document.createElement('summary');
-          nsum.textContent=node+'（'+recs.length+' 条）';
-          nd.appendChild(nsum);
+        Object.keys(wfs[wf]).forEach(node=>{
+          const recs=wfs[wf][node]; cnt+=recs.length; ++nodes;
+          const nk='n:'+scope+':'+wf+':'+node;
+          const nd=document.createElement('details'); nd.className='node'; nd.dataset.grp=nk;
+          if(holder.open && (open[nk]!==undefined ? open[nk] : true)) nd.open=true;
+          const ns=document.createElement('summary');
+          ns.textContent=node+'（'+recs.length+' 条）';
+          nd.appendChild(ns);
           recs.forEach(r=>{
             const row=document.createElement('div'); row.className='rec';
             if(curNode && node===curNode) row.classList.add('hit');
@@ -529,11 +520,47 @@ function renderLog(){
             row.addEventListener('click',()=>pickRecord(r));
             nd.appendChild(row);
           });
-          parent.appendChild(nd);
+          holder.appendChild(nd);
         });
       });
-      gsum.innerHTML=esc(g.label)+' <span class="cnt">（'+gcount+' 条）</span>';
-      rd.appendChild(gd);
+      return {disp:cnt, nodes:nodes};
+    }
+
+    const rd=document.createElement('details'); rd.className='run'; rd.dataset.grp='r:'+run.run;
+    if(open['r:'+run.run]!==undefined ? open['r:'+run.run] : true) rd.open=true;
+    const rsum=document.createElement('summary');
+    rd.appendChild(rsum);
+    let disp=0, nNodes=0;
+    torder.forEach(tk=>{
+      const e=tops.get(tk);
+      if(e.kind==='node'){
+        // 普通节点（含 __input__ / recall / 循环之后的节点）
+        const st=renderMaps(rd, tk, e.wfs);
+        disp+=st.disp; nNodes+=st.nodes;
+        return;
+      }
+      // 循环容器：名字就是真实的 loop 节点 id
+      const iters=[...e.iters.keys()].sort((a,b)=>a-b);
+      const ck='loop:'+e.lid;
+      const cd=document.createElement('details'); cd.className='node loopnode'; cd.dataset.grp=ck;
+      if(rd.open && (open[ck]!==undefined ? open[ck] : true)) cd.open=true;
+      const cs=document.createElement('summary');
+      cd.appendChild(cs);
+      let cnt=0, nodes=0;
+      iters.forEach(it=>{
+        const ik=ck+'/'+it;
+        const id=document.createElement('details'); id.className='iter'; id.dataset.grp=ik;
+        if(cd.open && (open[ik]!==undefined ? open[ik] : true)) id.open=true;
+        const is=document.createElement('summary');
+        id.appendChild(is);
+        const st=renderMaps(id, ik, e.iters.get(it).wfs);
+        is.innerHTML=esc(e.lid+'/'+it)+' <span class="cnt">（'+st.disp+' 条）</span>';
+        cd.appendChild(id);
+        cnt+=st.disp; nodes+=st.nodes;
+      });
+      cs.innerHTML='↺ '+esc(e.lid)+' <span class="cnt">（'+iters.length+' 轮 · '+cnt+' 条）</span>';
+      rd.appendChild(cd);
+      disp+=cnt; nNodes+=nodes;
     });
     if(nNodes===0) return;                       // 本 run 被过滤空 → 不显示
     rsum.innerHTML=esc(run.run)+' <span class="cnt">（'+disp+' 条 · '+nNodes+' 节点）</span>';

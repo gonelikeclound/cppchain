@@ -109,17 +109,33 @@ cur >= max → goto on_max（缺省 _turn_end）
 
 ## 5. 调试台：分组维度从"回边"改成"loop 节点"
 
-### 5.1 日志树按迭代分组（三层 → 四层）
+### 5.1 日志树：按**执行顺序**的真实层级
 
-日志树从 `run → workflow → 节点 → 记录` 变成
-**`run → ↺ loop:N → (workflow) → 节点 → 记录`**：
+日志树不是"扁平 + 筛选项"，而是照执行顺序长出来的层级：
 
 ```
-（循环外）      __input__ / recall
-↺ loop:1        loop / think / echo_think / route / act / echo_tool
-↺ loop:2        loop / think / echo_think / route / act / echo_tool
-↺ loop:3        loop / think / echo_think / route      ← 本轮 route 走 _turn_end，没到 act
+▾ [run] session-s1/r-1（60 条 · 24 节点）
+  · __input__（2 条）          ← 在 loop 之上（执行序在前）
+  · recall（3 条）
+  ▾ ↺ loop（4 轮 · 55 条）     ← 容器名 = **真实的 loop 节点 id**
+    ▾ loop/1（15 条）          ← 每一轮一个子组
+      · loop（2 条）           ← 循环节点头自己的记录（enter/exit）也在本轮里
+      · think（3 条）
+      · echo_think（3 条）
+      · route（2 条）
+      · act（2 条）
+      · echo_tool（3 条）
+    ▾ loop/2（15 条）
+    …
 ```
+
+- **顶层按执行顺序**：每个"实体"（普通节点 / loop 容器）在**首次出现**时占位，所以
+  `__input__`、`recall` 排在 loop 之上，循环之后的节点排在 loop 之下（不再有"循环外"兜底组
+  被排到最后）。
+- **循环体与各轮迭代都在 loop 之下**：`loop/1`、`loop/2` … `loop/N` 是容器的子组，
+  循环体节点再挂在各自那轮下面。
+- `workflow` 那一层**只在一次 run 里出现多个 workflow 时**才渲染（import 子链才需要）。
+- 摘要都带条数：容器 `↺ loop（4 轮 · 55 条）`、迭代 `loop/1（15 条）`、节点 `think（3 条）`。
 
 - `workflow` 那一层**只在一次 run 里出现多个 workflow 时**才渲染（import 子链才需要），
   单链场景不再多一层噪音。

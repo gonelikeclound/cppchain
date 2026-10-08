@@ -242,3 +242,39 @@ TEST(DebugView, html_carries_the_loop_kind_and_colour) {
   EXPECT_NE(html.find("loop:{f:'#e6dcf7'"), std::string::npos);  // 图例
   EXPECT_NE(html.find("n.kind==='loop'"), std::string::npos);    // 分组维度 = loop 节点
 }
+
+// 内嵌 JS 是一个**字符串**：编辑它时少闭合一个花括号，C++ 编译期毫无察觉，浏览器里却会
+// 整页空白（"初始化失败"那行 catch 都跑不到）。这里做一次字符串感知的括号平衡体检，
+// 把这类错误钉在测试里。基准值是"平衡"的（模板里有个先出现的 `{`，故不为 0）。
+TEST(DebugView, embedded_js_braces_are_balanced) {
+  auto ir = WorkflowIR::parse(loop_node_ir_json());
+  ASSERT_TRUE(ir) << ir.error();
+  auto const html = render_debug_html(build_debug_payload(*ir, {}));
+
+  auto const sa = html.find("<script>");
+  auto const sb = html.rfind("</script>");
+  ASSERT_NE(sa, std::string::npos);
+  ASSERT_NE(sb, std::string::npos);
+  std::string const js = html.substr(sa + 8, sb - sa - 8);
+
+  // 剥掉字符串/模板串/注释后再数花括号
+  long depth = 0;
+  char st = 0;
+  for (std::size_t i = 0; i < js.size(); ++i) {
+    char const c = js[i];
+    char const n = i + 1 < js.size() ? js[i + 1] : '\0';
+    if (st == 0) {
+      if (c == '"' || c == '\'' || c == '`') { st = c; continue; }
+      if (c == '/' && n == '*') { auto e = js.find("*/", i); i = (e == std::string::npos) ? js.size() : e + 1; continue; }
+      if (c == '/' && n == '/') { auto e = js.find('\n', i); i = (e == std::string::npos) ? js.size() : e; continue; }
+      if (c == '{') ++depth;
+      if (c == '}') --depth;
+      continue;
+    }
+    if (c == '\\') { ++i; continue; }
+    if (c == st) st = 0;
+  }
+  // 基准 +1：模板里 CSS/JS 交界处有个先出现的 `{`（老代码在引入 loop 前就是这个值）。
+  // 无论基准是多少，**只要有人改出不平衡，这个数就会变** —— 这才是要守的性质。
+  EXPECT_EQ(depth, 1) << "内嵌 JS 的括号不平衡（浏览器里会整页空白）";
+}
