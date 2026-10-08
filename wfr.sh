@@ -14,7 +14,9 @@
 #   · 每次运行自动（重）生成 <ws>/.wfr/settings.json，workflow_dirs 指向仓库内
 #     各 workflow 目录（绝对路径）：.wfr/workflows、share/wfr/workflows、
 #     examples/wfr_demo/.wfr/workflows。
-#   · 二进制优先 build/release/bin/wfr（静态运行时，免本机 GCC 环境）；
+#   · 二进制优先 build/release/bin/wfr（静态运行时，免本机 GCC 环境）——
+#     **改过 IR / 内置 workflow 后记得 `cmake --build --preset release`**，
+#     否则这里跑的还是上一次的产物（dev 构建不会自动同步过去）；
 #     否则 dev 版（需 source ~/opt/gcc16/env.sh，未构建时自动 cmake 配置+编译）。
 #   · import 按工作区的 .wfr/workflows 解析：demo workflow（loop_wf→notify_wf）带
 #     跨目录 sibling import，请在 examples/wfr_demo 下跑或 --workdir 指定其根目录。

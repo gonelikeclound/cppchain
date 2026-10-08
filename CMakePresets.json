@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "dev",
@@ -16,12 +20,41 @@
         "CPPCHAIN_BUILD_HTTP": "ON",
         "CPPCHAIN_BUILD_TESTS": "ON"
       }
+    },
+    {
+      "name": "release",
+      "displayName": "GCC16 · C++26 · Release（wfr 正式产物 · 静态运行时）",
+      "description": "发布构建：只出 wfr（不含 examples/tests），静态链接 libstdc++/libgcc 免本机 GCC 环境。**wfr.sh 优先用这份产物**（build/release/bin/wfr）——改了 IR / 内置 workflow 之后务必 `cmake --build --preset release`，否则 ./wfr.sh 跑的还是旧的。",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++-16",
+        "CMAKE_CXX_FLAGS": "-std=c++26 -Wall -Wextra -Wpedantic",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CPPCHAIN_BUILD_EXAMPLES": "OFF",
+        "CPPCHAIN_BUILD_HTTP": "ON",
+        "CPPCHAIN_BUILD_TESTS": "OFF",
+        "CPPCHAIN_WFR_STATIC_RUNTIME": "ON"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "dev", "configurePreset": "dev" }
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    }
   ],
   "testPresets": [
-    { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } }
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
   ]
 }
