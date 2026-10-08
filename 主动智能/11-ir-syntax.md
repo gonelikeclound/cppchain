@@ -355,6 +355,11 @@ trigger 一节覆盖**全部触发源**及其参数格式。
 
 **route 节点（M12）**
 
+- 运行期 route 会把这次的决定**发布进 `results[<id>]`**：`{on, outcome, target, matched}`，
+  其中 `target` 是**作者写的原始目标名**（`_turn_end` / `act` / `_continue` …）——下游可用
+  `$<route id>.result.target` 引用；会话日志里另有一条人可读诊断
+  （`route: last_ai_outcome = tool_calls → act`），调试台点 route 节点即可见。
+
 ```jsonc
 {
   "id": "route", "kind": "route",

@@ -132,6 +132,31 @@ C++ 侧拿得到完整序列，于是对**节点头**取"此后第一次自增�
 已加回归：`DebugView.embedded_js_braces_are_balanced` 对脚本做字符串感知的括号平衡体检
 （基准值 +1，是模板里 CSS/JS 交界处那个先出现的 `{`；**只要改出不平衡这个数就会变**）。
 
+## 四点六、route 的分支决定进日志（追加）
+
+原先 `c_route` 的节点体返回空 `Command{}`，分支决定只存在于 router 内部 —— 日志里
+完全看不出“这轮为什么进了 `act` 而不是收尾”，而这恰恰是调 ReAct 循环最想看的。
+
+改法：**节点体算出决定并发布，router 读它**。
+
+```
+· route（3 条）
+    - enter   route
+    - info    route [info] {"matched":true,"on":"last_ai_outcome","outcome":"tool_calls","target":"act"}
+              route: last_ai_outcome = tool_calls  → act          ← 人可读诊断
+    - exit·ok route {"results":{"route":{...,"outcome":"tool_calls","target":"act"}}}
+```
+
+三个设计点：
+
+1. **为什么让节点体算而不是 router 算**：router 在 `state = schema_.apply(state, cmd.update)`
+   **之后**才跑（`graph.cpp` 的 super-step），所以节点体先算好发布、router 再读天然可行；
+   反过来则诊断会落到 exit 之后，顺序不对。
+2. **发布的是原始目标名**：`_turn_end` 而不是解析后的 `__end__` —— 与 workflow JSON、
+   图上的边标签一致，日志里读得懂；router 那边用解析后的表按同一个 outcome 再查一次。
+3. **顺带扩白名单**：`results` 的发布者多了 route，VR2 的可引用 result 白名单相应加
+   `NodeKind::Route`，于是下游/echo 能用 `$<route id>.result.target`。
+
 ## 五、遗留
 
 - 不支持嵌套循环（VG11）、不做 for-each。
