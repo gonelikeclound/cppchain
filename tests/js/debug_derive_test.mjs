@@ -315,6 +315,60 @@ function runPage(records, extraGlobals = {}, graph = GRAPH) {
   eq(paths.some(d => d.includes(' C')), false, '不该再用曲线');
 }
 
+// ---- 用例 10：连线文字不重叠（也不压节点）----
+// 夹具刻意让多条边的横向段落在**同一条行间隙**里（a 同时连向同层的 b/c/d），
+// 这正是原先文字叠在一起的场景。
+{
+  const N = (id) => ({ id, kind: 'tool', text: '', def: {} });
+  const E = (from, to, label, forward = true, terminal = false) =>
+    ({ from, to, label, forward, terminal });
+  const g = {
+    nodes: [N('a'), N('b'), N('c'), N('d'), N('e')],
+    edges: [
+      E('a', 'b', 'cases.tool_calls'), E('a', 'c', 'cases.text'), E('a', 'd', 'default'),
+      E('b', 'e', 'then'), E('c', 'e', 'else'), E('d', 'e', 'on_max'),
+      E('e', 'a', 'else_back', false),                    // 回边（走左侧通道）
+      E('a', '_turn_end', 'on_max2', true, true),         // 跨层前向（走右侧通道）
+    ],
+  };
+  const ctx = runPage([], {}, g);
+  const pos = vm.runInContext('pos', ctx);
+  const W = vm.runInContext('NODE_W', ctx), H = vm.runInContext('NODE_H', ctx);
+  const tw = (t) => vm.runInContext(`textWidth(${JSON.stringify(t)})`, ctx);
+  const svg = ctx.__cache['canvas'];
+
+  // 注意用 includes：本轮走过的边会被 applyEdgeUsage 改成 'elabel took'
+  const labels = svg.children
+    .filter(c => c.tagName === 'text' && String(c.getAttribute('class')).includes('elabel'))
+    .map(c => ({ t: c.textContent, x: Number(c.getAttribute('x')), y: Number(c.getAttribute('y')),
+                 w: tw(c.textContent) }));
+  eq(labels.length, 8, '八条边都应带文字');
+
+  // 两两不重叠（用与页面同一套宽度估算；高度按 12px 半高 + 2px 余量）
+  let clash = 0;
+  for (let i = 0; i < labels.length; ++i)
+    for (let j = i + 1; j < labels.length; ++j) {
+      const A = labels[i], B = labels[j], PAD = 1;
+      const hit = !(A.x + A.w / 2 + PAD < B.x - B.w / 2 || A.x - A.w / 2 - PAD > B.x + B.w / 2 ||
+                    A.y + 10 + PAD < B.y - 10 || A.y - 10 - PAD > B.y + 10);
+      if (hit) { ++clash; console.log(`      「${A.t}」与「${B.t}」重叠`); }
+    }
+  eq(clash, 0, '任意两条边的文字都不应重叠');
+
+  // 也不该压到节点框
+  const boxes = Object.entries(pos).map(([id, p]) =>
+    ({ id, x1: p.x, y1: p.y, x2: p.x + W, y2: p.y + H }));
+  let onNode = 0;
+  labels.forEach(L => {
+    boxes.forEach(b => {
+      const hit = !(L.x + L.w / 2 <= b.x1 || L.x - L.w / 2 >= b.x2 ||
+                    L.y + 10 <= b.y1 || L.y - 10 >= b.y2);
+      if (hit) { ++onNode; console.log(`      「${L.t}」压在节点 ${b.id} 上`); }
+    });
+  });
+  eq(onNode, 0, '文字不应压在节点上');
+}
+
 // ---- 用例 4：空记录 ----
 {
   const ctx = runPage([]);

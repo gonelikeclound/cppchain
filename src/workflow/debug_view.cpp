@@ -484,16 +484,50 @@ function roundedPath(pts, r){
   const e=p[p.length-1];
   return d+' L'+e.x+','+e.y;
 }
-// 标签/角标落点：取最长那段的中点，横向段往上偏一点
-function labelAt(pts){
+// 文本宽度估算（浏览器里没法在画之前度量）：CJK 按 12px、其余按 6.2px
+function textWidth(s){
+  let w=0;
+  for(const ch of String(s)) w += (ch.codePointAt(0) > 0x2E7F) ? 12 : 6.2;
+  return w;
+}
+// 标签锚点：**优先落在横向段的中点**（横向段都在行间隙里，于是标签天然不压节点，
+// 也便于按"带"防重叠）；整条都是竖线（直上直下的边）时才贴到线的右侧。
+function labelAnchor(pts){
+  const midY=(pts[0].y+pts[pts.length-1].y)/2;
   let best=null;
   for(let i=1;i<pts.length;++i){
-    const dx=pts[i].x-pts[i-1].x, dy=pts[i].y-pts[i-1].y;
-    const len=Math.abs(dx)+Math.abs(dy);
-    if(!best || len>best.len) best={len:len, x:(pts[i].x+pts[i-1].x)/2, y:(pts[i].y+pts[i-1].y)/2,
-                                    horiz:Math.abs(dx)>=Math.abs(dy)};
+    if(Math.abs(pts[i].x-pts[i-1].x) < 1) continue;        // 只看横向段
+    const y=(pts[i].y+pts[i-1].y)/2, x=(pts[i].x+pts[i-1].x)/2;
+    const d=Math.abs(y-midY);
+    if(!best || d<best.d) best={d:d, x:x, y:y};
   }
-  return {x:best.x, y:best.y - (best.horiz?5:0)};
+  if(best) return {x:best.x, y:best.y-5, vertical:false};
+  return {x:(pts[0].x+pts[pts.length-1].x)/2+8, y:midY, vertical:true};
+}
+// 标签防重叠：按"间隙带"（y 相近的一组）分组，带内用轨道错开（间隙高 76、标签盒高 24
+// → 刚好三层 0/±24），同一轨道再撞就沿 x 往右推。竖线标签贴线右侧、不参与避让。
+function placeLabels(items){
+  // 半高 9 + 余量 2 → 轨道间距须 ≥22；间隙高 76、标签居中 → 0/±22 三层都落在间隙里
+  //（贴竖线右侧的标签也走同一套避让 —— 它同样会与别人撞）。
+  const PAD=2, HH=9;
+  const placed=[];
+  const box=(x,y,w)=>({x:x, y:y, w:w});
+  const hits=(a,b)=> !(a.x+a.w/2+PAD < b.x-b.w/2 || a.x-a.w/2-PAD > b.x+b.w/2 ||
+                       a.y+HH+PAD < b.y-HH || a.y-HH-PAD > b.y+HH);
+  items.sort((a,b)=> (a.y-b.y) || (a.x-b.x));
+  items.forEach(it=>{
+    for(const dy of [0,-22,22]){
+      const c=box(it.x, it.y+dy, it.w);
+      if(!placed.some(p=>hits(c,p))){ it.at=c; placed.push(c); return; }
+    }
+    let x=it.x;                                   // 三条轨道都占满 → 沿 x 往右推
+    for(let g=0; g<40; ++g){
+      const c=box(x, it.y, it.w);
+      if(!placed.some(p=>hits(c,p))){ it.at=c; placed.push(c); return; }
+      x+=18;
+    }
+    it.at=box(it.x,it.y,it.w); placed.push(it.at);
+  });
 }
 const EDGE_EL=[];   // 每条边画出来的元素（按轮次标「走过」用）
 function renderSVG(){
@@ -512,30 +546,46 @@ function renderSVG(){
     G.nodes.filter(n=>layer[n.id]===eMin)
            .map(n=>({from:'__input__',to:n.id,forward:true,label:'next',terminal:false}))
   );
+  // 两趟：先算每条边的折线与标签**锚点**，统一做一次防重叠，再建元素 ——
+  // 标签必须一起排（同一条行间隙里的标签互相不知道，逐个画必然重叠）。
+  const specs=[];
   REDGES.forEach(e=>{
     const a=pos[e.from]; if(!a) return;
-    const ca={x:a.x+NODE_W/2, y:a.y+NODE_H/2};
     const b=pos[e.to];
-    let d, lx, ly;
     if(!b){
       // 兜底：目标不存在（非常规）→ 右缘短线段 + 端点圆点
-      const y1=ca.y, x0=ca.x+NODE_W/2, x2=x0+40;
-      d='M'+x0+','+y1+' L'+x2+','+y1;
-      lx=x2-6; ly=y1-6;
-      const dot=el('circle'); dot.setAttribute('cx',x2); dot.setAttribute('cy',y1); dot.setAttribute('r',3.5);
+      const ca={x:a.x+NODE_W/2, y:a.y+NODE_H/2};
+      const x0=ca.x+NODE_W/2, x2=x0+40;
+      specs.push({e:e, d:'M'+x0+','+ca.y+' L'+x2+','+ca.y,
+                  anchor:{x:x2-6, y:ca.y-6, vertical:false}, dot:{x:x2,y:ca.y}});
+      return;
+    }
+    // 正交圆角折线：走行间隙带 / 两侧通道（见 routeEdge 的说明）
+    const pts=routeEdge(e.from, e.to);
+    specs.push({e:e, d:roundedPath(pts, 8), anchor:labelAnchor(pts)});
+  });
+  const items=[];
+  specs.forEach(sp=>{
+    if(!sp.e.label || sp.e.label==='next') return;   // 只给有意义的边标文字
+    items.push({x:sp.anchor.x, y:sp.anchor.y, vertical:sp.anchor.vertical,
+                w:Math.max(24, textWidth(sp.e.label)), owner:sp});
+  });
+  placeLabels(items);
+  items.forEach(it=>{ it.owner.anchor.x=it.at.x; it.owner.anchor.y=it.at.y; });
+
+  specs.forEach(sp=>{
+    const e=sp.e;
+    const cls=e.forward ? (e.terminal?'e term':'e') : 'e goto';
+    const p=el('path'); p.setAttribute('d',sp.d); p.setAttribute('class',cls);
+    if(pos[e.to] && !e.terminal) p.setAttribute('marker-end', e.forward?'url(#arr)':'url(#arrg)');
+    svg.appendChild(p);
+    if(sp.dot){
+      const dot=el('circle'); dot.setAttribute('cx',sp.dot.x); dot.setAttribute('cy',sp.dot.y);
+      dot.setAttribute('r',3.5);
       dot.setAttribute('class',(/fail/.test(String(e.to))||e.label==='fail')?'eterm fail':'eterm');
       svg.appendChild(dot);
-    } else {
-      // 正交圆角折线：走行间隙带 / 两侧通道（见 routeEdge 的说明）
-      const pts=routeEdge(e.from, e.to);
-      d=roundedPath(pts, 8);
-      const la=labelAt(pts);
-      lx=la.x; ly=la.y;
     }
-    const cls=e.forward ? (e.terminal?'e term':'e') : 'e goto';
-    const p=el('path'); p.setAttribute('d',d); p.setAttribute('class',cls);
-    if(b && !e.terminal) p.setAttribute('marker-end', e.forward?'url(#arr)':'url(#arrg)');
-    svg.appendChild(p);
+    const lx=sp.anchor.x, ly=sp.anchor.y;
     let lt=null;
     if(e.label && e.label!=='next'){
       lt=el('text'); lt.setAttribute('x',lx); lt.setAttribute('y',ly);
