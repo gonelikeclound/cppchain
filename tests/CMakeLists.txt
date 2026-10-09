@@ -61,7 +61,8 @@ gtest_discover_tests(tool_tests)
 add_executable(state_tests
   state/state_test.cpp
   state/checkpointer_test.cpp
-  state/store_test.cpp)
+  state/store_test.cpp
+  state/messages_op_test.cpp)
 
 target_link_libraries(state_tests PRIVATE
   cppchain_state
