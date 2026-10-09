@@ -65,7 +65,22 @@ function mkEl(tag) {
   el.firstChild = { nodeValue: '' };
   return el;
 }
-function runPage(records) {
+// 内嵌 JS 的语法检查：用**真解析器**（vm.Script）。浏览器里语法错误 = 整页空白，
+// 而 C++ 编译期与 gtest 都看不出来 —— 这里是最靠得住的一道闸。
+// （原先在 gtest 里放了个手写的括号平衡扫描，正则字面量会把它带偏、误报，已删。）
+let parsedOnce = false;
+function assertParses(script) {
+  if (parsedOnce) return;
+  parsedOnce = true;
+  try {
+    new vm.Script(script);
+  } catch (e) {
+    ++failures; ++checks;
+    console.log(`  ✗ 内嵌 JS 语法错误（浏览器里会整页空白）：${e.message}`);
+  }
+}
+
+function runPage(records, extraGlobals = {}) {
   const src = fs.readFileSync(path.join(ROOT, 'src/workflow/debug_view.cpp'), 'utf8');
   const a = src.indexOf('R"html(') + 'R"html('.length;
   const b = src.indexOf(')html"');
@@ -73,6 +88,7 @@ function runPage(records) {
   const payload = { graph: GRAPH, ir: { id: 'wf_test' }, records, trimmed_node_logs: false };
   tpl = tpl.replace('__DATA__', JSON.stringify(payload)).replace(/__IR_ID__/g, 'wf_test');
   const script = tpl.slice(tpl.indexOf('<script>') + 8, tpl.lastIndexOf('</script>'));
+  assertParses(script);
 
   const cache = {};
   const document = {
@@ -81,10 +97,10 @@ function runPage(records) {
     getElementById: (id) => (cache[id] = cache[id] || mkEl('div')),
     querySelectorAll: () => [], addEventListener() {}, body: mkEl('body'),
   };
-  const ctx = vm.createContext({
+  const ctx = vm.createContext(Object.assign({
     document, window: {}, console, Math, JSON, Number, Object, Array, String, isNaN,
     setTimeout: () => {}, Promise, parseFloat, parseInt,
-  });
+  }, extraGlobals));
   vm.runInContext(script, ctx, { filename: 'debug_view.js' });
   return ctx;
 }
@@ -185,6 +201,62 @@ function runPage(records) {
   eq(count('ck', 'poll'), 2, '应恰好两轮 _continue 的回边（取第一条 exit 会变成 3）');
   eq(count('ck', 'notify'), 0, '前两轮的 target 不算收尾（ck 从没真正走到 notify）');
   eq(count('poll', 'fetch'), 3, '节点头三轮都进了 body');
+}
+
+// ---- 用例 6：会话名抽取（拖入文件与 URL 走同一个函数）----
+{
+  const ctx = runPage([]);
+  const f = (x) => vm.runInContext(`sessionNameOf(${JSON.stringify(x)})`, ctx);
+  eq(f('session-s1.log.jsonl'), 's1', '本地文件名');
+  eq(f('http://host:8787/logs/session-abc.log.jsonl'), 'abc', 'URL 取最后一段');
+  eq(f('https://host/x/a.jsonl'), 'a', '普通 jsonl');
+  eq(f('session-x.log.jsonl?v=2'), 'x', '带 query 也认');
+  eq(f('weird'), 'weird', '认不出来就原样当会话名');
+}
+
+// ---- 用例 7：拖入/URL 的文本 → 记录（会话前缀与选取一致）----
+{
+  const ctx = runPage([]);
+  const text = [
+    JSON.stringify({ run: 'r-1', node: '__input__', phase: 'exit', source: 'engine', seq: 1 }),
+    JSON.stringify({ run: 'r-2', node: 'recall', phase: 'exit', source: 'engine', seq: 2 }),
+    '',                                    // 空行跳过
+    '{ 坏行',                               // 坏行跳过（与 C++ 读日志同判）
+    JSON.stringify({ run: 'r-2', node: 'recall', phase: 'enter', source: 'engine', seq: 3 }),
+  ].join('\n');
+  vm.runInContext(`ingestTexts([{name:'session-zz.log.jsonl', text:${JSON.stringify(text)}}])`, ctx);
+  const runs = vm.runInContext('RUNS', ctx);
+  eq(runs.map(r => r.run), ['zz/r-1', 'zz/r-2'], 'run 带上会话前缀');
+  eq(vm.runInContext('Object.keys(SESS)', ctx), ['zz'], '会话桶');
+  eq(runs[1].records.length, 2, '坏行与空行被跳过');
+  eq(runs[1].records.map(r => r.seq), [2, 3], '同一会话内按 seq 归并');
+}
+
+// ---- 用例 8：从 URL 读取（喂假 fetch）----
+{
+  const body = [
+    JSON.stringify({ run: 'r-1', node: '__input__', phase: 'enter', source: 'engine', seq: 1 }),
+    JSON.stringify({ run: 'r-1', node: '__input__', phase: 'exit', source: 'engine', seq: 2 }),
+  ].join('\n');
+  const ok = runPage([], {
+    fetch: (u) => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(body) }),
+  });
+  vm.runInContext("loadFromUrl('http://h/logs/session-uu.log.jsonl')", ok);
+  // fetch 是异步的：等一轮微任务
+  await new Promise(r => setTimeout(r, 0));
+  eq(vm.runInContext('RUNS.map(r=>r.run)', ok), ['uu/r-1'], 'URL 会话名从路径推出并加前缀');
+  eq(vm.runInContext("document.getElementById('urlhint').textContent", ok), '', '成功后不报错');
+
+  // 失败：HTTP 500 → 提示里要说清楚（含 CORS 那句），且不污染已有数据
+  const bad = runPage([], {
+    fetch: () => Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve('') }),
+  });
+  vm.runInContext("loadFromUrl('http://h/session-bad.log.jsonl')", bad);
+  await new Promise(r => setTimeout(r, 0));
+  eq(vm.runInContext('RUNS.length', bad), 0, '读取失败不改动已有数据');
+  const hint = vm.runInContext("document.getElementById('urlhint').textContent", bad);
+  eq(hint.includes('HTTP 500'), true, '提示里带 HTTP 状态');
+  eq(hint.includes('CORS'), true, '提示里说明 CORS 这一常见原因');
 }
 
 // ---- 用例 4：空记录 ----

@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
         "  wfr list [--workdir DIR]\n"
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
-        "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏即可看日志。\n"
+        "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏、或在左栏填日志 URL，即可看日志。\n"
         "  wfr -h | --help\n"
         "内置（发布自带 share/wfr/workflows）：chat（最简单聊天，多轮续聊；需 LLM key，"
         "见 .env.example）；chat2（chat 的超集：历史渲染三档 + 思考回传/厂商参数开关，"

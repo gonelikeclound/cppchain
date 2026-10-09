@@ -199,7 +199,11 @@ target 补上的）。
 现在：
 
 - `wfr debug <wf> --graph-only` 只按 workflow 出页面（payload 里 `records` 为空），
-  打开后把 `.wfr/sessions/*.log.jsonl` **拖进左栏**（或点击选择，可反复追加）即可。
+  打开后把 `.wfr/sessions/*.log.jsonl` **拖进左栏**（或点击选择，可反复追加）即可；
+  也可以**填一个日志 URL** 让页面直接去读（同一个 `ingestTexts`，会话名从 URL 末段推）。
+  ⚠️ URL 这条受浏览器同源策略限制：`file://` 打开的页面发跨源 `fetch` 会被按 CORS 拦掉
+  （file 源是 `null`）—— 所以失败时提示里会明确写出这一条，而不是静默吞掉；日志放在同源
+  http 服务下时才走得通。
 - 不传 `--graph-only` 时行为不变（默认 `--all`，把会话内嵌进页面）—— 静态单文件那条路仍在。
 
 **关键决定：日志的推导搬到页面里的 JS，且是唯一实现。**

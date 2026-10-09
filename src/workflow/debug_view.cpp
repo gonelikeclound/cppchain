@@ -166,6 +166,12 @@ path.e.term{fill:none;stroke:#b0b3b8;stroke-width:1.2;stroke-dasharray:5 4}
 .drop:hover{background:var(--hl)}
 .drop.over{border-color:var(--acc);background:#e8f0fe;color:var(--acc)}
 .drop.err{border-color:#d93025;background:#fdecea;color:#d93025}
+.urlrow{display:flex;gap:4px;margin:0 0 2px}
+.urlrow input{flex:1 1 auto;min-width:0;font-size:11.5px;padding:3px 5px;border:1px solid var(--e);border-radius:4px}
+.urlrow button{flex:none;font-size:11.5px;padding:3px 8px;border:1px solid var(--e);border-radius:4px;
+  background:#fff;cursor:pointer}
+.urlrow button:hover{background:var(--hl)}
+#urlhint{min-height:12px;margin-bottom:4px}
 /* ---- 日志树：run 轮 → loop 迭代 → 节点 → 记录 ---- */
 #loglist{flex:1 1 auto;overflow:auto;margin-top:4px;min-height:0}
 #sh2{flex:none;height:6px;border-top:1px solid var(--e);margin-top:6px;cursor:row-resize}
@@ -214,6 +220,11 @@ details.node>.rec:first-of-type{border-top:none}
 <h2>会话 / 轮次（日志区只显示所选 run）</h2>
 <div id="drop" class="drop">把 .log.jsonl 拖到这里<br><span class="small">或点击选择多个文件（可反复追加）</span>
   <input id="filepick" type="file" multiple accept=".jsonl,.json,.log" style="display:none"></div>
+<div id="urlrow" class="urlrow">
+  <input id="urlbox" type="text" placeholder="或填日志 URL：http(s)://…/session-x.log.jsonl">
+  <button id="urlgo" title="从该 URL 读取日志">读取</button>
+</div>
+<div id="urlhint" class="small"></div>
 <select id="sessSel"></select>
 <select id="runSel"></select>
 <h2>节点（导航）</h2><div id="nodelist"></div>
@@ -848,10 +859,32 @@ function initSplitters(){
 /* ---------- 拖入 / 选择日志文件（wfr-㉟：页面自己拿数据，不必重新生成网页）----------
    每个文件按会话解析（文件名 session-<名>.log.jsonl → 会话名），run 加上会话前缀 ——
    与 --all 采集时同一套约定，于是多会话并排可选。可反复拖入追加。 */
+// 文件名 / URL 路径 → 会话名：session-<名>.log.jsonl → <名>
+function sessionNameOf(p){
+  const base=String(p||'log').replace(/[?#].*$/,'').replace(/^.*\//,'');
+  return base.replace(/^session-/,'').replace(/\.log\.jsonl$/,'').replace(/\.jsonl$/,'').replace(/\.json$/,'')||'log';
+}
+// 从 URL 读一份日志。注意：file:// 打开的页面发跨源 fetch 会被浏览器按 CORS 拦掉
+//（file 源是 null）—— 失败原因会明确写出来，不静默吞。
+function loadFromUrl(url){
+  const hint=document.getElementById('urlhint');
+  hint.textContent='读取中…'; hint.style.color='#888';
+  fetch(url).then(res=>{
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    return res.text();
+  }).then(text=>{
+    try{ localStorage.setItem('wfr_dbg_url', url); }catch(e){}
+    hint.textContent=''; ingestTexts([{name:sessionNameOf(url), text:text}]);
+  }).catch(e=>{
+    hint.style.color='#d93025';
+    hint.textContent='读取失败：'+String(e&&(e.message||e))+
+      '（file:// 打开的页面会被 CORS 拦；把日志放到同源 http 服务下，或直接拖文件进来）';
+  });
+}
 function ingestTexts(entries){        // entries: [{name, text}]
   const dropped=[];
   entries.forEach(({name,text})=>{
-    const sess=String(name||'log').replace(/^.*\//,'').replace(/^session-/,'').replace(/\.log\.jsonl$/,'').replace(/\.jsonl$/,'').replace(/\.json$/,'');
+    const sess=sessionNameOf(name);
     text.split('\n').forEach(line=>{
       const t=line.trim(); if(!t) return;
       let r; try{ r=JSON.parse(t); }catch(e){ return; }   // 半行/坏行跳过（与 C++ 读日志同判）
@@ -889,6 +922,12 @@ function setRecords(raw){
   curGoto=''; curIt=''; curLog='';
   renderRunSelectors(); renderNodeList(); renderGotoTabs(); renderLog(); applyEdgeUsage();
 }
+function bindUrlRow(){
+  const box=document.getElementById('urlbox'), go=document.getElementById('urlgo');
+  try{ const last=localStorage.getItem('wfr_dbg_url'); if(last && !box.value) box.value=last; }catch(e){}
+  go.addEventListener('click',()=>{ const u=box.value.trim(); if(u) loadFromUrl(u); });
+  box.addEventListener('keydown',e=>{ if(e.key==='Enter'){ const u=box.value.trim(); if(u) loadFromUrl(u); } });
+}
 function bindDrop(){
   const d=document.getElementById('drop'), pick=document.getElementById('filepick');
   d.addEventListener('click',()=>pick.click());
@@ -909,7 +948,7 @@ function bindDrop(){
 
 /* ---------- 启动 ---------- */
 try {
-  layout(); renderSVG(); renderLegend(); bindRunSelectors(); bindDrop();
+  layout(); renderSVG(); renderLegend(); bindRunSelectors(); bindDrop(); bindUrlRow();
   setRecords(P.records||[]);
   renderDetail(''); renderLogDetail(null);
   if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
