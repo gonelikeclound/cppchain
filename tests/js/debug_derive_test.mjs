@@ -369,6 +369,44 @@ function runPage(records, extraGlobals = {}, graph = GRAPH) {
   eq(onNode, 0, '文字不应压在节点上');
 }
 
+// ---- 用例 11：按走向选最近的**面**（引出/接入点）----
+// 横向为主（同层，或横向位移 > 纵向位移）→ 侧面中点；纵向为主 → 上下边中点。
+// 夹具的分层是算出来的（layout 用 BFS + "首节点必为入口"），所以先确认：
+//   a=0 层；b、c=1 层；d=2 层 → b→c 同层（右）、c→b 同层（左）、
+//   b→d 同列跨层（纵）、c→d 横差 158 > 纵差 112（横）。
+{
+  const N = (id) => ({ id, kind: 'tool', text: '', def: {} });
+  const E = (from, to, label = 'next', forward = true, terminal = false) =>
+    ({ from, to, label, forward, terminal });
+  const g = {
+    nodes: [N('a'), N('b'), N('c'), N('d')],
+    edges: [E('a', 'b'), E('a', 'c', 'right-ish'), E('b', 'c', 'same-right'),
+            E('c', 'b', 'same-left'), E('b', 'd', 'down'), E('c', 'd', 'horiz')],
+  };
+  const ctx = runPage([], {}, g);
+  const pos = vm.runInContext('pos', ctx);
+  const W = vm.runInContext('NODE_W', ctx), H = vm.runInContext('NODE_H', ctx);
+  const L = vm.runInContext('layer', ctx);
+  eq([L.a, L.b, L.c, L.d], [0, 1, 1, 2], '夹具分层如预期（否则后面的断言没意义）');
+
+  const route = (f, t) => JSON.parse(vm.runInContext(
+    `JSON.stringify(routeEdge(${JSON.stringify(f)},${JSON.stringify(t)}))`, ctx));
+  const sideOf = (pt, id) => {
+    const p = pos[id], eps = 0.6;
+    if (Math.abs(pt.x - (p.x + W)) < eps && Math.abs(pt.y - (p.y + H / 2)) < eps) return 'right';
+    if (Math.abs(pt.x - p.x) < eps && Math.abs(pt.y - (p.y + H / 2)) < eps) return 'left';
+    if (Math.abs(pt.x - (p.x + W / 2)) < eps && Math.abs(pt.y - p.y) < eps) return 'top';
+    if (Math.abs(pt.x - (p.x + W / 2)) < eps && Math.abs(pt.y - (p.y + H)) < eps) return 'bottom';
+    return '?';
+  };
+  const at = (f, t) => { const p = route(f, t); return [sideOf(p[0], f), sideOf(p[p.length - 1], t)]; };
+
+  eq(at('b', 'c'), ['right', 'left'], '同层向右：右边引出、左边接入');
+  eq(at('c', 'b'), ['left', 'right'], '同层向左：左边引出、右边接入');
+  eq(at('b', 'd'), ['bottom', 'top'], '同列跨层：下边引出、上边接入');
+  eq(at('c', 'd'), ['left', 'right'], '横向位移更大（158>112）：走侧面而非上下');
+}
+
 // ---- 用例 4：空记录 ----
 {
   const ctx = runPage([]);

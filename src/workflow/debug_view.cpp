@@ -435,6 +435,22 @@ function routeEdge(s,t){
   const ax=A.x+NODE_W/2, bx=B.x+NODE_W/2;
   const aTop=A.y, aBot=A.y+NODE_H, bTop=B.y, bBot=B.y+NODE_H;
   const ls=layer[s], lt=layer[t];
+  // 「按走向选最近的面」：横向为主（同层，或横向位移大于纵向位移）→ 从**侧面中点**
+  // 引出/接入；纵向为主 → 仍走上下边中点（下面是那套行间隙 + 两侧通道的走法）。
+  // 横向走线用**列间隙通道**：这个布局每行共用同一套 x 网格，所以列间隙（宽 GAP、
+  // 中心在 x+W+GAP/2）在**所有行**里都是空的 —— 纵向跑多远都不会压到节点。
+  if(lt===ls || Math.abs(bx-ax) > Math.abs(bTop-aTop)){
+    const right = bx > ax;
+    const ay=A.y+NODE_H/2, by=B.y+NODE_H/2;
+    const xA = right ? A.x+NODE_W : A.x;              // 引出面中点
+    const xB = right ? B.x : B.x+NODE_W;              // 接入面中点（朝向来源那一侧）
+    const c1 = right ? A.x+NODE_W+GAP/2 : A.x-GAP/2;  // A 旁边的列间隙
+    const c2 = right ? B.x-GAP/2 : B.x+NODE_W+GAP/2;  // B 旁边的列间隙
+    if(Math.abs(c1-c2) < 1)                            // 相邻列：同一条通道里直上/直下
+      return [{x:xA,y:ay},{x:c1,y:ay},{x:c1,y:by},{x:xB,y:by}];
+    const band = (lt<ls) ? (A.y-MID) : (A.y+NODE_H+MID);   // 横向那一段退回行间隙走
+    return [{x:xA,y:ay},{x:c1,y:ay},{x:c1,y:band},{x:c2,y:band},{x:c2,y:by},{x:xB,y:by}];
+  }
   if(lt===ls){                                  // 同层：绕本行**下方**的间隙（不横穿本行的节点）
     const g=aBot+MID;
     return [{x:ax,y:aBot},{x:ax,y:g},{x:bx,y:g},{x:bx,y:bBot}];
@@ -492,17 +508,21 @@ function textWidth(s){
 }
 // 标签锚点：**优先落在横向段的中点**（横向段都在行间隙里，于是标签天然不压节点，
 // 也便于按"带"防重叠）；整条都是竖线（直上直下的边）时才贴到线的右侧。
-function labelAnchor(pts){
+function labelAnchor(pts, s, t){
   const midY=(pts[0].y+pts[pts.length-1].y)/2;
   let best=null;
   for(let i=1;i<pts.length;++i){
-    if(Math.abs(pts[i].x-pts[i-1].x) < 1) continue;        // 只看横向段
+    if(Math.abs(pts[i].x-pts[i-1].x) < 30) continue;   // 侧面的短接头放不下文字，跳过
     const y=(pts[i].y+pts[i-1].y)/2, x=(pts[i].x+pts[i-1].x)/2;
     const d=Math.abs(y-midY);
     if(!best || d<best.d) best={d:d, x:x, y:y};
   }
   if(best) return {x:best.x, y:best.y-5, vertical:false};
-  return {x:(pts[0].x+pts[pts.length-1].x)/2+8, y:midY, vertical:true};
+  // 没有够长的横向段（侧面引出/接入的走法）→ 贴在竖线旁，且 **y 取行间隙带**：
+  // 那里没有节点，文字横向铺开也不会压到东西。
+  const A=pos[s];
+  const gapY = (layer[t] < layer[s]) ? (A.y-MID) : (A.y+NODE_H+MID);
+  return {x:pts[0].x+10, y:gapY, vertical:true};
 }
 // 标签防重叠：按"间隙带"（y 相近的一组）分组，带内用轨道错开（间隙高 76、标签盒高 24
 // → 刚好三层 0/±24），同一轨道再撞就沿 x 往右推。竖线标签贴线右侧、不参与避让。
@@ -562,7 +582,7 @@ function renderSVG(){
     }
     // 正交圆角折线：走行间隙带 / 两侧通道（见 routeEdge 的说明）
     const pts=routeEdge(e.from, e.to);
-    specs.push({e:e, d:roundedPath(pts, 8), anchor:labelAnchor(pts)});
+    specs.push({e:e, d:roundedPath(pts, 8), anchor:labelAnchor(pts, e.from, e.to)});
   });
   const items=[];
   specs.forEach(sp=>{
