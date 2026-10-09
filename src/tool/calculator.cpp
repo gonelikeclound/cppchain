@@ -270,6 +270,7 @@ ToolSpec make_calculator_tool(CalculatorConfig cfg) {
         return nlohmann::json{{"expression", *expr}, {"result", format_number(*r)}};
       },
       /*read_only=*/true);
+  spec.category = "compute";  // 供历史精简按类别过滤（wfr-㊵）
   return spec;
 }
 

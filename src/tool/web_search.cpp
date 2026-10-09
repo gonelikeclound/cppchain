@@ -146,6 +146,7 @@ ToolSpec make_web_search_tool(std::shared_ptr<http::Transport> transport, WebSea
         return parsed;
       },
       /*read_only=*/true);
+  spec.category = "retrieval";  // 供历史精简按类别过滤（wfr-㊵）
   spec.ttl = cfg.ttl;  // 搜索快照 15 分钟后视为可能过期（见 WebSearchConfig）
   return spec;
 }

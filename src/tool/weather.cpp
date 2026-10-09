@@ -332,6 +332,7 @@ ToolSpec make_weather_tool(std::shared_ptr<http::Transport> transport,
         };
       },
       /*read_only=*/true);
+  spec.category = "retrieval";  // 供历史精简按类别过滤（wfr-㊵）
   spec.ttl = cfg.ttl;  // 天气快照 30 分钟后视为可能过期（状态时效性，见 04-problems/06）
   return spec;
 }

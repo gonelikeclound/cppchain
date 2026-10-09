@@ -45,9 +45,33 @@ struct ToolSpec {
   // 留空 = 不过期（静态知识类工具）。由 agent::StaleStateGuard 消费，见 04-problems/06。
   std::optional<std::chrono::seconds> ttl;
 
+  // 工具类别（wfr-㊵）：供"历史精简"按类别过滤（如丢掉联网取数的原始长文）。
+  // 词表见下面的 kToolCategories / is_known_category。**不进 to_openai()** ——
+  // 类别是库内分类，不是 function schema 的一部分；真端点对未知字段敏感（见 to_openai 的教训）。
+  std::string category = "general";
+
+  // 链式设置类别：`reg.add(make_tool(...).with_category("retrieval"))`
+  ToolSpec& with_category(std::string c) {
+    category = std::move(c);
+    return *this;
+  }
+
   // → {"type":"function","function":{name,description,parameters}}，直接填入 CallOptions::tools
   [[nodiscard]] nlohmann::json to_openai() const;
 };
+
+// 类别词表（封闭）。语义粗略但够用 —— 目的是"按用途筛选历史"，不是权限模型：
+//   retrieval 联网/外部取数（易变、返回往往很长）  compute 纯本地确定性计算
+//   action    有副作用（通知/写文件/下单）        model  反过来调模型（llm / 结构化抽取）
+//   time      时间基准                             general 未归类（不匹配任何显式类别）
+inline constexpr std::string_view kToolCategories[] = {"retrieval", "compute", "action",
+                                                       "model", "time", "general"};
+
+[[nodiscard]] inline bool is_known_category(std::string_view c) {
+  for (std::string_view const k : kToolCategories)
+    if (c == k) return true;
+  return false;
+}
 
 // ---- 参数取值助手（无反射，显式取值 + 明确报错）----
 

@@ -109,6 +109,7 @@ ToolSpec make_datetime_tool(DatetimeToolConfig cfg) {
         }
       },
       /*read_only=*/true);
+  spec.category = "time";  // 供历史精简按类别过滤（wfr-㊵）
   spec.ttl = cfg.ttl;  // "现在"快照 60 秒后即视为可能过期
   return spec;
 }
