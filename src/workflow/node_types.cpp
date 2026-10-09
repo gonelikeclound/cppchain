@@ -13,7 +13,9 @@
 #include <unordered_map>
 #include <utility>
 
+#include "cppchain/agent/agent.hpp"
 #include "cppchain/agent/history.hpp"
+#include "cppchain/agent/tokens.hpp"
 #include "cppchain/message/content_block.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/message/utf8.hpp"
@@ -124,6 +126,72 @@ std::size_t parse_history_budget(std::string const& text, std::string const& nod
 NodeType::Edge edge_to(std::string target, std::string label) {
   bool const forward = !edge_is_backward(target);  // 必须在 move 之前算（moved-from 串是空的）
   return {std::move(target), std::move(label), forward};
+}
+
+// ---- wfr-㊵：历史处理节点的参数（"字面量或整串 @config 引用"的双态）----
+//
+// 与 wfr-㉙ 的 mode/budget 同一套差异化语义：**缺省回落默认值、非空但拼错抛硬错**
+//（fail-closed：`--set sum_style=evidnce` 这种拼错不该被静默吞成默认档）。
+
+std::string resolve_enum_param(std::string const& spec, Json const& state,
+                               std::string const& node_id, std::string_view what,
+                               std::initializer_list<std::string_view> allowed,
+                               std::string const& fallback) {
+  std::string const t = resolve_text_parameter(spec, state);
+  if (t.empty() || t == "null") return fallback;
+  std::string avail;
+  for (std::string_view const a : allowed) {
+    if (t == a) return t;
+    if (!avail.empty()) avail += " / ";
+    avail += std::string(a);
+  }
+  throw tool::ToolException(node_id + " 的 " + std::string(what) + "='" + t +
+                            "' 不在词表里（" + avail + "）");
+}
+
+std::size_t resolve_size_param(std::string const& spec, Json const& state,
+                               std::string const& node_id, std::string_view what,
+                               std::size_t fallback) {
+  std::string const t = resolve_text_parameter(spec, state);
+  if (t.empty() || t == "null") return fallback;
+  try {
+    std::size_t pos = 0;
+    long const v = std::stol(t, &pos);
+    if (pos == t.size() && v > 0) return static_cast<std::size_t>(v);
+  } catch (std::exception const&) {
+  }
+  throw tool::ToolException(node_id + " 的 " + std::string(what) + "='" + t + "' 不是正整数");
+}
+
+// 把待压缩的历史渲染成提示词里的文本（摘要节点用）
+std::string render_history_for_summary(std::vector<message::Message> const& msgs) {
+  std::string out;
+  for (message::Message const& m : msgs) {
+    char const* role = m.type == message::Role::Human    ? "用户"
+                       : m.type == message::Role::Ai     ? "助手"
+                       : m.type == message::Role::Tool   ? "工具"
+                       : m.type == message::Role::System ? "系统"
+                                                         : "其它";
+    out += "[" + std::string(role) + "] " + m.text();
+    if (m.type == message::Role::Tool && m.status != "success") out += "（失败：" + m.status + "）";
+    out += "\n";
+  }
+  return out;
+}
+
+// 提示词风格三档 —— 这是"历史摘要"这个方向的核心自变量
+std::string summary_instruction(std::string_view style) {
+  std::string s =
+      "把下面这段多轮对话历史压缩成要点，供后续轮次继续使用。只写历史里确凿出现过的事实，"
+      "不要编造，也不要补充建议。";
+  if (style == "detailed")
+    s += "保留关键数值与结论（含工具给出的数值）及其出处。";
+  else if (style == "evidence")
+    s += "另外显式记录：调用过哪些工具、参数是什么、结果的关键结论 —— 后续回答需要用它们"
+         "证明自己不是凭空说的。";
+  else
+    s += "按「用户目标 / 已确认事实 / 未决问题」三段写，尽量短。";
+  return s;
 }
 
 // ---- 类型专属校验（VN5–VN11）----
@@ -322,6 +390,84 @@ void c_loop(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+void v_summarize(NodeIR const& n, NodeType::ValidateContext const& ctx,
+                 NodeType::ErrorSink const& err) {
+  if (n.model.empty())
+    err("VN15", "summarize 节点 '" + n.id + "' 缺少 model（组件名）");
+  else if (ctx.components != nullptr && ctx.components->model(n.model) == nullptr)
+    err("VN15", "summarize 节点 '" + n.id + "' 引用的模型组件 '" + n.model + "' 不在注册表里");
+  if (n.next.empty()) err("VN15", "summarize 节点 '" + n.id + "' 缺少 next");
+  struct Lit {
+    std::string const* v;
+    char const* what;
+    std::initializer_list<std::string_view> allowed;
+  };
+  for (Lit const l : {Lit{&n.when, "when", {"off", "messages", "tokens", "always"}},
+                      Lit{&n.style, "style", {"concise", "detailed", "evidence"}},
+                      Lit{&n.summary_role, "summary_role", {"system", "human", "ai"}},
+                      Lit{&n.on_fail, "on_fail", {"skip", "placeholder"}}}) {
+    if (l.v->empty() || is_whole_ref(*l.v)) continue;  // 引用留给运行期判
+    bool ok = false;
+    std::string avail;
+    for (std::string_view const a : l.allowed) {
+      if (*l.v == a) ok = true;
+      if (!avail.empty()) avail += " / ";
+      avail += std::string(a);
+    }
+    if (!ok)
+      err("VN15", "summarize 节点 '" + n.id + "' 的 " + l.what + "='" + *l.v +
+                      "' 不在词表里（" + avail + "）");
+  }
+  for (std::string const* f : {&n.max_msgs, &n.max_tokens, &n.keep_last}) {
+    if (f->empty() || is_whole_ref(*f)) continue;
+    std::size_t pos = 0;
+    long v = 0;
+    try {
+      v = std::stol(*f, &pos);
+    } catch (std::exception const&) {
+      pos = 0;
+    }
+    if (pos != f->size() || v <= 0)
+      err("VN15", "summarize 节点 '" + n.id + "' 的阈值/条数必须是正整数，收到 '" + *f + "'");
+  }
+}
+
+void v_refine_history(NodeIR const& n, NodeType::ValidateContext const&,
+                      NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN16", "refine_history 节点 '" + n.id + "' 缺少 next");
+  if (!n.preset.empty() && !agent::parse_history_preset(n.preset) && !is_whole_ref(n.preset))
+    err("VN16", "refine_history 节点 '" + n.id + "' 的 preset='" + n.preset +
+                    "' 不在词表里（minimal / lean / aggressive / clip）");
+  if (!n.clip_scope.empty() && !is_whole_ref(n.clip_scope) && n.clip_scope != "tool_results" &&
+      n.clip_scope != "ai_text" && n.clip_scope != "both")
+    err("VN16", "refine_history 节点 '" + n.id + "' 的 clip_scope='" + n.clip_scope +
+                    "' 不在词表里（tool_results / ai_text / both）");
+  if (!n.clip_mode.empty() && !is_whole_ref(n.clip_mode) && n.clip_mode != "truncate" &&
+      n.clip_mode != "artifact")
+    err("VN16", "refine_history 节点 '" + n.id + "' 的 clip_mode='" + n.clip_mode +
+                    "' 不在词表里（truncate / artifact）");
+  for (std::string const& r : n.rules)
+    if (!is_whole_ref(r) && !agent::is_known_history_rule(r))
+      err("VN16", "refine_history 节点 '" + n.id + "' 的规则 '" + r + "' 不认识");
+  // 类别：形状在 agent 层校，**词表在 tool 层**校（分层：agent 不 include tool 头）
+  for (std::string const& r : n.rules)
+    if (auto const c = agent::history_rule_category(r); c && !tool::is_known_category(*c))
+      err("VN16", "refine_history 节点 '" + n.id + "' 的规则 '" + r +
+                      "' 里的类别不在词表里（见 tool::kToolCategories）");
+  for (std::string const* f : {&n.tool_budget, &n.ai_budget}) {
+    if (f->empty() || is_whole_ref(*f)) continue;
+    std::size_t pos = 0;
+    long v = 0;
+    try {
+      v = std::stol(*f, &pos);
+    } catch (std::exception const&) {
+      pos = 0;
+    }
+    if (pos != f->size() || v <= 0)
+      err("VN16", "refine_history 节点 '" + n.id + "' 的预算必须是正整数，收到 '" + *f + "'");
+  }
+}
+
 void v_load_history(NodeIR const& n, NodeType::ValidateContext const&,
                     NodeType::ErrorSink const& err) {
   if (n.path.empty()) err("VN11", "load_history 节点 '" + n.id + "' 缺少 path（工作路径）");
@@ -439,6 +585,27 @@ std::vector<std::string> t_model(NodeIR const& n) {
   std::vector<std::string> out;
   collect_strings(n.model_params, out);
   if (!n.reasoning_echo.empty()) out.push_back(n.reasoning_echo);
+  return out;
+}
+
+// wfr-㊵：summarize 的运行期参数（may be @config.*）也要过 VR1 语法检查与 VR4 契约核对
+std::vector<std::string> t_summarize(NodeIR const& n) {
+  std::vector<std::string> out;
+  for (std::string const* f : {&n.when, &n.max_msgs, &n.max_tokens, &n.keep_last, &n.style,
+                               &n.summary_role, &n.on_fail})
+    if (!f->empty()) out.push_back(*f);
+  collect_strings(n.model_params, out);
+  if (!n.reasoning_echo.empty()) out.push_back(n.reasoning_echo);
+  return out;
+}
+
+std::vector<std::string> t_refine_history(NodeIR const& n) {
+  std::vector<std::string> out;
+  for (std::string const* f : {&n.preset, &n.clip_scope, &n.clip_mode, &n.tool_budget,
+                               &n.ai_budget, &n.artifact_dir})
+    if (!f->empty()) out.push_back(*f);
+  for (std::string const& r : n.rules) out.push_back(r);
+  for (std::string const& c : n.categories) out.push_back(c);
   return out;
 }
 
@@ -711,6 +878,260 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ---- wfr-㊵：summarize（折叠成 LLM 摘要）----
+
+void c_summarize(NodeIR const& n, NodeType::CompileContext& ctx) {
+  model::ChatModel* m = (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
+  if (m == nullptr) {
+    ctx.error = "summarize 节点 '" + n.id + "' 引用的组件 '" + n.model + "' 不可用";
+    return;
+  }
+  struct Specs {
+    std::string when, max_msgs, max_tokens, keep_last, style, role, on_fail;
+  };
+  std::string const node_id = n.id;
+  std::string const sys = n.system_prompt;
+  std::string const echo_spec = n.reasoning_echo;
+  Json const params = n.model_params;
+  Specs const sp{n.when, n.max_msgs, n.max_tokens, n.keep_last, n.style, n.summary_role, n.on_fail};
+  auto sink_p = ctx.sink;
+
+  ctx.graph.add_node(n.id, [m, node_id, sys, echo_spec, params, sp, sink_p](
+                              Json const& state, NodeContext& nc) {
+    std::vector<message::Message> const all = messages_from_state(state);
+    // 与 state 层的 fold 归约**同一判定**：剥掉头部摘要得到 base（标记是单一来源）
+    std::size_t head = 0;
+    while (head < all.size() && message::is_summary_message(all[head])) ++head;
+    std::vector<message::Message> base(all.begin() + static_cast<long>(head), all.end());
+    std::string head_text;  // 旧摘要原文 —— 喂给模型做"接力"，避免摘要间丢信息
+    for (std::size_t i = 0; i < head; ++i) head_text += all[i].text() + "\n";
+
+    std::string const when = resolve_enum_param(sp.when, state, node_id, "when",
+                                                {"off", "messages", "tokens", "always"}, "messages");
+    std::string const style = resolve_enum_param(sp.style, state, node_id, "style",
+                                                 {"concise", "detailed", "evidence"}, "concise");
+    std::string const role = resolve_enum_param(sp.role, state, node_id, "summary_role",
+                                                {"system", "human", "ai"}, "system");
+    std::string const on_fail = resolve_enum_param(sp.on_fail, state, node_id, "on_fail",
+                                                   {"skip", "placeholder"}, "skip");
+    std::size_t const keep = resolve_size_param(sp.keep_last, state, node_id, "keep_last", 6);
+    std::size_t const max_msgs = resolve_size_param(sp.max_msgs, state, node_id, "max_msgs", 20);
+    std::size_t const max_tokens = resolve_size_param(sp.max_tokens, state, node_id, "max_tokens", 2000);
+
+    std::size_t const before_tokens = agent::tokens::estimate_msgs(base);
+    Json frame;
+    frame["when"] = when;
+    frame["style"] = style;
+    frame["summary_role"] = role;
+    frame["on_fail"] = on_fail;
+    frame["keep_last"] = static_cast<long>(keep);
+    frame["before_msgs"] = static_cast<long>(base.size());
+    frame["before_tokens"] = static_cast<long>(before_tokens);
+    frame["after_msgs"] = static_cast<long>(base.size());   // 未折叠时先按原样
+    frame["after_tokens"] = static_cast<long>(before_tokens);
+    frame["summarized_msgs"] = 0;
+    frame["kept_msgs"] = static_cast<long>(base.size());
+    frame["summary_tokens"] = 0;
+
+    auto publish = [&](std::string action, std::string reason) {
+      frame["action"] = std::move(action);
+      frame["reason"] = std::move(reason);
+      sink_p->log_node(nc.node_name, "info",
+                       "summarize: " + frame["action"].get<std::string>() + "（" +
+                           frame["reason"].get<std::string>() + "）",
+                       frame);
+      Json results = Json::object();
+      results[node_id] = frame;
+      return Command::with_update(Json{{kResultsKey, std::move(results)}});
+    };
+
+    if (when == "off") return publish("skipped", "when_off");
+    if (when == "messages" && base.size() <= max_msgs) return publish("skipped", "below_threshold");
+    if (when == "tokens" && before_tokens <= max_tokens) return publish("skipped", "below_threshold");
+    if (base.size() <= keep) return publish("skipped", "nothing_to_fold");
+
+    // 折叠边界：复用 TrimHistory 的 safe_boundary —— 保留区不以孤儿 ToolMessage 开头、
+    // 也不会把"Tool 在保留区而它的 AI(tool_calls) 被折掉"（真端点会 400）
+    std::size_t const desired = base.size() - keep;
+    std::size_t const cut = agent::TrimHistory::safe_boundary(base, 0, desired);
+    if (cut == 0) return publish("skipped", "nothing_to_fold");
+    std::size_t const kept = base.size() - cut;
+    std::vector<message::Message> fold(base.begin(), base.begin() + static_cast<long>(cut));
+
+    // 调模型做摘要（失败降级：skip 不发 op，placeholder 用占位文本仍然折叠）
+    std::vector<message::Message> prompt;
+    std::string inst = sys;
+    if (!inst.empty()) inst += "\n\n";
+    inst += summary_instruction(style);
+    prompt.push_back(message::system_message(inst));
+    std::string body;
+    if (!head_text.empty()) body += "（更早的摘要，供接力）\n" + head_text + "\n";
+    body += "待压缩的历史：\n" + render_history_for_summary(fold);
+    prompt.push_back(message::human_message(body));
+
+    model::CallOptions co;
+    for (auto it = params.begin(); it != params.end(); ++it) {
+      Json v = resolve_parameter(it.value(), state);
+      if (v.is_null()) continue;   // 缺键不发（同 model 节点的语义）
+      co.extra[it.key()] = std::move(v);
+    }
+    co.reasoning_echo = parse_reasoning_echo(resolve_text_parameter(echo_spec, state), node_id);
+
+    std::string summary;
+    auto const r = m->invoke(prompt, co);
+    if (!r) {
+      if (on_fail == "skip") return publish("failed", "llm_error");
+      summary = "（摘要生成失败：这段历史已折叠，原文仍在会话日志里）";
+    } else {
+      summary = r->text();
+    }
+    message::sanitize_utf8(summary);
+    if (summary.empty()) {
+      if (on_fail == "skip") return publish("failed", "empty_summary");
+      summary = "（摘要为空：这段历史已折叠，原文仍在会话日志里）";
+    }
+
+    message::Message sm = role == "human"   ? message::human_message(summary)
+                          : role == "ai"    ? message::ai_message(summary)
+                                            : message::system_message(summary);
+    sm.additional_kwargs[message::kSummaryMarker] = true;
+    sm.additional_kwargs["summarized_msgs"] = static_cast<long>(fold.size());
+
+    Json prepend = Json::array({Json(sm)});
+    Json op = Json{{"op", "fold"},
+                   {"keep_last", static_cast<long>(kept)},
+                   {"base_size", static_cast<long>(base.size())},
+                   {"prepend", std::move(prepend)}};
+
+    frame["action"] = "folded";
+    frame["reason"] = "ok";
+    frame["after_msgs"] = static_cast<long>(1 + kept);
+    frame["summarized_msgs"] = static_cast<long>(fold.size());
+    frame["kept_msgs"] = static_cast<long>(kept);
+    frame["summary_tokens"] = static_cast<long>(agent::tokens::estimate(summary));
+    frame["after_tokens"] = 1 + kept;  // 占位，下面用真实估算覆盖
+    {
+      std::vector<message::Message> after;
+      after.push_back(sm);
+      for (std::size_t i = base.size() - kept; i < base.size(); ++i) after.push_back(base[i]);
+      frame["after_tokens"] = static_cast<long>(agent::tokens::estimate_msgs(after));
+    }
+    sink_p->log_node(nc.node_name, "info",
+                     "summarize: folded " + std::to_string(fold.size()) + " 条 → 1 条摘要（" +
+                         style + "）",
+                     frame);
+
+    Json update = Json::object();
+    update[kMessagesKey] = std::move(op);
+    Json results = Json::object();
+    results[node_id] = frame;
+    update[kResultsKey] = std::move(results);
+    return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+// ---- wfr-㊵：refine_history（按规则精简/裁剪）----
+
+void c_refine_history(NodeIR const& n, NodeType::CompileContext& ctx) {
+  // 编译期快照"工具名 → 类别"（纯数据交给 agent 层的规则引擎；agent 不 include tool 头）
+  std::unordered_map<std::string, std::string> tool_category;
+  if (ctx.registry != nullptr)
+    for (tool::ToolSpec const& sp : ctx.registry->all()) tool_category[sp.name] = sp.category;
+
+  struct Specs {
+    std::string preset, clip_scope, clip_mode, tool_budget, ai_budget, artifact_dir;
+    std::vector<std::string> rules, categories;
+  };
+  std::string const node_id = n.id;
+  Specs const sp{n.preset,      n.clip_scope, n.clip_mode,     n.tool_budget,
+                 n.ai_budget,   n.artifact_dir, n.rules,        n.categories};
+  auto sink_p = ctx.sink;
+
+  ctx.graph.add_node(n.id, [node_id, sp, tool_category, sink_p](Json const& state,
+                                                               NodeContext& nc) {
+    std::vector<message::Message> const msgs = messages_from_state(state);
+
+    std::string const preset = resolve_enum_param(sp.preset, state, node_id, "preset",
+                                                  {"minimal", "lean", "aggressive", "clip"}, "");
+    std::string const scope = resolve_enum_param(sp.clip_scope, state, node_id, "clip_scope",
+                                                 {"tool_results", "ai_text", "both"}, "both");
+    std::string const mode = resolve_enum_param(sp.clip_mode, state, node_id, "clip_mode",
+                                                {"truncate", "artifact"}, "truncate");
+
+    // 规则集合 = preset ∪ 静态 rules ∪ 运行期 categories（展开成 drop_category:<c>）
+    std::vector<std::string> extra = sp.rules;
+    for (std::string const& cspec : sp.categories) {
+      std::string const t = resolve_text_parameter(cspec, state);
+      if (t.empty() || t == "null") continue;
+      std::string cur;
+      for (char const ch : t + ",") {
+        if (ch == ',' || ch == ' ' || ch == '\t') {
+          if (!cur.empty()) extra.push_back("drop_category:" + cur);
+          cur.clear();
+        } else {
+          cur.push_back(ch);
+        }
+      }
+    }
+    std::vector<std::string> const rules = agent::resolve_history_rules(preset, extra, scope);
+
+    agent::HistoryRuleParams p;
+    p.tool_budget = resolve_size_param(sp.tool_budget, state, node_id, "tool_budget", 200);
+    p.ai_budget = resolve_size_param(sp.ai_budget, state, node_id, "ai_budget", 400);
+    p.artifact_mode = (mode == "artifact");
+    p.tool_category = tool_category;
+    std::string dir = resolve_text_parameter(sp.artifact_dir, state);
+    if (dir == "null") dir.clear();
+    if (dir.empty()) {
+      // 缺省落在工作区的 .wfr/artifacts 下（与其它运行态产物同处）
+      Json const ws = resolve_parameter(Json("@config.workspace"), state);
+      if (ws.is_string() && !ws.get<std::string>().empty()) dir = ws.get<std::string>() + "/.wfr/artifacts";
+      else dir = ".wfr/artifacts";
+    }
+    p.artifact_dir = dir;
+
+    agent::HistoryRulePlan const plan = agent::plan_history_rules(msgs, rules, p);
+
+    Json stats = agent::history_rule_stats_json(plan.stats);
+    stats["action"] = (plan.drop.empty() && plan.rewrite.empty()) ? "noop" : "transformed";
+    stats["clip_mode"] = mode;
+    stats["clip_scope"] = scope;
+    std::string rules_json;
+    for (std::string const& r : rules) rules_json += (rules_json.empty() ? "" : ",") + r;
+    stats["rules"] = rules_json;
+
+    sink_p->log_node(nc.node_name, "info",
+                     "refine_history: " + std::to_string(plan.stats.before_msgs) + " → " +
+                         std::to_string(plan.stats.after_msgs) + " 条（规则 " + rules_json + "）",
+                     stats);
+
+    Json results = Json::object();
+    results[node_id] = stats;
+    if (plan.drop.empty() && plan.rewrite.empty()) {
+      return Command::with_update(Json{{kResultsKey, std::move(results)}});
+    }
+
+    Json drop = Json::array();
+    for (std::size_t const i : plan.drop) drop.push_back(static_cast<long>(i));
+    Json rewrite = Json::array();
+    for (auto const& [i, m] : plan.rewrite)
+      rewrite.push_back(Json{{"index", static_cast<long>(i)}, {"message", Json(m)}});
+
+    Json op = Json{{"op", "transform"},
+                   {"base_size", static_cast<long>(msgs.size())},
+                   {"drop", std::move(drop)},
+                   {"rewrite", std::move(rewrite)}};
+    Json update = Json::object();
+    update[kMessagesKey] = std::move(op);
+    update[kResultsKey] = std::move(results);
+    return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 void c_load_history(NodeIR const& n, NodeType::CompileContext& ctx) {
   Json const path_expr = Json(n.path);
   Json const sess_expr = Json(n.session);
@@ -891,6 +1312,83 @@ std::vector<NodeType> const& builtin_node_types() {
          node["next"] = n.next;
        },
        [](NodeIR const& n) { return "run_tools → " + n.next; }, v_run_tools, c_run_tools, e_next, t_none},
+
+      // ---------------- summarize（wfr-㊵）----------------
+      // 把较早的一段历史折叠成一条 LLM 摘要；产出 fold op 落日志（重跑不重新摘要）。
+      {NodeKind::Summarize, "summarize",
+       [](Json const& n) { return kind_is(n, "summarize"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "model", out.model);
+         get_str(out, node, "system_prompt", out.system_prompt);
+         get_str(out, node, "when", out.when);
+         get_str(out, node, "max_msgs", out.max_msgs);
+         get_str(out, node, "max_tokens", out.max_tokens);
+         get_str(out, node, "keep_last", out.keep_last);
+         get_str(out, node, "style", out.style);
+         get_str(out, node, "summary_role", out.summary_role);
+         get_str(out, node, "on_fail", out.on_fail);
+         get_str(out, node, "next", out.next);
+         get_str(out, node, "reasoning_echo", out.reasoning_echo);
+         if (node.contains("params") && !node["params"].is_null()) out.model_params = node["params"];
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "summarize";
+         node["model"] = n.model;
+         if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+         for (auto const& [k, v] : std::initializer_list<std::pair<char const*, std::string const*>>{
+                  {"when", &n.when}, {"max_msgs", &n.max_msgs}, {"max_tokens", &n.max_tokens},
+                  {"keep_last", &n.keep_last}, {"style", &n.style},
+                  {"summary_role", &n.summary_role}, {"on_fail", &n.on_fail},
+                  {"reasoning_echo", &n.reasoning_echo}})
+           if (!v->empty()) node[k] = *v;
+         if (!n.model_params.empty()) node["params"] = n.model_params;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         return "summarize " + n.model + " when=" + (n.when.empty() ? "messages" : n.when) +
+                " style=" + (n.style.empty() ? "concise" : n.style) +
+                " keep=" + (n.keep_last.empty() ? "6" : n.keep_last) + " → " + n.next;
+       }, v_summarize, c_summarize, e_next, t_summarize},
+
+      // ---------------- refine_history（wfr-㊵）----------------
+      // 按规则精简/裁剪历史；产出 transform op 落日志。
+      {NodeKind::RefineHistory, "refine_history",
+       [](Json const& n) { return kind_is(n, "refine_history"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "preset", out.preset);
+         get_str(out, node, "clip_scope", out.clip_scope);
+         get_str(out, node, "clip_mode", out.clip_mode);
+         get_str(out, node, "tool_budget", out.tool_budget);
+         get_str(out, node, "ai_budget", out.ai_budget);
+         get_str(out, node, "artifact_dir", out.artifact_dir);
+         get_str(out, node, "next", out.next);
+         if (node.contains("rules") && node["rules"].is_array())
+           for (Json const& r : node["rules"])
+             if (r.is_string()) out.rules.push_back(r.get<std::string>());
+         if (node.contains("categories"))
+           for (Json const& c : node["categories"].is_array()
+                                    ? node["categories"]
+                                    : Json::array({node["categories"]}))
+             if (c.is_string()) out.categories.push_back(c.get<std::string>());
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "refine_history";
+         for (auto const& [k, v] : std::initializer_list<std::pair<char const*, std::string const*>>{
+                  {"preset", &n.preset}, {"clip_scope", &n.clip_scope},
+                  {"clip_mode", &n.clip_mode}, {"tool_budget", &n.tool_budget},
+                  {"ai_budget", &n.ai_budget}, {"artifact_dir", &n.artifact_dir}})
+           if (!v->empty()) node[k] = *v;
+         if (!n.rules.empty()) node["rules"] = n.rules;
+         if (!n.categories.empty()) node["categories"] = n.categories;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         std::string d = "refine_history";
+         if (!n.preset.empty()) d += " preset=" + n.preset;
+         if (!n.rules.empty()) d += " rules=" + std::to_string(n.rules.size());
+         if (!n.clip_mode.empty()) d += " clip=" + n.clip_mode;
+         return d + " → " + n.next;
+       }, v_refine_history, c_refine_history, e_next, t_refine_history},
 
       // ---------------- load_history（M12 / ④）----------------
       // history = 日志的投影（docs/12 §7）：不再有 save_history 节点。

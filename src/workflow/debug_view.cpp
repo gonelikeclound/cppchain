@@ -135,6 +135,8 @@ svg text{font:12px system-ui}
 .n.kind-load_history{fill:#e2e3fb;stroke:#5b6ee1}
 .n.kind-echo{fill:#fde7d9;stroke:#f9672a}
 .n.kind-loop{fill:#e6dcf7;stroke:#6a1b9a;stroke-width:2}
+.n.kind-summarize{fill:#d7f0f5;stroke:#00838f;stroke-width:2}
+.n.kind-refine_history{fill:#e6f4d7;stroke:#558b2f;stroke-width:2}
 .n.kind-input,.n.kind-end{stroke-dasharray:5 3}
 .n.active{stroke:var(--acc);stroke-width:2.5;filter:drop-shadow(0 0 3px #1a73e833)}
 .n.hit{stroke:#d93025;stroke-width:2.5}
@@ -357,7 +359,8 @@ const KIND_COLORS={
   model:{f:'#e8e0f4',s:'#7620bb'}, route:{f:'#d9f2dc',s:'#188038'},
   run_tools:{f:'#cdeee7',s:'#0d7a6f'}, load_history:{f:'#e2e3fb',s:'#5b6ee1'},
   input:{f:'#e7e9ec',s:'#5f6368'}, end:{f:'#f0f0f0',s:'#3c4043'},
-  echo:{f:'#fde7d9',s:'#f9672a'}, loop:{f:'#e6dcf7',s:'#6a1b9a'}
+  echo:{f:'#fde7d9',s:'#f9672a'}, loop:{f:'#e6dcf7',s:'#6a1b9a'},
+  summarize:{f:'#d7f0f5',s:'#00838f'}, refine_history:{f:'#e6f4d7',s:'#558b2f'}
 };
 function kindColor(k){ return KIND_COLORS[k]||{f:'#f1f3f4',s:'#9aa0a6'}; }
 function renderLegend(){

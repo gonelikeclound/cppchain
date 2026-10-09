@@ -38,6 +38,11 @@ struct UsageMetadata {
 
 // ---- Message ----
 
+// 历史摘要消息的标记（wfr-㊵）。放在 additional_kwargs 里，序列化会原样往返。
+// **单一来源**：state 层的 fold 归约靠它剥掉头部旧摘要（世代交替而不是堆叠），
+// summarize 节点靠它判断"已经折叠过、还需不需要再折"。
+inline constexpr char kSummaryMarker[] = "cppchain_summary";
+
 struct Message {
   Role type = Role::Human;
   std::vector<ContentBlock> content{};   // 纯文本也归一化为 TextBlock（见 serializer normalize）
@@ -81,6 +86,12 @@ struct Message {
     return out;
   }
 };
+
+// 该消息是不是历史摘要（见 kSummaryMarker）
+[[nodiscard]] inline bool is_summary_message(Message const& m) {
+  auto const it = m.additional_kwargs.find(kSummaryMarker);
+  return it != m.additional_kwargs.end() && it->is_boolean() && it->get<bool>();
+}
 
 // ---- 构造助手（让调用点更表达力） ----
 

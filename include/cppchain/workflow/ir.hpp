@@ -69,6 +69,9 @@ enum class NodeKind {
   // （save_history 已随 ④ 删除：history = 日志的投影，不再单独落盘）
   // ---- wfr-㉗：回显节点（屏之道回显 thinking/工具摘要，纯副作用不改 state）----
   Echo,
+  // ---- wfr-㊵：历史消息处理（见 02-arch-design/17）----
+  Summarize,      // 把较早的一段历史折叠成一条 LLM 摘要（产 fold op 落日志）
+  RefineHistory,  // 按规则精简/裁剪历史（产 transform op 落日志）
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -135,6 +138,26 @@ struct NodeIR {
   // 压缩是**投影的渲染期变换**：结果绝不落盘（回声抑制见 compiler.cpp），故不影响 replay。
   std::string history_mode;
   std::string history_budget;                // keep_evidence 的单条工具结果内联 token 预算（可选）
+
+  // Summarize 节点（wfr-㊵）：模型调一次，把较早的一段历史折成一条摘要。
+  // 下面这些都可以写成 `@config.*`（运行期解析：缺省回落、拼错硬错，同 wfr-㉙ 的手法）。
+  std::string when;          // off | messages | tokens | always（缺省 messages）
+  std::string max_msgs;      // when=messages 的阈值（条）
+  std::string max_tokens;    // when=tokens 的阈值
+  std::string keep_last;     // 折叠后保最近 N 条（缺省 6）
+  std::string style;         // concise | detailed | evidence（提示词风格，缺省 concise）
+  std::string summary_role;  // system | human | ai（摘要消息的角色，缺省 system）
+  std::string on_fail;       // skip | placeholder（LLM 失败怎么办，缺省 skip）
+
+  // RefineHistory 节点（wfr-㊵）：按规则精简/裁剪（规则见 agent/history.hpp 的规则表）
+  std::string preset;        // minimal | lean | aggressive | clip（缺省空 = 只用 rules）
+  std::string clip_scope;    // tool_results | ai_text | both（缺省 both）
+  std::string clip_mode;     // truncate | artifact（缺省 truncate）
+  std::string tool_budget;   // 单条工具结果的内联预算（缺省 200）
+  std::string ai_budget;     // 单条终态 AI 回答的预算（缺省 400）
+  std::string artifact_dir;  // clip_mode=artifact 时的落盘目录
+  std::vector<std::string> rules;       // 静态规则清单（与 preset 取并集）
+  std::vector<std::string> categories;  // drop_category 的类别（元素可为 @config.*，逗号分隔）
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

@@ -26,6 +26,11 @@
 //   VN10 M12 节点：model 组件名/tools 工具集名必须在注册表；route 的 on/cases 键走封闭词表，
 //        且 cases 必须覆盖全部 outcome 或显式给 default（禁止"漏一档静默走 else"）
 //   VN11 M12 history 节点：path/next 必填
+//   VN15 wfr-㊵ summarize 节点：model 组件存在、next 必填、when/style/summary_role/on_fail
+//        为字面量时走词表、阈值与条数为正整数
+//   VN16 wfr-㊵ refine_history 节点：preset/clip_scope/clip_mode 词表、规则名与类别词表、
+//        预算为正整数（类别词表在 tool 层，agent 层只校形状）
+//   VG10 wfr-㊵ 历史处理节点（summarize / refine_history）必须在 load_history 之后
 //   VN13 wfr-㉙ model 节点：params 必须是对象且不含请求体保留键（extra 合并是右胜）；
 //        reasoning_echo 为字面量时 ∈ {drop,tool_calls,always}（整串 @config 引用留给运行期）
 //   VN14 wfr-㉙ load_history 节点：mode 为字面量时 ∈ {full,drop_round,keep_evidence}；
@@ -431,12 +436,32 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       auto const load_i =
           first_of_in(sc, [](NodeIR const& n) { return n.kind == NodeKind::LoadHistory; });
       auto const use_i = first_of_in(sc, [](NodeIR const& n) {
-        return n.kind == NodeKind::Model || n.kind == NodeKind::RunTools;
+        return n.kind == NodeKind::Model || n.kind == NodeKind::RunTools ||
+               n.kind == NodeKind::Summarize || n.kind == NodeKind::RefineHistory;
       });
       if (load_i && use_i && *load_i > *use_i) {
         std::string const where = sc == nullptr ? std::string("顶层") : ("loop '" + sc->loop_id + "'");
         c.err("VG9", where + "：load_history 出现在消费 messages 的节点之后：历史加载了也没人用");
       }
+    }
+  }
+
+  // ---- VG10（wfr-㊵）：历史处理节点必须在 load_history 之后 ----
+  // summarize / refine_history 作用的正是"日志投影出来的历史"；放在 load_history 之前
+  // 它们看到的是空列表（无害但无意义，写出的 op 也与作者意图不符）—— 硬拒绝更清楚。
+  {
+    std::optional<std::size_t> load_at;
+    for (auto const& [np, _s] : c.flat)
+      if (np->kind == NodeKind::LoadHistory) {
+        auto const at = c.index.at(np->id);
+        if (!load_at || at < *load_at) load_at = at;
+      }
+    for (auto const& [np, _s] : c.flat) {
+      if (np->kind != NodeKind::Summarize && np->kind != NodeKind::RefineHistory) continue;
+      if (!load_at || c.index.at(np->id) < *load_at)
+        c.err("VG10", "节点 '" + np->id +
+                          "' 是历史处理节点，但它在 load_history 之前（历史还没投影出来，"
+                          "它无事可做）");
     }
   }
 
@@ -571,11 +596,13 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                                    target.kind == NodeKind::Model ||
                                    target.kind == NodeKind::RunTools ||
                                    target.kind == NodeKind::LoadHistory ||
-                                   target.kind == NodeKind::Route;
+                                   target.kind == NodeKind::Route ||
+                                   target.kind == NodeKind::Summarize ||
+                                   target.kind == NodeKind::RefineHistory;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
                                "' 指向非 result 节点（仅 tool / model / run_tools / "
-                               "load_history / route 发布 result）");
+                               "load_history / route / summarize / refine_history 发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");

@@ -74,13 +74,14 @@ Json as_array(Json const& v) {
 // 不分叉）。规则怎么算、边界怎么选，全在**发出 op 的节点**里（那层才有 token 估算、工具
 // 注册表与 LLM）；本层刻意不依赖它们（cppchain_state 只链 cppchain_message）。
 
-// 摘要消息：靠 additional_kwargs 的标记识别（与 summarize 节点共用的契约）。
+// 摘要消息：靠 additional_kwargs 的标记识别（标记常量与 summarize 节点共用，见
+// message.hpp 的 kSummaryMarker / is_summary_message）。
 // fold 会剥掉头部旧摘要，于是摘要"世代交替"而非层层堆叠。
 bool is_summary_message(Json const& msg) {
   if (!msg.is_object()) return false;
   auto const it = msg.find("additional_kwargs");
   if (it == msg.end() || !it->is_object()) return false;
-  auto const flag = it->find("cppchain_summary");
+  auto const flag = it->find(cppchain::message::kSummaryMarker);
   return flag != it->end() && flag->is_boolean() && flag->get<bool>();
 }
 
