@@ -1,0 +1,79 @@
+{
+  "id": "builtin_hist_clip",
+  "nodes": [
+    {
+      "id": "recall",
+      "kind": "load_history",
+      "path": "@config.workspace",
+      "session": "@config.session",
+      "mode": "@config.history_mode",
+      "budget": "@config.evidence_budget",
+      "next": "clip"
+    },
+    {
+      "id": "clip",
+      "kind": "refine_history",
+      "preset": "clip",
+      "clip_scope": "@config.clip_scope",
+      "clip_mode": "@config.clip_mode",
+      "tool_budget": "@config.clip_tool_budget",
+      "ai_budget": "@config.clip_ai_budget",
+      "artifact_dir": "@config.artifact_dir",
+      "next": "echo_clip"
+    },
+    {
+      "id": "echo_clip",
+      "kind": "echo",
+      "text": "✂️ 裁剪 $clip.result.action（$clip.result.clip_mode / $clip.result.clip_scope）· $clip.result.before_msgs → $clip.result.after_msgs 条 · $clip.result.before_tokens → $clip.result.after_tokens tok · 裁工具 $clip.result.rewritten_tools 裁回答 $clip.result.rewritten_ai · 落盘 $clip.result.artifacts_written",
+      "next": "loop"
+    },
+    {
+      "id": "loop",
+      "kind": "loop",
+      "max": 4,
+      "next": "_turn_end",
+      "body": [
+        {
+          "id": "think",
+          "kind": "model",
+          "model": "main",
+          "tools": "chat",
+          "reasoning_echo": "@config.reasoning_echo",
+          "params": {
+            "reasoning_effort": "@config.reasoning_effort"
+          },
+          "system_prompt": "你是 wfr 的智能助手，多轮续聊、回答简短直接。必要时调用工具再回答：天气用 get_weather（参数 city），网络信息用 web_search（参数 query）；回答给出的数值与工具结果一致，不要编造工具没有给出的数据。",
+          "next": "echo_think"
+        },
+        {
+          "id": "echo_think",
+          "kind": "echo",
+          "text": "💭 $think.result.thinking",
+          "next": "route"
+        },
+        {
+          "id": "route",
+          "kind": "route",
+          "on": "last_ai_outcome",
+          "cases": {
+            "tool_calls": "act",
+            "invalid_tool_calls": "_fail",
+            "text": "_turn_end"
+          },
+          "default": "_fail"
+        },
+        {
+          "id": "act",
+          "kind": "run_tools",
+          "next": "echo_tool"
+        },
+        {
+          "id": "echo_tool",
+          "kind": "echo",
+          "text": "🔧 $act.result.summary",
+          "next": "_continue"
+        }
+      ]
+    }
+  ]
+}
