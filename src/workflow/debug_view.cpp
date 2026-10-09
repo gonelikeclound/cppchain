@@ -411,14 +411,89 @@ function layout(){
   const maxL2=Math.max(0,...Object.values(layer));
   return {w:72+maxRow*(NODE_W+GAP)+NODE_W, h:60+(maxL2-topL+1)*LEVEL_Y};
 }
-/* ---------- SVG 绘制 v2：贝塞尔边（同行微拱/跨行等差）+ 回边弧线 + 类型配色 ---------- */
+/* ---------- SVG 绘制 v3：**正交圆角折线**（走行间隙带 / 两侧通道，不压节点）+ 类型配色 ---------- */
 const svg=document.getElementById('canvas');
 const NS='http://www.w3.org/2000/svg';
 function el(t){ return document.createElementNS(NS,t); }
 // 从中心 (cx,cy) 沿方向 (dx,dy) 到矩形节点边界交点（让箭头停在节点边界，不压住文字）
-function boxEdge(cx,cy,dx,dy){
-  const t=Math.min((NODE_W/2)/Math.abs(dx),(NODE_H/2)/Math.abs(dy));
-  return {x:cx+dx*t, y:cy+dy*t};
+
+/* ---------- 正交走线（圆角折线）----------
+   全部线段只落在两类位置之一：
+     · **行间隙带**（两行之间 y∈[rowBot,rowBot+LEVEL_Y-NODE_H] 的中线）—— 横向段走这里，
+       不可能压到任何节点框；
+     · **两侧通道**（所有节点框的左/右之外 26px）—— 跨多层的纵向段走这里。
+   于是"线与节点不重叠"是一条可证的性质，而不是靠调参凑出来的（页面上有测试守着）。 */
+const MID=(LEVEL_Y-NODE_H)/2;                 // 行边到间隙中线的距离
+function laneX(side){
+  let m = side==='right' ? -1e9 : 1e9;
+  ALLNODES.forEach(n=>{ const p=pos[n.id]; if(!p) return;
+    m = side==='right' ? Math.max(m, p.x+NODE_W) : Math.min(m, p.x); });
+  return side==='right' ? m+26 : m-26;
+}
+function routeEdge(s,t){
+  const A=pos[s], B=pos[t];
+  const ax=A.x+NODE_W/2, bx=B.x+NODE_W/2;
+  const aTop=A.y, aBot=A.y+NODE_H, bTop=B.y, bBot=B.y+NODE_H;
+  const ls=layer[s], lt=layer[t];
+  if(lt===ls){                                  // 同层：绕本行**下方**的间隙（不横穿本行的节点）
+    const g=aBot+MID;
+    return [{x:ax,y:aBot},{x:ax,y:g},{x:bx,y:g},{x:bx,y:bBot}];
+  }
+  if(lt>ls){
+    if(lt-ls===1){                              // 相邻层：下 → 横（两行之间的间隙）→ 下
+      const g=aBot+MID;
+      return [{x:ax,y:aBot},{x:ax,y:g},{x:bx,y:g},{x:bx,y:bTop}];
+    }
+    const L=laneX('right');                     // 跨多层：走右侧通道，不穿中间那些行
+    const g1=aBot+MID, g2=bTop-MID;
+    return [{x:ax,y:aBot},{x:ax,y:g1},{x:L,y:g1},{x:L,y:g2},{x:bx,y:g2},{x:bx,y:bTop}];
+  }
+  if(ls-lt===1){                                // 回边一层：上 → 横 → 上（进目标的下边）
+    const g=aTop-MID;
+    return [{x:ax,y:aTop},{x:ax,y:g},{x:bx,y:g},{x:bx,y:bBot}];
+  }
+  const L=laneX('left');                        // 回边多层：走左侧通道
+  const g1=aTop-MID, g2=bBot+MID;
+  return [{x:ax,y:aTop},{x:ax,y:g1},{x:L,y:g1},{x:L,y:g2},{x:bx,y:g2},{x:bx,y:bBot}];
+}
+// 折线 → 圆角路径（每个拐角用二次贝塞尔倒角，半径按相邻段长的一半夹住）
+function roundedPath(pts, r){
+  const p=[];
+  pts.forEach(q=>{ const l=p[p.length-1];
+    if(l && Math.abs(l.x-q.x)<0.01 && Math.abs(l.y-q.y)<0.01) return;
+    // 共线顶点也去掉：方向没变的拐点留着只会多出一条冗余命令
+    if(l && p.length>=2){
+      const m=p[p.length-2];
+      const sameX=Math.abs(m.x-l.x)<0.01 && Math.abs(l.x-q.x)<0.01;
+      const sameY=Math.abs(m.y-l.y)<0.01 && Math.abs(l.y-q.y)<0.01;
+      if(sameX||sameY){ p[p.length-1]=q; return; }
+    }
+    p.push(q); });
+  if(p.length<2) return '';
+  if(p.length===2) return 'M'+p[0].x+','+p[0].y+' L'+p[1].x+','+p[1].y;
+  let d='M'+p[0].x+','+p[0].y;
+  for(let i=1;i<p.length-1;++i){
+    const a=p[i-1], b=p[i], c=p[i+1];
+    const v1={x:b.x-a.x,y:b.y-a.y}, v2={x:c.x-b.x,y:c.y-b.y};
+    const l1=Math.abs(v1.x)+Math.abs(v1.y), l2=Math.abs(v2.x)+Math.abs(v2.y);
+    const rr=Math.min(r, l1/2, l2/2);
+    if(l1<0.01||l2<0.01||rr<1){ d+=' L'+b.x+','+b.y; continue; }
+    d+=' L'+(b.x-v1.x/l1*rr)+','+(b.y-v1.y/l1*rr)+
+       ' Q'+b.x+','+b.y+' '+(b.x+v2.x/l2*rr)+','+(b.y+v2.y/l2*rr);
+  }
+  const e=p[p.length-1];
+  return d+' L'+e.x+','+e.y;
+}
+// 标签/角标落点：取最长那段的中点，横向段往上偏一点
+function labelAt(pts){
+  let best=null;
+  for(let i=1;i<pts.length;++i){
+    const dx=pts[i].x-pts[i-1].x, dy=pts[i].y-pts[i-1].y;
+    const len=Math.abs(dx)+Math.abs(dy);
+    if(!best || len>best.len) best={len:len, x:(pts[i].x+pts[i-1].x)/2, y:(pts[i].y+pts[i-1].y)/2,
+                                    horiz:Math.abs(dx)>=Math.abs(dy)};
+  }
+  return {x:best.x, y:best.y - (best.horiz?5:0)};
 }
 const EDGE_EL=[];   // 每条边画出来的元素（按轮次标「走过」用）
 function renderSVG(){
@@ -451,20 +526,11 @@ function renderSVG(){
       dot.setAttribute('class',(/fail/.test(String(e.to))||e.label==='fail')?'eterm fail':'eterm');
       svg.appendChild(dot);
     } else {
-      // 中心到中心的三次贝塞尔：两个控制点都落在两中心之间的中层（连线从中间穿过）
-      const cb={x:b.x+NODE_W/2, y:b.y+NODE_H/2};
-      const dx=cb.x-ca.x, dy=cb.y-ca.y;
-      const s=boxEdge(ca.x,ca.y,dx,dy), t=boxEdge(cb.x,cb.y,-dx,-dy);
-      const my=(ca.y+cb.y)/2, mx=(s.x+t.x)/2;
-      if (dy < 0) {
-        // 回边（向上）→ 绕到左侧弧线：不沿主线列走，避免与同列的竖直前向边完全重叠
-        const bx = Math.min(s.x, t.x) - NODE_W * 0.55 - 4;
-        d='M'+s.x+','+s.y+' C'+bx+','+(my-32)+' '+bx+','+(my+32)+' '+t.x+','+t.y;
-        lx=bx; ly=my-12;
-      } else {
-        d='M'+s.x+','+s.y+' C'+s.x+','+my+' '+t.x+','+my+' '+t.x+','+t.y;
-        lx=mx; ly=my-8;
-      }
+      // 正交圆角折线：走行间隙带 / 两侧通道（见 routeEdge 的说明）
+      const pts=routeEdge(e.from, e.to);
+      d=roundedPath(pts, 8);
+      const la=labelAt(pts);
+      lx=la.x; ly=la.y;
     }
     const cls=e.forward ? (e.terminal?'e term':'e') : 'e goto';
     const p=el('path'); p.setAttribute('d',d); p.setAttribute('class',cls);

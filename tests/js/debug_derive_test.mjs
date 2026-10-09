@@ -80,12 +80,12 @@ function assertParses(script) {
   }
 }
 
-function runPage(records, extraGlobals = {}) {
+function runPage(records, extraGlobals = {}, graph = GRAPH) {
   const src = fs.readFileSync(path.join(ROOT, 'src/workflow/debug_view.cpp'), 'utf8');
   const a = src.indexOf('R"html(') + 'R"html('.length;
   const b = src.indexOf(')html"');
   let tpl = src.slice(a, b);
-  const payload = { graph: GRAPH, ir: { id: 'wf_test' }, records, trimmed_node_logs: false };
+  const payload = { graph, ir: { id: 'wf_test' }, records, trimmed_node_logs: false };
   tpl = tpl.replace('__DATA__', JSON.stringify(payload)).replace(/__IR_ID__/g, 'wf_test');
   const script = tpl.slice(tpl.indexOf('<script>') + 8, tpl.lastIndexOf('</script>'));
   assertParses(script);
@@ -102,6 +102,7 @@ function runPage(records, extraGlobals = {}) {
     setTimeout: () => {}, Promise, parseFloat, parseInt,
   }, extraGlobals));
   vm.runInContext(script, ctx, { filename: 'debug_view.js' });
+  ctx.__cache = cache;
   return ctx;
 }
 
@@ -257,6 +258,61 @@ function runPage(records, extraGlobals = {}) {
   const hint = vm.runInContext("document.getElementById('urlhint').textContent", bad);
   eq(hint.includes('HTTP 500'), true, '提示里带 HTTP 状态');
   eq(hint.includes('CORS'), true, '提示里说明 CORS 这一常见原因');
+}
+
+// ---- 用例 9：正交走线不穿节点（跨层走两侧通道、横向段只走行间隙）----
+// 夹具刻意构造出全部五种走线：相邻层 / 同层 / 跨层前向（到终端）/ 单层回边 / 跨层回边。
+{
+  const N = (id) => ({ id, kind: 'tool', text: '', def: {} });
+  const E = (from, to, forward = true, terminal = false) =>
+    ({ from, to, label: 'next', forward, terminal });
+  const g = {
+    nodes: [N('a'), N('b'), N('c'), N('d'), N('e')],
+    edges: [
+      E('a', 'b'), E('a', 'c'),            // b、c 同层
+      E('b', 'd'), E('c', 'e'),            // d、e 同层（下一层）
+      E('d', 'e'),                         // ★ 同层边
+      E('a', '_turn_end', true, true),     // ★ 跨层前向（a 在第 0 层，终端在最底层）
+      E('d', 'c', false),                  // ★ 单层回边
+      E('e', 'a', false),                  // ★ 跨层回边
+    ],
+  };
+  const ctx = runPage([], {}, g);
+  const pos = vm.runInContext('pos', ctx);
+  const W = vm.runInContext('NODE_W', ctx), H = vm.runInContext('NODE_H', ctx);
+  const svg = ctx.__cache['canvas'];
+  const paths = svg.children.filter(c => c.tagName === 'path')
+                            .map(c => c.getAttribute('d')).filter(Boolean);
+  eq(paths.length > 0, true, '应该有边被画出来');
+
+  const verts = (d) => {
+    const ns = (d.match(/-?\d+(?:\.\d+)?/g) || []).map(Number), out = [];
+    for (let i = 0; i + 1 < ns.length; i += 2) out.push({ x: ns[i], y: ns[i + 1] });
+    return out;   // Q 的控制点就是拐角顶点，取它做折线顶点即可（贝塞尔必在该折线围成的区域内）
+  };
+  const boxes = Object.entries(pos).map(([id, p]) =>
+    ({ id, x1: p.x, y1: p.y, x2: p.x + W, y2: p.y + H }));
+  const EPS = 0.5;   // 起止点贴在框边上，不算"穿"
+  const crosses = (s, b) => {
+    const x1 = b.x1 + EPS, y1 = b.y1 + EPS, x2 = b.x2 - EPS, y2 = b.y2 - EPS;
+    if (x2 <= x1 || y2 <= y1) return false;
+    const lo = { x: Math.min(s.a.x, s.b.x), y: Math.min(s.a.y, s.b.y) };
+    const hi = { x: Math.max(s.a.x, s.b.x), y: Math.max(s.a.y, s.b.y) };
+    return !(hi.x <= x1 || lo.x >= x2 || hi.y <= y1 || lo.y >= y2);
+  };
+  let bad = 0;
+  paths.forEach((d, pi) => {
+    const v = verts(d);
+    for (let i = 1; i < v.length; ++i) {
+      const s = { a: v[i - 1], b: v[i] };
+      boxes.forEach(b => { if (crosses(s, b)) { ++bad;
+        console.log(`      边#${pi} ${JSON.stringify(s.a)}→${JSON.stringify(s.b)} 穿过 ${b.id}`); } });
+    }
+  });
+  eq(bad, 0, '任何线段都不应穿过节点框');
+  // 圆角折线：路径里应出现 Q（倒角），且不该再有 C（三次贝塞尔曲线段）
+  eq(paths.some(d => d.includes(' Q')), true, '拐角应有圆角');
+  eq(paths.some(d => d.includes(' C')), false, '不该再用曲线');
 }
 
 // ---- 用例 4：空记录 ----
