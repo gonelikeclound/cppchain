@@ -110,6 +110,10 @@ IR ──debug_view_graph──▶ {nodes, edges}       边=NodeType::edges()，
 > 选择器 bug（run 无会话前缀 → 每个 r-N 被当成独立会话）也顺手修了。详见
 > [16](16-loop节点与迭代分组设计.md) §5。
 
+> **wfr-㊵ 追加**：内置 workflow 多了三个（`hist_sum` / `hist_rules` / `hist_clip`，见
+> [17](17-历史消息处理机制设计.md)）；调试台图例新增两种节点配色（`summarize` 青、
+> `refine_history` 橄榄绿），点开能看到它们写进日志的 **op 原文**（`keep_last`/`drop`/`rewrite`）。
+
 ## 5. 验收
 
 - **全仓 449 测试全绿、clean-first 零告警**；新增项（wfr 相关单测）：

@@ -29,6 +29,7 @@
 | [13](13-M10图运行时补全落地与验收记录.md) | M10 图运行时补全落地与验收（Streaming / Interrupt / Send / 时间旅行） | 🟢 全仓 422 全绿 + 4 离线 demo |
 | [14](14-wfr-chat2思考历史对比落地与验收记录.md) | wfr-chat2 思考历史对比（历史三档压缩 + reasoning 回传 / 参数透传开关） | 🟢 495 全绿 + 真机三档对照 |
 | [15](15-loop节点落地与label-goto迁移记录.md) | loop 节点落地与 label/goto 迁移（IR/validator/compiler/调试台/import/生成器 + 四个 workflow） | 🟢 517 全绿 + 真机 |
+| [16](16-历史消息处理专题.md) | **历史消息处理专题**：摘要 / 精简 / 长内容裁剪 —— op 落日志、规则引擎、三个内置 workflow | 🟢 570 全绿 + 真机三方向对照 |
 
 ## 文件列表
 
@@ -49,3 +50,4 @@
 | 13 | [13-M10图运行时补全落地与验收记录.md](13-M10图运行时补全落地与验收记录.md) | **M10 图运行时补全**：Streaming / Interrupt（真 HITL 原语）/ Send 动态 fan-out / 时间旅行；checkpoint 包队列契约 | 🟢 全仓 422 全绿 + 4 离线 demo |
 | 14 | [14-wfr-chat2思考历史对比落地与验收记录.md](14-wfr-chat2思考历史对比落地与验收记录.md) | **wfr-㉙**：思考模型的历史形态三档对照（full / drop_round / keep_evidence）+ `reasoning_content` 回传与厂商参数透传开关；含协议问句的探针答案 | 🟢 495 全绿 + 真机三档对照 |
 | 15 | [15-loop节点落地与label-goto迁移记录.md](15-loop节点落地与label-goto迁移记录.md) | **wfr-㉚**：循环从 label+goto 换成 loop 容器；`on_max` 分离出口；调试台按迭代分组；含四个被测试逼出来的真 bug 复盘 | 🟢 517 全绿 + 真机 |
+| 16 | [16-历史消息处理专题.md](16-历史消息处理专题.md) | **历史消息处理**：可持久化的历史摘要（op 落日志→重跑不重算）/ 规则化精简 / 长内容裁剪；3 个内置 workflow | 🟢 570 全绿 + 真机对照 |
