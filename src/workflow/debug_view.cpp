@@ -60,171 +60,22 @@ Json debug_view_graph(WorkflowIR const& ir) {
   return Json{{"nodes", std::move(nodes)}, {"edges", std::move(edges)}};
 }
 
-Json debug_view_logs(std::vector<Json> const& records, WorkflowIR const& ir) {
-  // 第一遍：逐条重放 loop_counts，记下每条**之后**（含它自己的 update）的快照 ——
-  // 后面的迭代号判定要用它。
-  std::vector<Json> after;
-  after.reserve(records.size());
-  Json loop = Json::object();
-  for (Json const& r : records) {
-    if (auto const it = r.find("update"); it != r.end() && it->is_object()) {
-      if (auto const lc = it->find("loop_counts"); lc != it->end() && lc->is_object())
-        for (auto k = lc->begin(); k != lc->end(); ++k) loop[k.key()] = k.value();
-    }
-    after.push_back(loop);
-  }
-
-  // 节点归属：body 节点 → 所属 loop id；loop 节点头 → 它自己（节点头不带 `loop` 字段）。
-  auto const owner = loop_owner(ir);
-  std::unordered_map<std::string, bool> is_head;
-  for_each_node(ir, [&](NodeIR const& n, LoopScope const*) {
-    if (n.kind == NodeKind::Loop) is_head[n.id] = true;
-    return true;
-  });
-
-  // 某条记录属于 loop L 的第几轮。
-  auto iter_of = [&](std::size_t i, std::string const& L) -> std::optional<long> {
-    std::string const node = records[i].value("node", "");
-    if (is_head.count(node) != 0) {
-      // 节点头：enter 在自增之前、exit 才是那次自增 → 取"此后第一次自增后的值"，
-      // 于是 enter/exit 这对记录都归到第 N 轮；跑满后的最后一次判定没有自增 →
-      // 回落到快照值（= max，归到第 max 轮，作为那一轮的收尾）。
-      for (std::size_t j = i; j < records.size(); ++j) {
-        if (auto const it = records[j].find("update"); it != records[j].end() && it->is_object())
-          if (auto const lc = it->find("loop_counts"); lc != it->end() && lc->is_object())
-            if (lc->contains(L) && (*lc)[L].is_number()) return (*lc)[L].get<long>();
-      }
-    }
-    if (after[i].contains(L) && after[i][L].is_number()) return after[i][L].get<long>();
-    // 兜底（还没进过循环）：向后取第一个已定义值
-    for (std::size_t j = i; j < records.size(); ++j)
-      if (after[j].contains(L) && after[j][L].is_number()) return after[j][L].get<long>();
-    return std::nullopt;
-  };
-
-  // 每条出边的目标名（原始写法，与 debug_view_graph 导出的 to 对齐）——用来把"最后一个
-  // 执行节点"的收尾边也标出来（终端边没有 enter 记录，光靠相邻 enter 推不出来）。
-  std::unordered_map<std::string, std::vector<std::string>> out_targets;
-  for_each_node(ir, [&](NodeIR const& n, LoopScope const* scope) {
-    NodeType const* t = node_type_of_name(type_name_of(n));
-    if (t == nullptr || !t->edges) return true;
-    for (NodeType::Edge const& e : t->edges(n)) {
-      // 与 debug_view_graph 同一套就地解析：_continue → loop 节点头、_break → loop 的 next
-      std::string to = e.target;
-      if (scope != nullptr && e.target == kContinueName) to = scope->loop_id;
-      else if (scope != nullptr && e.target == kBreakName) to = scope->exit_target;
-      out_targets[n.id].push_back(std::move(to));
-    }
-    return true;
-  });
-
-  std::vector<std::string> order;
-  std::map<std::string, Json> by_run;
-  std::map<std::string, std::vector<std::pair<std::string, std::string>>> run_edges;  // run → 有序的 (from,to)
-  std::map<std::string, std::string> run_last;                                        // run → 上一个执行节点
-  for (std::size_t i = 0; i < records.size(); ++i) {
-    Json const& r = records[i];
-    std::string run = r.value("run", "");
-    std::string const key = run.empty() ? "?" : run;
-    if (by_run.find(key) == by_run.end()) order.push_back(key);
-    Json rec = r;
-    rec["loop"] = after[i];  // 该时刻 loop_counts 快照（前端"循环分组"页签用）
-    // 归属：body 节点看 owner；loop 节点头看它自己
-    std::string const node = r.value("node", "");
-    std::string lid;
-    if (auto const it = owner.find(node); it != owner.end()) lid = it->second;
-    else if (is_head.count(node) != 0) lid = node;
-    if (!lid.empty()) {
-      if (auto const n = iter_of(i, lid)) {
-        rec["loop_id"] = lid;
-        rec["iter"] = *n;
-      }
-    }
-    by_run[key].push_back(std::move(rec));
-
-    // 边使用统计：引擎的 enter 序列里，相邻两个节点 = 走了一条边（含 __input__ → 首节点）。
-    // 这是**运行期真实走的路**，与静态图上的全部边相对照 —— 调试时最想知道的就是这个。
-    if (r.value("source", "") == "engine" && r.value("phase", "") == "enter") {
-      std::string const cur = r.value("node", "");
-      if (!cur.empty()) {
-        auto const it = run_last.find(key);
-        if (it != run_last.end() && it->second != cur) run_edges[key].emplace_back(it->second, cur);
-        run_last[key] = cur;  // 首个执行节点只记起点，不产生边
-      }
-    }
-  }
-
-  // 收尾边：终端目标（_turn_end/_fail/__end__）不产生 enter 记录，靠相邻 enter 推不出来。
-  // 两个来源，都只在"明确"时才标：
-  //   ① 最后一个执行节点的 exit update 里发布了 target（route 就是这么发布的）→ 直接采信；
-  //   ② 该节点在图上只有**一条** terminal 出边，且本轮最后一条记录是成功 exit → 必然是它。
-  for (std::string const& k : order) {
-    auto& seq = run_edges[k];
-    auto const lit = run_last.find(k);
-    if (lit == run_last.end()) continue;
-    std::string const last = lit->second;
-    auto const ot = out_targets.find(last);
-    if (ot == out_targets.end()) continue;
-    auto const is_term = [](std::string const& t) {
-      return t == "__end__" || t == "__fail__" || t == "_turn_end" || t == "_fail";
-    };
-    std::string picked;
-    for (Json const& rec : by_run[k])
-      if (rec.value("source", "") == "engine" && rec.value("phase", "") == "exit" &&
-          rec.value("node", "") == last)
-        if (auto const u = rec.find("update"); u != rec.end() && u->is_object())
-          if (auto const rs = u->find(kResultsKey); rs != u->end() && rs->is_object())
-            if (auto const f = rs->find(last); f != rs->end() && f->is_object())
-              if (auto const t = f->find("target"); t != f->end() && t->is_string())
-                picked = t->get<std::string>();
-    if (picked.empty()) {
-      int terms = 0;
-      for (std::string const& t : ot->second)
-        if (is_term(t)) {
-          ++terms;
-          picked = t;
-        }
-      if (terms != 1) continue;  // 多条终端边且没发布 target → 不猜
-      bool const ended_ok = !by_run[k].empty() &&
-                            by_run[k].back().value("source", "") == "engine" &&
-                            by_run[k].back().value("phase", "") == "exit";
-      if (!ended_ok) continue;
-    }
-    for (std::string const& t : ot->second)
-      if (t == picked) {
-        seq.emplace_back(last, picked);
-        break;
-      }
-  }
-
-  Json out = Json::array();
-  for (std::string const& k : order) {
-    // 折叠成 {from,to,count}
-    Json uses = Json::array();
-    std::map<std::pair<std::string, std::string>, long> agg;
-    for (auto const& e : run_edges[k]) agg[e] += 1;
-    for (auto const& [pair, cnt] : agg)
-      uses.push_back(Json{{"from", pair.first}, {"to", pair.second}, {"count", cnt}});
-    out.push_back(Json{{"run", k}, {"records", by_run[k]}, {"edges", std::move(uses)}});
-  }
-  return out;
-}
-
 Json build_debug_payload(WorkflowIR const& ir, std::vector<Json> const& records) {
-  Json runs = debug_view_logs(records, ir);
+  // payload 里**只放原始记录**：分组 / loop 迭代号 / 边使用这些推导搬到页面里的 JS 了
+  //（wfr-㉟）。因为"把日志文件拖进页面"这条路径必须在浏览器里推导 —— 一份实现同时服务
+  // 静态导出与拖入，没有第二份口径。
+  Json recs = Json::array();
   bool trimmed = false;
-  if (records.size() > 20000) {  // 超大会话：裁掉节点诊断，保结构事件
-    for (Json& run : runs) {
-      Json keep = Json::array();
-      for (Json const& rec : run["records"])
-        if (rec.value("source", "") != "node") keep.push_back(rec);
-      run["records"] = std::move(keep);
+  for (Json const& r : records) {
+    if (records.size() > 20000 && r.value("source", "") == "node") {  // 超大会话：裁节点诊断
+      trimmed = true;
+      continue;
     }
-    trimmed = true;
+    recs.push_back(r);
   }
   return Json{{"graph", debug_view_graph(ir)},
               {"ir", Json{{"id", ir.id}}},
-              {"runs", std::move(runs)},
+              {"records", std::move(recs)},
               {"trimmed_node_logs", trimmed}};
 }
 
@@ -310,6 +161,11 @@ path.e.term{fill:none;stroke:#b0b3b8;stroke-width:1.2;stroke-dasharray:5 4}
 .loopit{padding:2px 6px;border:1px solid #ccc;border-radius:4px;margin:2px 2px 2px 0;display:inline-block;cursor:pointer;background:#fff}
 .loopit.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 .small{color:#888;font:11px}
+.drop{margin:2px 0 6px;padding:8px 6px;border:1.5px dashed #b9c2cc;border-radius:6px;text-align:center;
+  font-size:11.5px;color:#5f6368;cursor:pointer;background:#fafbfc}
+.drop:hover{background:var(--hl)}
+.drop.over{border-color:var(--acc);background:#e8f0fe;color:var(--acc)}
+.drop.err{border-color:#d93025;background:#fdecea;color:#d93025}
 /* ---- 日志树：run 轮 → loop 迭代 → 节点 → 记录 ---- */
 #loglist{flex:1 1 auto;overflow:auto;margin-top:4px;min-height:0}
 #sh2{flex:none;height:6px;border-top:1px solid var(--e);margin-top:6px;cursor:row-resize}
@@ -356,6 +212,8 @@ details.node>.rec:first-of-type{border-top:none}
 <h1>__IR_ID__</h1>
 <div id="trim" class="small" style="display:none">⚠ 记录过多，已裁掉节点诊断</div>
 <h2>会话 / 轮次（日志区只显示所选 run）</h2>
+<div id="drop" class="drop">把 .log.jsonl 拖到这里<br><span class="small">或点击选择多个文件（可反复追加）</span>
+  <input id="filepick" type="file" multiple accept=".jsonl,.json,.log" style="display:none"></div>
 <select id="sessSel"></select>
 <select id="runSel"></select>
 <h2>节点（导航）</h2><div id="nodelist"></div>
@@ -378,8 +236,99 @@ details.node>.rec:first-of-type{border-top:none}
 </section>
 <script>
 const P = __DATA__;
-const G = P.graph, RUNS = P.runs;
+const G = P.graph;
+let RUNS = [];   // 由 P.records 推导（见 deriveRuns）；拖入日志后会重建
 const NODES = {}; G.nodes.forEach(n => NODES[n.id] = n);
+
+/* ---------- 从**原始会话日志**推导运行视图 ----------
+   这是唯一的一份实现：原先在 C++（debug_view_logs），wfr-㉟ 搬到页面里 —— 因为"把日志
+   文件拖进页面"这条路径必须在浏览器里推导，一份实现同时服务静态导出与拖入，没有第二份口径。
+   推导四件事：① 逐条 loop_counts 快照 ② 每条记录的 loop 归属与迭代号 ③ 本轮走过的边与次数
+   ④ 按 run 分组。 */
+function deriveRuns(records){
+  const isHead={}, owner={};
+  G.nodes.forEach(n=>{ if(n.kind==='loop') isHead[n.id]=true; if(n.loop) owner[n.id]=n.loop; });
+  const outs={};
+  G.edges.forEach(e=>{ (outs[e.from]=outs[e.from]||[]).push(e.to); });
+  const num=v=>(typeof v==='number' && isFinite(v)) ? v : null;
+  const lcOf=r=>{ const u=r.update; return (u && typeof u==='object' && u.loop_counts &&
+                    typeof u.loop_counts==='object') ? u.loop_counts : null; };
+
+  // ① 逐条快照（重放 update.loop_counts，右胜左）
+  const after=[]; const loop={};
+  records.forEach(r=>{
+    const lc=lcOf(r);
+    if(lc) Object.keys(lc).forEach(k=>{ loop[k]=lc[k]; });
+    after.push(Object.assign({}, loop));
+  });
+
+  // ② 迭代号。loop 节点头特殊：它的 enter 在自增**之前**、exit 才是那次自增 ——
+  //    所以对节点头取"此后第一次自增后的值"，enter/exit 这对记录就都落在第 N 轮。
+  const iterOf=(i,L)=>{
+    const node=records[i].node||'';
+    if(isHead[node]){
+      for(let j=i;j<records.length;++j){
+        const lc=lcOf(records[j]); const v=lc?num(lc[L]):null;
+        if(v!==null) return v;
+      }
+    }
+    const v1=num((after[i]||{})[L]); if(v1!==null) return v1;
+    for(let j=i;j<records.length;++j){ const v=num((after[j]||{})[L]); if(v!==null) return v; }
+    return null;
+  };
+
+  // ④a 先按 run 分组，并把归属/迭代号贴到每条记录上
+  const order=[], byRun={};
+  records.forEach((r,i)=>{
+    const key=r.run||'?';
+    if(!byRun[key]){ byRun[key]=[]; order.push(key); }
+    const rec=Object.assign({}, r);
+    rec.loop=after[i];
+    const node=r.node||'';
+    const lid=owner[node]||(isHead[node]?node:null);
+    if(lid){ const it=iterOf(i,lid); if(it!==null){ rec.loop_id=lid; rec.iter=it; } }
+    byRun[key].push(rec);
+  });
+
+  // ③ 本轮走过的边：引擎 enter 序列里相邻两个执行节点 = 一条边（首个节点只记起点）。
+  //    终端目标（_turn_end/_fail）不产生 enter，靠最后节点的 exit 里发布的 results.target，
+  //    或"该节点在图上只有一条 terminal 出边"补 —— 两者都不明确就不猜。
+  const isTerm=t=>(t==='__end__'||t==='__fail__'||t==='_turn_end'||t==='_fail');
+  const out=[];
+  order.forEach(k=>{
+    const recs=byRun[k];
+    const pairs=[]; let last=null;
+    recs.forEach(r=>{
+      if(r.source!=='engine'||r.phase!=='enter') return;
+      const cur=r.node||''; if(!cur) return;
+      if(last!==null && last!==cur) pairs.push([last,cur]);
+      last=cur;
+    });
+    if(last!==null){
+      const cand=outs[last]||[];
+      let picked=null;
+      // 取**最后一条**该节点的 exit（后写覆盖）：循环里同一个节点每轮都有一条 exit，
+      // 只有收尾那条的 target 才是真正结束本轮的那条边。
+      recs.forEach(r=>{
+        if(r.source!=='engine'||r.phase!=='exit'||r.node!==last) return;
+        const rs=(r.update&&typeof r.update==='object')?r.update.results:null;
+        const f=(rs&&typeof rs==='object')?rs[last]:null;
+        if(f&&typeof f==='object'&&typeof f.target==='string') picked=f.target;
+      });
+      if(picked===null){
+        const terms=cand.filter(isTerm);
+        const lastRec=recs.length?recs[recs.length-1]:null;
+        if(terms.length===1 && lastRec && lastRec.source==='engine' && lastRec.phase==='exit')
+          picked=terms[0];
+      }
+      if(picked!==null && cand.indexOf(picked)>=0) pairs.push([last,picked]);
+    }
+    const agg={}, list=[];
+    pairs.forEach(([a,b])=>{ const kk=a+'|'+b; if(agg[kk]===undefined){agg[kk]=0; list.push([a,b]);} agg[kk]++; });
+    out.push({run:k, records:recs, edges:list.map(([a,b])=>({from:a,to:b,count:agg[a+'|'+b]}))});
+  });
+  return out;
+}
 // —— 合成内置节点：__input__ 入口 + 各终端目标（_turn_end / _fail / __end__）——
 const TERMS=[...new Set(G.edges.map(e=>e.to).filter(t=>t&&!NODES[t]))];
 const BUILTIN=[{id:'__input__',kind:'input',text:'输入'}]
@@ -542,10 +491,13 @@ function renderSVG(){
 /* ---------- 安全转义（记录文本全部走 textContent，这里仅兜底）---------- */
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 /* ---------- 节点记录统计（导航计数）---------- */
-const countByNode = {};
-RUNS.forEach(run=>run.records.forEach(rc=>{
-  const k = rc.node || '（引擎）'; countByNode[k] = (countByNode[k]||0) + 1;
-}));
+let countByNode = {};
+function rebuildCounts(){
+  countByNode = {};
+  RUNS.forEach(run=>run.records.forEach(rc=>{
+    const k = rc.node || '（引擎）'; countByNode[k] = (countByNode[k]||0) + 1;
+  }));
+}
 /* ---------- 状态 ---------- */
 let curNode='', curGoto='', curIt='', curLog='';
 let curRunIdx = RUNS.length ? 0 : -1;   // 选中轮次（会话/run）→ 日志区只显示这一轮
@@ -816,8 +768,11 @@ function renderGotoTabs(){
   });
 }
 /* ---------- 会话 / 轮次选择器（左栏）：session → run ---------- */
-const SESS = {};
-RUNS.forEach((r,i)=>{ const p=(r.run.split('/')[0])||r.run; (SESS[p]=SESS[p]||[]).push(i); });
+let SESS = {};
+function rebuildSess(){
+  SESS = {};
+  RUNS.forEach((r,i)=>{ const p=(r.run.split('/')[0])||r.run; (SESS[p]=SESS[p]||[]).push(i); });
+}
 function renderRunSelectors(){
   const ss=document.getElementById('sessSel'), rs=document.getElementById('runSel');
   const sessions=Object.keys(SESS);
@@ -890,10 +845,73 @@ function initSplitters(){
   bindSplitter(document.getElementById('sh2'),'h',()=>dt2.offsetHeight,
     v=>dt2.style.height=Math.round(v)+'px',80,0,-1);   // 日志详情区（日志栏内）→ 底锚定反向
 }
+/* ---------- 拖入 / 选择日志文件（wfr-㉟：页面自己拿数据，不必重新生成网页）----------
+   每个文件按会话解析（文件名 session-<名>.log.jsonl → 会话名），run 加上会话前缀 ——
+   与 --all 采集时同一套约定，于是多会话并排可选。可反复拖入追加。 */
+function ingestTexts(entries){        // entries: [{name, text}]
+  const dropped=[];
+  entries.forEach(({name,text})=>{
+    const sess=String(name||'log').replace(/^.*\//,'').replace(/^session-/,'').replace(/\.log\.jsonl$/,'').replace(/\.jsonl$/,'').replace(/\.json$/,'');
+    text.split('\n').forEach(line=>{
+      const t=line.trim(); if(!t) return;
+      let r; try{ r=JSON.parse(t); }catch(e){ return; }   // 半行/坏行跳过（与 C++ 读日志同判）
+      if(!r || typeof r!=='object') return;
+      r.session=sess;
+      const run=r.run||'';
+      if(run && run.indexOf(sess+'/')!==0) r.run=sess+'/'+run;
+      dropped.push(r);
+    });
+  });
+  if(!dropped.length){ flashDrop('没解析出记录（要 .log.jsonl，每行一条 JSON）', true); return; }
+  // 同一会话按 seq 归并：拖多个文件/多次追加也能得到确定顺序
+  dropped.sort((a,b)=>{
+    const sa=String(a.session||''), sb=String(b.session||'');
+    if(sa!==sb) return sa<sb?-1:1;
+    return Number(a.seq||0)-Number(b.seq||0);
+  });
+  setRecords((P.records||[]).concat(dropped));
+  flashDrop('已载入 '+dropped.length+' 条记录（共 '+RUNS.length+' 轮）');
+}
+function flashDrop(msg, bad){
+  const d=document.getElementById('drop');
+  d.classList.remove('over'); if(bad) d.classList.add('err'); else d.classList.remove('err');
+  d.dataset.msg=msg;
+  d.firstChild.nodeValue=msg;
+  setTimeout(()=>{ const dd=document.getElementById('drop');
+    dd.firstChild.nodeValue='把 .log.jsonl 拖到这里';
+    dd.classList.remove('err'); dd.classList.remove('over'); }, 2600);
+}
+function setRecords(raw){
+  RUNS = deriveRuns(raw||[]);
+  P.records = raw||[];
+  rebuildCounts(); rebuildSess();
+  curRunIdx = RUNS.length ? 0 : -1;
+  curGoto=''; curIt=''; curLog='';
+  renderRunSelectors(); renderNodeList(); renderGotoTabs(); renderLog(); applyEdgeUsage();
+}
+function bindDrop(){
+  const d=document.getElementById('drop'), pick=document.getElementById('filepick');
+  d.addEventListener('click',()=>pick.click());
+  pick.addEventListener('change',()=>{
+    const fs=[...pick.files]; if(!fs.length) return;
+    Promise.all(fs.map(f=>f.text().then(text=>({name:f.name,text})))).then(ingestTexts);
+    pick.value='';
+  });
+  d.addEventListener('dragover',e=>{ e.preventDefault(); d.classList.add('over'); });
+  d.addEventListener('dragleave',()=>d.classList.remove('over'));
+  d.addEventListener('drop',e=>{
+    e.preventDefault(); d.classList.remove('over');
+    const fs=[...(e.dataTransfer?e.dataTransfer.files:[])];
+    if(!fs.length) return;
+    Promise.all(fs.map(f=>f.text().then(text=>({name:f.name,text})))).then(ingestTexts);
+  });
+}
+
 /* ---------- 启动 ---------- */
 try {
-  layout(); renderSVG(); applyEdgeUsage(); renderLegend(); renderRunSelectors(); bindRunSelectors();
-  renderNodeList(); renderGotoTabs(); renderLog(); renderDetail(''); renderLogDetail(null);
+  layout(); renderSVG(); renderLegend(); bindRunSelectors(); bindDrop();
+  setRecords(P.records||[]);
+  renderDetail(''); renderLogDetail(null);
   if(P.trimmed_node_logs) document.getElementById('trim').style.display='block';
   initSplitters();
 } catch (e) {

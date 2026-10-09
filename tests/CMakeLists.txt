@@ -167,3 +167,16 @@ add_dependencies(workflow_tests node_demo_plugin node_enum_plugin)
 
 target_compile_options(workflow_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(workflow_tests)
+
+# ---- 调试台页面 JS 的推导测试（wfr-㉟）----
+# 日志的推导（分组 / loop 迭代号 / 走过的边）在**页面里的 JS**（唯一实现，因为"拖入日志
+# 文件"必须在浏览器里推导）。这条测试把模板抠出来真跑一遍；没装 node 就不注册。
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+  add_test(NAME debug_derive_js
+           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/js/debug_derive_test.mjs
+                   ${PROJECT_SOURCE_DIR})
+  message(STATUS "已注册 debug_derive_js（页面 JS 推导测试，node: ${NODE_EXECUTABLE}）")
+else()
+  message(STATUS "未找到 node —— 跳过 debug_derive_js（页面 JS 的推导测试不跑）")
+endif()

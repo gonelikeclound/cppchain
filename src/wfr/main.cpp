@@ -134,7 +134,9 @@ int main(int argc, char** argv) {
         "  wfr <name-or-path> [--workdir DIR] [--session NAME] [--set key=value]... "
         "[--reset] [--allow-import] <query>...\n"
         "  wfr list [--workdir DIR]\n"
-        "  wfr debug <name-or-path> [--session N|--all] [--out F] [--open]\n"
+        "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
+        "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
+        "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏即可看日志。\n"
         "  wfr -h | --help\n"
         "内置（发布自带 share/wfr/workflows）：chat（最简单聊天，多轮续聊；需 LLM key，"
         "见 .env.example）；chat2（chat 的超集：历史渲染三档 + 思考回传/厂商参数开关，"
@@ -158,7 +160,7 @@ int main(int argc, char** argv) {
   // ================= 子命令：debug（可视化调试台） =================
   if (cmd == "debug") {
     std::string session_arg, out_file;
-    bool all = false, open = false;
+    bool all = false, open = false, graph_only = false;
     if (argc < 3) {
       usage();
       return 2;
@@ -169,6 +171,7 @@ int main(int argc, char** argv) {
       if (a == "--workdir" && j + 1 < argc) workdir = argv[++j];
       else if (a == "--session" && j + 1 < argc) session_arg = argv[++j];
       else if (a == "--all") all = true;
+      else if (a == "--graph-only") graph_only = true;   // 只按 workflow 出图，日志靠页面拖入
       else if (a == "--out" && j + 1 < argc) out_file = argv[++j];
       else if (a == "--open") open = true;
       else if (a == "-h" || a == "--help") {
@@ -179,7 +182,7 @@ int main(int argc, char** argv) {
         return 2;
       }
     }
-    if (session_arg.empty() && !all) all = true;
+    if (session_arg.empty() && !all && !graph_only) all = true;
 
     Json dir_json;
     Json const settings = wfr_read_settings(workdir);
@@ -220,8 +223,10 @@ int main(int argc, char** argv) {
       return 2;
     }
 
-    std::vector<Json> recs;
-    if (all) {
+    std::vector<Json> recs;   // --graph-only 时保持为空：页面只出图，日志靠拖入
+    if (graph_only) {
+      // 只按 workflow 出页面：不内嵌任何会话，打开后把 .log.jsonl 拖进去即可
+    } else if (all) {
       std::error_code ec;
       for (std::filesystem::directory_iterator it(wfr_root(workdir) / "sessions", ec), end;
            it != end; it.increment(ec)) {

@@ -193,6 +193,32 @@ act → echo_tool ×1        echo_tool → loop ×1   route → _turn_end ×1
 `echo_tool → loop ×1` 就是那一轮的回边；`route → _turn_end ×1` 是收尾边（靠 route 发布的
 target 补上的）。
 
+### 5.3 页面自取数据：`--graph-only` + 拖入日志（wfr-㉟）
+
+原先会话必须在**生成网页时**一起内嵌 —— 想看另一个会话、或刚跑出来的轮次，就得重新生成。
+现在：
+
+- `wfr debug <wf> --graph-only` 只按 workflow 出页面（payload 里 `records` 为空），
+  打开后把 `.wfr/sessions/*.log.jsonl` **拖进左栏**（或点击选择，可反复追加）即可。
+- 不传 `--graph-only` 时行为不变（默认 `--all`，把会话内嵌进页面）—— 静态单文件那条路仍在。
+
+**关键决定：日志的推导搬到页面里的 JS，且是唯一实现。**
+
+要推导的四件事（① 逐条 `loop_counts` 快照 ② 每条记录的 `loop_id`/`iter` ③ 本轮走过的边与
+次数 ④ 按 run 分组）原先在 C++ 的 `debug_view_logs`（150 行）。但"拖入日志"这条路径**必须
+在浏览器里推导**，于是只有两个选择：写第二份 JS（口径会分叉），或把 C++ 那份搬过去。
+
+选了后者：**JS 是唯一实现**，C++ 侧只剩 `debug_view_graph`（IR → 图，结构性、必须留在
+C++）与日志读取。于是静态导出与拖入**共用同一份推导**，没有第二份口径；副作用是那 4 个
+gtest 用例要挪到 node 里（`tests/js/debug_derive_test.mjs`，ctest 里找得到 node 才注册）。
+
+为什么不上 wasm（也评估过）：本机没有 emscripten/wasm-ld；`debug_view.cpp` 经
+`node_type.hpp` 依赖整个节点注册表；要把闭包瘦下来得先重构；而它唯一不可替代的优势
+（单一实现）用"整体搬到 JS"能更彻底地拿到。逻辑本身只有 ~60 行簿记，没有算法/精度问题。
+
+拖入时的约定（与 `--all` 采集同一套）：文件名 `session-<名>.log.jsonl` → 会话名，
+`run` 加会话前缀，于是多会话并排可选；同一会话多次拖入按 `seq` 归并。
+
 ## 6. 开放点
 
 1. **不支持嵌套循环**（VG11 硬拒）。要支持的话调试分组要变成 `loop1.loop2` 的路径形式。
