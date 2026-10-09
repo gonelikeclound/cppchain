@@ -43,12 +43,14 @@ class ScriptedModel final : public model::ChatModel {
  public:
   std::deque<Message> replies;
   std::vector<Message> last_received;
+  std::vector<std::vector<Message>> all_received;   // 每次调用的输入都留一份
   std::size_t invoked = 0;
   bool fail_next = false;
 
   std::expected<Message, model::ModelError> invoke(std::span<Message const> msgs,
                                                    model::CallOptions const&) override {
     last_received.assign(msgs.begin(), msgs.end());
+    all_received.emplace_back(msgs.begin(), msgs.end());
     ++invoked;
     if (fail_next) {
       fail_next = false;   // 只失败一次（否则后面的 think 也跟着失败，测不出降级）
@@ -93,6 +95,22 @@ Json ir_with(Json node, std::string const& node_id = "proc") {
                                           {"session", "@config.session"},
                                           {"next", node_id}},
                                      node,
+                                     Json{{"id", "think"}, {"kind", "model"}, {"model", "m"},
+                                          {"next", "_turn_end"}}})}};
+}
+
+// recall → sum(summarize) → refine(refine_history) → think(model) → _turn_end
+Json ir_fold_then_refine(Json sum_overrides = Json::object()) {
+  Json sum{{"id", "sum"}, {"kind", "summarize"}, {"model", "m"},
+           {"when", "always"}, {"keep_last", "2"}, {"next", "refine"}};
+  for (auto it = sum_overrides.begin(); it != sum_overrides.end(); ++it) sum[it.key()] = it.value();
+  return Json{{"id", "wf_both"},
+              {"nodes", Json::array({Json{{"id", "recall"}, {"kind", "load_history"},
+                                          {"path", "@config.workspace"},
+                                          {"session", "@config.session"}, {"next", "sum"}},
+                                     sum,
+                                     Json{{"id", "refine"}, {"kind", "refine_history"},
+                                          {"preset", "minimal"}, {"next", "think"}},
                                      Json{{"id", "think"}, {"kind", "model"}, {"model", "m"},
                                           {"next", "_turn_end"}}})}};
 }
@@ -407,4 +425,238 @@ TEST(WfHistoryProcess, refine_is_a_noop_when_nothing_matches) {
   std::ifstream in(path);
   std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   EXPECT_EQ(all.find("\"op\":\"transform\""), std::string::npos) << "无事可做就不该发 op";
+}
+
+// ============ 复杂情形 ============
+//
+// 下面这些是"容易出事但不是主路径"的情形：边界对抗、多代摘要、token 触发、角色档、
+// 空摘要、一轮两个 op、大历史、以及"统计如实上报"。
+
+TEST(WfHistoryProcess, fold_boundary_never_splits_a_tool_round) {
+  // 对抗构造：让"朴素切点"正好落在一个工具组的中间（AI(tool_calls) 在保留区、它的 Tool
+  // 结果却要被折掉 —— 或反过来）。safe_boundary 必须把边界推回，绝不切开一组。
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  {
+    SessionLog log(path);
+    Json msgs = Json::array();
+    for (int i = 0; i < 6; ++i) {
+      Message call = message::ai_message("");
+      call.tool_calls.push_back(message::ToolCall{"c" + std::to_string(i), "fetch_price", Json::object()});
+      msgs.push_back(Json(message::human_message("问题 " + std::to_string(i))));
+      msgs.push_back(Json(call));
+      msgs.push_back(Json(message::tool_message("结果 " + std::to_string(i), "c" + std::to_string(i))));
+      msgs.push_back(Json(message::ai_message("回答 " + std::to_string(i))));
+    }
+    log.engine_enter("r-1", "__input__", "input");
+    log.engine_exit("r-1", "__input__", "input", true, "ok", 0, Json{{"messages", msgs}});
+  }
+
+  // keep_last 逐个试一遍：总有一个值会让朴素切点落在工具组中间
+  for (char const* keep : {"1", "2", "3", "4", "5", "6", "7"}) {
+    TempDir ws;
+    Fixture f;
+    f.model.replies.push_back(message::ai_message("摘要"));
+    f.model.replies.push_back(message::ai_message("答"));
+    auto const r = run_once(f, ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                                            {"when", "always"}, {"keep_last", keep}},
+                                      "sum"),
+                            ws.str());
+    (void)r;
+    // 折叠后的视图必须仍然是合法消息序列（没有孤儿 Tool、没有 dangling tool_calls）
+    auto const view = replay_session_messages(session_path(ws.str(), "cli"));
+    EXPECT_FALSE(message::validate_sequence(view).has_value())
+        << "keep_last=" << keep << " 时切开了工具组";
+    if (view.size() >= 2 && message::is_summary_message(view.front())) {
+      EXPECT_NE(view[1].type, Role::Tool) << "keep_last=" << keep << "：保留区以 Tool 开头";
+    }
+  }
+}
+
+TEST(WfHistoryProcess, fold_can_be_triggered_by_token_threshold) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 4);
+
+  Fixture f;
+  f.model.replies.push_back(message::ai_message("摘要"));
+  f.model.replies.push_back(message::ai_message("答"));
+  auto const r = run_once(f, ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                                          {"when", "tokens"}, {"max_tokens", "50"},
+                                          {"keep_last", "2"}},
+                                    "sum"),
+                          tmp.str());
+  EXPECT_EQ(r["results"]["sum"]["action"], "folded");
+
+  // 阈值给足 → 不折
+  TempDir ws;
+  Fixture f2;
+  f2.model.replies.push_back(message::ai_message("答"));
+  auto const r2 = run_once(f2, ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                                            {"when", "tokens"}, {"max_tokens", "100000"},
+                                            {"keep_last", "2"}},
+                                      "sum"),
+                           ws.str());
+  EXPECT_EQ(r2["results"]["sum"]["action"], "skipped");
+  EXPECT_EQ(r2["results"]["sum"]["reason"], "below_threshold");
+}
+
+TEST(WfHistoryProcess, summary_role_is_honoured_and_still_valid) {
+  for (auto const& [role, expect] : std::vector<std::pair<char const*, Role>>{
+           {"human", Role::Human}, {"ai", Role::Ai}, {"system", Role::System}}) {
+    TempDir ws;
+    seed_history(session_path(ws.str(), "cli"), 4);   // 每档都要有自己的历史
+    Fixture f;
+    f.model.replies.push_back(message::ai_message("摘要内容"));
+    f.model.replies.push_back(message::ai_message("答"));
+    auto const r = run_once(f, ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                                            {"when", "always"}, {"keep_last", "2"},
+                                            {"summary_role", role}},
+                                      "sum"),
+                            ws.str());
+    EXPECT_EQ(r["results"]["sum"]["action"], "folded") << role;
+    auto const view = replay_session_messages(session_path(ws.str(), "cli"));
+    ASSERT_FALSE(view.empty());
+    EXPECT_TRUE(message::is_summary_message(view.front())) << role;
+    EXPECT_EQ(view.front().type, expect) << role;
+    EXPECT_FALSE(message::validate_sequence(view).has_value()) << role;
+  }
+}
+
+TEST(WfHistoryProcess, empty_model_answer_is_treated_as_a_failure) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 4);
+
+  Fixture f;
+  f.model.replies.push_back(message::ai_message(""));   // 摘要为空
+  f.model.replies.push_back(message::ai_message("答"));
+  auto const r = run_once(f, ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                                          {"when", "always"}, {"keep_last", "2"},
+                                          {"on_fail", "skip"}},
+                                    "sum"),
+                          tmp.str());
+  EXPECT_EQ(r["results"]["sum"]["action"], "failed");
+  EXPECT_EQ(r["results"]["sum"]["reason"], "empty_summary");
+  std::ifstream in(path);
+  std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(all.find("\"op\":\"fold\""), std::string::npos) << "空摘要不该折叠";
+}
+
+TEST(WfHistoryProcess, second_generation_summary_carries_the_previous_one_forward) {
+  // 多代摘要：折一次 → 历史又长 → 再折一次。两条性质：
+  //   ① 视图里**只有一条**摘要（世代交替，不堆叠）
+  //   ② 第二次摘要的提示里**带着第一次的摘要**（接力，避免层层丢失）
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 6);
+
+  // 阈值取 2：第一轮（21 条）折一次；第二轮折后视图又长到 3 条（保尾 + 新提问）→ 再折一次。
+  // 注意节点是"超过阈值才折"（`<=` 判 skip），所以 3 条配阈值 2 才会再折。
+  Json const ir = ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                               {"when", "messages"}, {"max_msgs", "2"},
+                               {"keep_last", "2"}, {"style", "evidence"}},
+                          "sum");
+
+  Fixture f1;
+  f1.model.replies.push_back(message::ai_message("第一代摘要：用户问过北京天气"));
+  f1.model.replies.push_back(message::ai_message("答一"));
+  auto const r1 = run_once(f1, ir, tmp.str(), "cli");
+  EXPECT_EQ(r1["results"]["sum"]["action"], "folded");
+
+  // 第二轮：历史又长起来了（上一轮的回复也进了日志）→ 再折一次
+  Fixture f2;
+  f2.model.replies.push_back(message::ai_message("第二代摘要"));
+  f2.model.replies.push_back(message::ai_message("答二"));
+  auto const r2 = run_once(f2, ir, tmp.str(), "cli");
+  EXPECT_EQ(r2["results"]["sum"]["action"], "folded") << "第二轮该再折一次";
+
+  // ① 只有一条摘要
+  auto const view = replay_session_messages(path);
+  std::size_t summaries = 0;
+  for (auto const& m : view)
+    if (message::is_summary_message(m)) ++summaries;
+  EXPECT_EQ(summaries, 1u) << "摘要堆叠了";
+  EXPECT_EQ(view.front().text(), "第二代摘要");
+
+  // ② 第二次的提示里带着第一代摘要（all_received[0] 是第二轮里 summarize 那次调用）
+  ASSERT_GE(f2.model.all_received.size(), 1u);
+  auto const& prompt = f2.model.all_received[0];
+  ASSERT_GE(prompt.size(), 2u);
+  std::string joined;
+  for (auto const& m : prompt) joined += m.text() + "\n";
+  EXPECT_NE(joined.find("第一代摘要"), std::string::npos)
+      << "多代摘要必须接力（否则每折一次就丢一层信息）";
+}
+
+TEST(WfHistoryProcess, fold_and_refine_in_one_turn_both_land_in_the_log) {
+  // 一轮里两个 op：先 fold（summarize）再 transform（refine）。两个 op 都要落日志，
+  // 且**按发生顺序**重放出来的视图仍然合法 —— 这是"op 是 left 的纯函数"的合成检验。
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 5);
+
+  Fixture f;
+  f.model.replies.push_back(message::ai_message("摘要"));
+  f.model.replies.push_back(message::ai_message("答"));
+  auto const r = run_once(f, ir_fold_then_refine(), tmp.str());
+  EXPECT_EQ(r["results"]["sum"]["action"], "folded");
+  // refine 在 fold 之后跑；preset=minimal 只去思考过程（本历史没有）→ noop 也正常
+  EXPECT_TRUE(r["results"].contains("refine"));
+
+  // 两个 op 都落盘、且 fold 在前
+  std::ifstream in(path);
+  std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  auto const fold_at = all.find("\"op\":\"fold\"");
+  EXPECT_NE(fold_at, std::string::npos);
+  if (auto const refine_at = all.find("\"op\":\"transform\"");
+      refine_at != std::string::npos) {
+    EXPECT_LT(fold_at, refine_at) << "op 应按发生顺序落盘";
+  }
+
+  auto const view = replay_session_messages(path);
+  EXPECT_FALSE(message::validate_sequence(view).has_value());
+}
+
+TEST(WfHistoryProcess, large_history_folds_and_shrinks_by_a_lot) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 30);   // 121 条
+
+  Fixture f;
+  f.model.replies.push_back(message::ai_message("摘要"));
+  f.model.replies.push_back(message::ai_message("答"));
+  auto const r = run_once(f, ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                                          {"when", "always"}, {"keep_last", "5"}},
+                                    "sum"),
+                          tmp.str());
+  auto const& s = r["results"]["sum"];
+  EXPECT_EQ(s["action"], "folded");
+  EXPECT_GT(s["summarized_msgs"].get<int>(), 100);
+  EXPECT_LT(s["after_tokens"].get<int>() * 5, s["before_tokens"].get<int>()) << "大历史应显著变小";
+
+  auto const view = replay_session_messages(path);
+  EXPECT_FALSE(message::validate_sequence(view).has_value());
+  EXPECT_LE(view.size(), 8u);   // 摘要 + 保尾若干 + 本轮新增
+}
+
+TEST(WfHistoryProcess, stats_are_honest_when_the_summary_costs_more_than_it_saves) {
+  // 历史很短时，摘要可能**比折掉的内容还长**（真机上见过：6 条历史 → 摘要 92 tok、
+  // token 反而涨）。统计要如实上报，不粉饰 —— 这样才看得出"这档不该在这里用"。
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 1);   // 5 条
+
+  Fixture f;
+  f.model.replies.push_back(message::ai_message(std::string(600, 'x')));   // 很长的"摘要"
+  f.model.replies.push_back(message::ai_message("答"));
+  auto const r = run_once(f, ir_with(Json{{"kind", "summarize"}, {"model", "m"},
+                                          {"when", "always"}, {"keep_last", "1"}},
+                                    "sum"),
+                          tmp.str());
+  auto const& s = r["results"]["sum"];
+  EXPECT_EQ(s["action"], "folded");
+  EXPECT_GT(s["summary_tokens"].get<int>(), 0);
+  EXPECT_GE(s["after_tokens"].get<int>(), s["before_tokens"].get<int>())
+      << "摘要比折掉的长时应如实上报（不粉饰）";
 }
