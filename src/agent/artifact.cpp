@@ -33,7 +33,8 @@ std::size_t char_boundary(std::string_view s, std::size_t cut) {
 }  // namespace
 
 std::optional<std::string> write_tool_artifact(Message& tool_message, std::string const& dir,
-                                               std::size_t max_inline_tokens, std::size_t idx) {
+                                               std::size_t max_inline_tokens, std::size_t idx,
+                                   std::string const& display_root) {
   std::string const text = tool_message.text();
   if (text.empty()) return std::nullopt;
 
@@ -61,18 +62,29 @@ std::optional<std::string> write_tool_artifact(Message& tool_message, std::strin
   ofs << text;
   ofs.close();
 
-  tool_message.artifact = path;
+  // 展示路径：display_root 非空 → 相对该根（沙箱 file_read 只认根内相对路径）；
+  // 相对失败（不在根内 / 异盘）→ 回落完整路径（沙箱读不了，但仍是诚实的绝对标注）。
+  std::error_code rel_ec;
+  std::string const display = display_root.empty()
+                                  ? path
+                                  : [&]() -> std::string {
+                                      std::filesystem::path const rel =
+                                          std::filesystem::relative(path, display_root, rel_ec);
+                                      return (!rel_ec && !rel.empty()) ? rel.generic_string()
+                                                                       : path;
+                                    }();
+  tool_message.artifact = display;
 
-  // content 换引用行：头部（内联预算内） + 完整路径 + 规模标注
+  // content 换引用行：头部（内联预算内） + 展示路径 + 规模标注
   std::size_t const keep = char_boundary(text, max_inline_tokens * 3);
   std::string const head = text.substr(0, keep);
   tool_message.content.clear();
   tool_message.content.push_back(
-      message::TextBlock{head + "\n…[完整结果已落盘: " + path + "（约 " +
+      message::TextBlock{head + "\n…[完整结果已落盘: " + display + "（约 " +
                     std::to_string(tok::estimate(text)) + " tokens / " +
                     std::to_string(text.size()) + " 字节）。如需细节请用文件工具读取该文件。]",
                 std::nullopt});
-  return path;
+  return display;
 }
 
 void ArtifactToolResults::after_tool(Message& tool_message) {

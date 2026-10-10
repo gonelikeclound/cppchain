@@ -20,6 +20,7 @@
 #include <cppchain/model/openai/openai_chat_model.hpp>
 #include <cppchain/tool/calculator.hpp>
 #include <cppchain/tool/datetime.hpp>
+#include <cppchain/tool/file_tools.hpp>
 #include <cppchain/tool/registry.hpp>
 #include <cppchain/tool/weather.hpp>
 #include <cppchain/tool/web_search.hpp>
@@ -50,6 +51,8 @@ using namespace cppchain;
 using namespace cppchain::workflow;
 using cppchain::tool::make_calculator_tool;
 using cppchain::tool::make_datetime_tool;
+using cppchain::tool::make_file_read_tool;
+using cppchain::tool::make_list_dir_tool;
 using cppchain::tool::make_weather_tool;
 using cppchain::tool::make_web_search_tool;
 using cppchain::wfr::ca_bundle_from_env;
@@ -397,12 +400,22 @@ int main(int argc, char** argv) {
     ws_cfg.api_key = env_or(dotenv, "WEB_SEARCH_API_KEY");     // feedcoop Bearer；未配则运行时搜索报错
     registry.add(make_web_search_tool(transport, std::move(ws_cfg)));
   }
+  // wfr-㊶：文件系统只读对（file_read / list_dir）——sandbox 根 = 工作区。让历史裁剪的
+  // 「完整结果已落盘」引用行真的可兑现：模型把引用行里的相对路径直接喂 file_read 即可读回全文。
+  // file_write 是副作用（read_only=false）且 wfr loop 没有审批中间件 → **不默认挂**，要挂得先接审批。
+  {
+    tool::FileToolsConfig ft_cfg;
+    ft_cfg.root_dir = std::filesystem::absolute(workdir);  // 沙箱根 = 工作区；越界/绝对路径/链接逃逸由工具拒
+    registry.add(make_file_read_tool(ft_cfg));
+    registry.add(make_list_dir_tool(ft_cfg));
+  }
   ComponentRegistry comps;
   std::vector<std::string> all_tools;
   for (tool::ToolSpec const& t : registry.all()) all_tools.push_back(t.name);
   comps.toolsets["all"] = all_tools;
   comps.toolsets["ts"] = all_tools;
-  comps.toolsets["chat"] = {"get_weather", "web_search"};  // 内置 chat 专用：只暴露天气/搜索
+  // 内置 chat 专用：常用件 + 只读文件对（天气/搜索之外，读工作区文件以兑现 artifact 引用）
+  comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir"};
 
   std::optional<model::openai::OpenAIChatModel> model;
   if (model_needed_key) {

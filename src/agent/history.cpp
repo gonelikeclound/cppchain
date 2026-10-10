@@ -382,7 +382,8 @@ HistoryRulePlan plan_history_rules(std::vector<Message> const& msgs,
       if (text.empty() || orig_tokens <= params.tool_budget) continue;
       Message m = msgs[i];
       if (params.artifact_mode && !params.artifact_dir.empty()) {
-        if (write_tool_artifact(m, params.artifact_dir, params.tool_budget, idx + 1))
+        if (write_tool_artifact(m, params.artifact_dir, params.tool_budget, idx + 1,
+                                params.artifact_display_root))
           ++st.artifacts_written;
         ++idx;
       } else {

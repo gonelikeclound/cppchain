@@ -414,6 +414,34 @@ TEST(HistoryRules, artifact_mode_numbers_files_and_skips_short_results) {
   EXPECT_NE(out[2].artifact.value_or(""), out[4].artifact.value_or("")) << "文件名应不同";
 }
 
+TEST(HistoryRules, artifact_display_root_rewrites_the_line_to_a_root_relative_path) {
+  // wfr-㊶：落盘时给 display_root → 引用行/`artifact` 字段变成**相对该根**的路径（不再带绝对前缀），
+  // 与沙箱 file_read 的「只认根内相对路径」对齐。跨半边「真的能读回」在 artifact_fs_test.cpp。
+  ArtifactDir root;                      // 沙箱根（= 工作区）
+  HistoryRuleParams p;
+  p.tool_budget = 20;
+  p.artifact_mode = true;
+  p.artifact_dir = (std::filesystem::path(root.str()) / "sub" / ".wfr" / "artifacts").string();
+  p.artifact_display_root = root.str();  // 展示路径相对此根
+  std::string const long_text(400, 'x');
+  std::vector<Message> const msgs{human("q"), ai_calling({{"c1", "web_search"}}),
+                                  tool(long_text, "c1")};
+
+  auto const plan = run(msgs, rules_of({"clip_tool_results"}), p);
+  EXPECT_EQ(plan.stats.artifacts_written, 1u);
+  auto const out = apply_plan(msgs, plan);
+  ASSERT_TRUE(out[2].artifact.has_value());
+  // 展示路径：相对根的 sub/.wfr/artifacts/…，不带绝对前缀
+  std::string const disp = *out[2].artifact;
+  EXPECT_EQ(disp, "sub/.wfr/artifacts/artifact_1_c1.txt") << disp;
+  // 引用行里同样用这个相对路径
+  EXPECT_NE(out[2].text().find(disp), std::string::npos) << out[2].text();
+  // 物理文件在根内对应位置，且是完整原文
+  std::ifstream in(root.str() + "/" + disp, std::ios::binary);
+  std::string const got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(got, long_text) << "文件里应是完整原文";
+}
+
 TEST(HistoryRules, clip_ai_text_after_tokens_ignores_stale_usage_of_rewritten_messages) {
   // 真机回灌的差：AI 消息带真实 usage（端点实测，total 可能数千）。被裁后 usage 是**旧调用**的，
   // 与 after 状态不符 —— after_tokens 必须按新内容重估，否则"裁回答"永远省不出 token（C 的读数）。

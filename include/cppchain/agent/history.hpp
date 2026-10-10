@@ -77,6 +77,9 @@ struct HistoryRuleParams {
   std::size_t ai_budget = 400;    // clip_ai_text：单条**终态** AI 回答的 token 预算
   bool artifact_mode = false;     // true：超预算的工具结果落盘成引用行；false：就地截断
   std::string artifact_dir;       // artifact_mode 用（缺省不落盘）
+  // artifact_mode 的展示根（wfr-㊶）：非空时，落盘路径在引用行/`artifact` 字段里改成**相对该根**
+  // 的形式，让 agent 能把路径直接喂给沙箱 file_read。空 = 显示完整路径（离线单测用）。
+  std::string artifact_display_root;
   // 工具名 → 类别。由节点在**编译期**从 ToolRegistry 快照；查不到的名字视为 "general"。
   std::unordered_map<std::string, std::string> tool_category;
 };

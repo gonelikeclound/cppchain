@@ -102,7 +102,8 @@ add_executable(agent_tests
   agent/truncate_artifact_test.cpp
   agent/approval_memo_test.cpp
   agent/history_compress_test.cpp
-  agent/history_rules_test.cpp)
+  agent/history_rules_test.cpp
+  agent/artifact_fs_test.cpp)
 
 target_link_libraries(agent_tests PRIVATE
   cppchain_agent

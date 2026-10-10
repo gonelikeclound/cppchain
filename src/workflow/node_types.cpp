@@ -5,6 +5,7 @@
 #include "cppchain/workflow/node_type.hpp"
 
 #include <cctype>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <print>
@@ -1084,13 +1085,20 @@ void c_refine_history(NodeIR const& n, NodeType::CompileContext& ctx) {
     p.tool_category = tool_category;
     std::string dir = resolve_text_parameter(sp.artifact_dir, state);
     if (dir == "null") dir.clear();
+    // 展示根 = 工作区绝对路径（与 wfr 文件工具的沙箱根一致）：落盘路径在引用行里
+    // 改成相对这个根的形式，agent 才能把路径直接喂给 file_read（沙箱只认根内相对路径）。
+    Json const ws = resolve_parameter(Json("@config.workspace"), state);
+    std::string const ws_abs =
+        (ws.is_string() && !ws.get<std::string>().empty())
+            ? std::filesystem::absolute(ws.get<std::string>()).generic_string()
+            : std::string{};
     if (dir.empty()) {
       // 缺省落在工作区的 .wfr/artifacts 下（与其它运行态产物同处）
-      Json const ws = resolve_parameter(Json("@config.workspace"), state);
-      if (ws.is_string() && !ws.get<std::string>().empty()) dir = ws.get<std::string>() + "/.wfr/artifacts";
+      if (!ws_abs.empty()) dir = ws_abs + "/.wfr/artifacts";
       else dir = ".wfr/artifacts";
     }
     p.artifact_dir = dir;
+    p.artifact_display_root = ws_abs;
 
     agent::HistoryRulePlan const plan = agent::plan_history_rules(msgs, rules, p);
 
