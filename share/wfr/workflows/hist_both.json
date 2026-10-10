@@ -1,0 +1,97 @@
+{
+  "id": "builtin_hist_both",
+  "nodes": [
+    {
+      "id": "recall",
+      "kind": "load_history",
+      "path": "@config.workspace",
+      "session": "@config.session",
+      "mode": "@config.history_mode",
+      "budget": "@config.evidence_budget",
+      "next": "sum"
+    },
+    {
+      "id": "sum",
+      "kind": "summarize",
+      "model": "main",
+      "when": "@config.sum_when",
+      "max_msgs": "@config.sum_max_msgs",
+      "max_tokens": "@config.sum_max_tokens",
+      "keep_last": "@config.sum_keep_last",
+      "style": "@config.sum_style",
+      "summary_role": "@config.sum_role",
+      "on_fail": "@config.sum_on_fail",
+      "system_prompt": "你在压缩一段多轮对话历史，供后续轮次继续使用。只写事实，不编造。",
+      "params": {
+        "reasoning_effort": "@config.reasoning_effort"
+      },
+      "next": "refine"
+    },
+    {
+      "id": "refine",
+      "kind": "refine_history",
+      "preset": "@config.rule_preset",
+      "categories": [
+        "@config.drop_categories"
+      ],
+      "clip_scope": "@config.rule_clip_scope",
+      "tool_budget": "@config.rule_tool_budget",
+      "ai_budget": "@config.rule_ai_budget",
+      "next": "echo_both"
+    },
+    {
+      "id": "echo_both",
+      "kind": "echo",
+      "text": "⚙️ 组合 $sum.result.action / $refine.result.action · $recall.result.before_msgs → $refine.result.after_msgs 条 · $refine.result.before_tokens → $refine.result.after_tokens tok · 摘要 $sum.result.summary_tokens tok（折叠 $sum.result.summarized_msgs）· 丢组 $refine.result.dropped_groups（类别 $refine.result.dropped_category_groups）· 规则 [$refine.result.rules]",
+      "next": "loop"
+    },
+    {
+      "id": "loop",
+      "kind": "loop",
+      "max": 4,
+      "next": "_turn_end",
+      "body": [
+        {
+          "id": "think",
+          "kind": "model",
+          "model": "main",
+          "tools": "chat",
+          "reasoning_echo": "@config.reasoning_echo",
+          "params": {
+            "reasoning_effort": "@config.reasoning_effort"
+          },
+          "system_prompt": "你是 wfr 的智能助手，多轮续聊、回答简短直接。必要时调用工具再回答：天气用 get_weather（参数 city），网络信息用 web_search（参数 query）；回答给出的数值与工具结果一致，不要编造工具没有给出的数据。",
+          "next": "echo_think"
+        },
+        {
+          "id": "echo_think",
+          "kind": "echo",
+          "text": "💭 $think.result.thinking",
+          "next": "route"
+        },
+        {
+          "id": "route",
+          "kind": "route",
+          "on": "last_ai_outcome",
+          "cases": {
+            "tool_calls": "act",
+            "invalid_tool_calls": "_fail",
+            "text": "_turn_end"
+          },
+          "default": "_fail"
+        },
+        {
+          "id": "act",
+          "kind": "run_tools",
+          "next": "echo_tool"
+        },
+        {
+          "id": "echo_tool",
+          "kind": "echo",
+          "text": "🔧 $act.result.summary",
+          "next": "_continue"
+        }
+      ]
+    }
+  ]
+}
