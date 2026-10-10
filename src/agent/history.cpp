@@ -431,7 +431,15 @@ HistoryRulePlan plan_history_rules(std::vector<Message> const& msgs,
     if (dropped[i]) continue;
     auto const it = std::find_if(plan.rewrite.begin(), plan.rewrite.end(),
                                  [i](auto const& p) { return p.first == i; });
-    after.push_back(it != plan.rewrite.end() ? it->second : msgs[i]);
+    if (it != plan.rewrite.end()) {
+      Message m = it->second;
+      // 被重写的消息内容已变，原 usage 是**旧调用的实测值**，与 after 状态不符：
+      // 丢弃它，让 estimate_msgs 按内容启发式重估（否则 after_tokens 反映不出裁剪）。
+      m.usage.reset();
+      after.push_back(std::move(m));
+    } else {
+      after.push_back(msgs[i]);
+    }
   }
   st.after_msgs = after.size();
   st.after_tokens = tokens::estimate_msgs(after);

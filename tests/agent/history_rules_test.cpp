@@ -5,6 +5,9 @@
 // 合法性**（真实端点会因孤儿 ToolMessage 直接 400 —— 这是最硬的约束）。
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -310,4 +313,121 @@ TEST(HistoryRules, no_rules_is_identity) {
   EXPECT_TRUE(plan.rewrite.empty());
   EXPECT_EQ(plan.stats.before_msgs, plan.stats.after_msgs);
   EXPECT_EQ(plan.stats.before_tokens, plan.stats.after_tokens);
+}
+
+// ---- artifact 落盘模式（wfr-㊵ 补测：这条路径原先只有实现、没有测试）----
+
+namespace {
+
+struct ArtifactDir {
+  static std::atomic<unsigned> counter;
+  std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                              ("wf_artifact_" + std::to_string(counter.fetch_add(1)));
+  ArtifactDir() { std::filesystem::create_directories(dir); }
+  ~ArtifactDir() { std::filesystem::remove_all(dir); }
+  [[nodiscard]] std::string str() const { return dir.string(); }
+};
+std::atomic<unsigned> ArtifactDir::counter{0};
+
+std::size_t count_files(std::string const& dir) {
+  std::size_t n = 0;
+  for (auto const& e : std::filesystem::directory_iterator(dir))
+    if (e.is_regular_file()) ++n;
+  return n;
+}
+
+}  // namespace
+
+TEST(HistoryRules, artifact_mode_writes_the_full_text_and_leaves_a_reference_line) {
+  ArtifactDir d;
+  HistoryRuleParams p;
+  p.tool_budget = 20;
+  p.artifact_mode = true;
+  p.artifact_dir = d.str();
+  std::string const long_text(400, 'x');   // ≈100 tokens，超预算
+
+  std::vector<Message> const msgs{human("q"), ai_calling({{"c1", "web_search"}}),
+                                  tool(long_text, "c1")};
+  auto const plan = run(msgs, rules_of({"clip_tool_results"}), p);
+  ASSERT_EQ(plan.rewrite.size(), 1u);
+  EXPECT_EQ(plan.stats.artifacts_written, 1u);
+  EXPECT_EQ(plan.stats.rewritten_tools, 1u);
+
+  auto const out = apply_plan(msgs, plan);
+  ASSERT_EQ(out.size(), 3u);
+  EXPECT_EQ(out[2].artifact.has_value(), true) << "应设 tool_message.artifact";
+  if (out[2].artifact) {
+    EXPECT_TRUE(std::filesystem::exists(*out[2].artifact)) << "落盘文件不存在";
+    // 全文进文件（不是截断版）
+    std::ifstream in(*out[2].artifact);
+    std::string const got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(got, long_text) << "文件里应是完整原文";
+  }
+  // inline 换成引用行：含路径 + 规模标注 + "用文件工具读取"
+  std::string const line = out[2].text();
+  EXPECT_NE(line.find("完整结果已落盘"), std::string::npos) << line;
+  EXPECT_NE(line.find("用文件工具读取"), std::string::npos) << line;
+  EXPECT_LT(line.size(), long_text.size());
+  EXPECT_EQ(count_files(d.str()), 1u);
+  EXPECT_FALSE(message::validate_sequence(out).has_value());
+}
+
+TEST(HistoryRules, artifact_mode_degrades_gracefully_when_the_dir_cannot_be_created) {
+  // 目标路径上放一个**同名文件** → create_directories 必然失败（确定性，不依赖权限）
+  ArtifactDir d;
+  std::string const blocked = d.str() + "/not_a_dir";
+  { std::ofstream f(blocked); f << "x"; }
+
+  HistoryRuleParams p;
+  p.tool_budget = 20;
+  p.artifact_mode = true;
+  p.artifact_dir = blocked;
+  std::vector<Message> const msgs{human("q"), ai_calling({{"c1", "web_search"}}),
+                                  tool(std::string(400, 'y'), "c1")};
+
+  auto const plan = run(msgs, rules_of({"clip_tool_results"}), p);
+  EXPECT_EQ(plan.stats.artifacts_written, 0u) << "落盘失败不该计数";
+  auto const out = apply_plan(msgs, plan);
+  EXPECT_NE(out[2].text().find("artifact 落盘失败"), std::string::npos) << out[2].text();
+  EXPECT_FALSE(out[2].artifact.has_value());
+  EXPECT_FALSE(message::validate_sequence(out).has_value()) << "降级也不能破坏协议";
+}
+
+TEST(HistoryRules, artifact_mode_numbers_files_and_skips_short_results) {
+  ArtifactDir d;
+  HistoryRuleParams p;
+  p.tool_budget = 20;
+  p.artifact_mode = true;
+  p.artifact_dir = d.str();
+  std::vector<Message> const msgs{
+      human("q"), ai_calling({{"c1", "a"}, {"c2", "b"}, {"c3", "c"}}),
+      tool(std::string(400, 'a'), "c1"),   // 超预算 → 落盘
+      tool("短结果", "c2"),                 // ≤ 预算 → 不动
+      tool(std::string(400, 'b'), "c3")};  // 超预算 → 落盘
+
+  auto const plan = run(msgs, rules_of({"clip_tool_results"}), p);
+  EXPECT_EQ(plan.stats.artifacts_written, 2u);
+  EXPECT_EQ(plan.stats.rewritten_tools, 2u);
+  auto const out = apply_plan(msgs, plan);
+  EXPECT_EQ(out[3].text(), "短结果");
+  EXPECT_EQ(count_files(d.str()), 2u) << "两条各一个文件（编号不撞）";
+  EXPECT_NE(out[2].artifact.value_or(""), out[4].artifact.value_or("")) << "文件名应不同";
+}
+
+TEST(HistoryRules, clip_ai_text_after_tokens_ignores_stale_usage_of_rewritten_messages) {
+  // 真机回灌的差：AI 消息带真实 usage（端点实测，total 可能数千）。被裁后 usage 是**旧调用**的，
+  // 与 after 状态不符 —— after_tokens 必须按新内容重估，否则"裁回答"永远省不出 token（C 的读数）。
+  std::vector<Message> msgs{human("q"), ai_calling({{"c1", "web_search"}}),
+                            tool("短结果", "c1"), ai(std::string(60, 'x'))};
+  msgs.back().usage = message::UsageMetadata{/*input*/ 100, /*output*/ 6000,
+                                             /*total*/ 6100, /*reasoning*/ 0};
+
+  HistoryRuleParams p;
+  p.ai_budget = 8;  // 60 ASCII 字符 ≈ 15 token > 8 → 重写
+  auto const plan = run(msgs, rules_of({"clip_tool_results", "clip_ai_text"}), p);
+  EXPECT_EQ(plan.stats.rewritten_ai, 1u);
+  EXPECT_LT(plan.stats.after_tokens, plan.stats.before_tokens)
+      << "被重写消息的旧 usage 不得计入 after_tokens（否则反映不出裁剪）";
+  auto const out = apply_plan(msgs, plan);
+  EXPECT_NE(out.back().text().find("内容已裁剪"), std::string::npos) << out.back().text();
 }
