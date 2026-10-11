@@ -10,6 +10,9 @@
 #include <system_error>
 #include <vector>
 
+#include "cppchain/tool/file_tools.hpp"
+#include "cppchain/tool/probe.hpp"
+
 namespace cppchain::tool {
 namespace {
 
@@ -187,6 +190,34 @@ ToolSpec make_file_write_tool(FileToolsConfig cfg) {
                               {"mode", append ? "append" : "overwrite"}};
       },
       /*read_only=*/false);  // 副作用标记：M7 审批 + SideEffectGuard 防重放
+
+  // wfr-㊷ probe：崩溃缺环（Intent 残留）时自查磁盘现状。
+  //   文件不存在            → Absent（未发生，可安全重跑）
+  //   内容与本次参数一致    → Complete（已完整写入，不重跑）
+  //   存在但内容不一致/短   → Partial（写一半/被改过，fail-closed 请人工）
+  //   无法解析路径/读出失败 → Unknown（fail-closed）
+  // **只读**：probe 只 stat + 读，绝不写盘（否则 probe 自己成副作用）。
+  spec.probe = [cfg, root](nlohmann::json const& args) -> ProbeResult {
+    auto path = arg<std::string>(args, "path");
+    if (!path) return ProbeResult::Unknown;
+    auto const target = resolve_path_in_root(root, *path);
+    if (!target) return ProbeResult::Unknown;  // 越界/非法路径：无法可靠探测
+
+    std::string content;
+    if (auto c = arg<std::string>(args, "content"); c) content = *c;
+    bool append = false;
+    if (auto a = arg<bool>(args, "append", /*required=*/false); a) append = *a;
+
+    // append 模式无法凭"内容 = 全文件"判定完成度（写前文件已有内容）→ 报 Unknown fail-closed，
+    // 稳妥（宁可请人，不可误判为已完成）。
+    if (append) return ProbeResult::Unknown;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(*target, ec))
+      return ec ? ProbeResult::Unknown : ProbeResult::Absent;
+
+    return probe_file(*target, content, content.size());
+  };
   return spec;  // 写入是"创造/修改数据"，不设 ttl（时效性语义不适用）
 }
 

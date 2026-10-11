@@ -48,6 +48,7 @@ add_executable(tool_tests
   tool/fetch_url_test.cpp
   tool/calculator_test.cpp
   tool/file_tools_test.cpp
+  tool/exec_guard_test.cpp
   tool/arxiv_test.cpp
   tool/hybrid_selector_test.cpp)
 

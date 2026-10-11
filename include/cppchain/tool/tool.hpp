@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "cppchain/core/cancel.hpp"
+#include "cppchain/tool/probe.hpp"
 
 namespace cppchain::tool {
 
@@ -44,6 +45,12 @@ struct ToolSpec {
   // 结果时效性：超过该时长即视为"可能已过期"（余额/库存/价格/文件内容这类易变状态）。
   // 留空 = 不过期（静态知识类工具）。由 agent::StaleStateGuard 消费，见 04-problems/06。
   std::optional<std::chrono::seconds> ttl;
+
+  // 副作用产物探测（wfr-㊷）：崩溃缺环（Intent 残留）时，工具自查"外部世界现状"以判定
+  // 副作用是否已发生 / 是否完整。判据闭合四格见 probe.hpp；铁律：**probe 必须只读**。
+  // 缺省 nullptr = 无探测能力 → ExecutionGuard 对 Intent 一律 fail-closed（宁可请人，不可重跑）。
+  // 由 ExecutionGuard 消费（执行点防护），详见 02-arch-design/18 §6 D3。
+  std::function<ProbeResult(nlohmann::json const& args)> probe = nullptr;
 
   // 工具类别（wfr-㊵）：供"历史精简"按类别过滤（如丢掉联网取数的原始长文）。
   // 词表见下面的 kToolCategories / is_known_category。**不进 to_openai()** ——
