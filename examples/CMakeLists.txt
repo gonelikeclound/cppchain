@@ -21,6 +21,8 @@ set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics m10_streaming m10_interrupt m10_send m10_fork)
+# wfr-㊸ @②：workflow 级人工审批 HITL（interrupt 悬挂/恢复）demo —— 只需 workflow 本体
+set(HITL_EXAMPLE_TARGETS approve_interrupt)
 # 主动智能 workflow 生成端到端验收（真机 LLM）+ wfr 已在 src/wfr（正式 CLI，非 examples）
 set(WF_EXAMPLE_TARGETS wf_eval proactive workflow_cli)
 # 需要 agent 库（真机）的 demo
@@ -38,6 +40,7 @@ list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basic
                             tools_frontline tools_files tools_arxiv tools_approval
                             m9_hybrid m9_approval m9_artifact
                             m10_streaming m10_interrupt m10_send m10_fork)
+list(APPEND EXAMPLE_TARGETS approve_interrupt)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)
@@ -81,6 +84,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_graph)
   elseif(t IN_LIST STATE_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_state)
+  elseif(t IN_LIST HITL_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_workflow)
   elseif(t IN_LIST WF_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow cppchain_http_curl)
   elseif(t IN_LIST HTTP_EXAMPLE_TARGETS)

@@ -40,6 +40,10 @@ Message ToolNode::execute_one(ToolCall const& call) const {
     return error_tool_message(call.id, "tool has no handler: " + call.name);
   }
 
+  // wfr-㊸ @②：执行器按工具规格注入（不依赖 ExecutionGuard 路径；
+  // 与 exec_guard.cpp 的 run 同契约 —— bash 等命令工具靠 ctx.executor 才能执行）。
+  ctx.executor = spec->executor;
+
   std::expected<nlohmann::json, ToolError> result;
   try {
     result = spec->handler(call.args, ctx);

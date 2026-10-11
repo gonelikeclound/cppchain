@@ -18,6 +18,8 @@
 #include <cppchain/message/serializer.hpp>  // Message ↔ JSON
 #include <cppchain/message/utf8.hpp>        // 答案打印前净化断字节
 #include <cppchain/model/openai/openai_chat_model.hpp>
+#include <cppchain/state/checkpointer.hpp>  // wfr-㊸ @②：人审悬挂/恢复的进程内快照
+#include <cppchain/tool/bash_tool.hpp>      // wfr-㊸ @①/@②：bash 工具（NeedHuman 人审）
 #include <cppchain/tool/calculator.hpp>
 #include <cppchain/tool/datetime.hpp>
 #include <cppchain/tool/exec_guard.hpp>
@@ -42,6 +44,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>  // wfr-㊸ @②：人审 stdin
 #include <map>
 #include <memory>
 #include <print>
@@ -409,6 +412,11 @@ int main(int argc, char** argv) {
   registry.add(make_file_read_tool(ft_cfg));
   registry.add(make_list_dir_tool(ft_cfg));
   registry.add(make_file_write_tool(ft_cfg));
+  // wfr-㊸ @①/@②：bash 工具 —— 副作用任意（NeedHuman 人审 + 词面静态门禁）。
+  // 执行后端 = PlainSpawnExecutor（进程级隔离，非沙箱；批③ 换 SandboxManager）。
+  // spawn 必须活得比 registry 久（spec.executor 是非拥有指针）。
+  auto const bash_spawn = tool::make_plain_spawn_executor();
+  registry.add(tool::make_bash_tool(bash_spawn.get()));
   ComponentRegistry comps;
   std::vector<std::string> all_tools;
   for (tool::ToolSpec const& t : registry.all()) all_tools.push_back(t.name);
@@ -416,6 +424,10 @@ int main(int argc, char** argv) {
   comps.toolsets["ts"] = all_tools;
   // 内置 chat 专用：常用件 + 文件对（天气/搜索之外，兑现 artifact 引用 + 写文件）
   comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir", "file_write"};
+  // wfr-㊸ @②：chat 的增强档 —— 带上 bash（副作用任意 → NeedHuman 人审悬挂）。
+  // 独立 toolset，不污染既有 chat 的既有行为（approve_bash_demo 等用它）。
+  comps.toolsets["chat_bash"] = {"get_weather", "web_search", "file_read",
+                                 "list_dir",    "file_write", "bash"};
 
   std::optional<model::openai::OpenAIChatModel> model;
   if (model_needed_key) {
@@ -475,7 +487,11 @@ int main(int argc, char** argv) {
   opts.components = &comps;
   opts.tool_policy = &guard;  // wfr-㊷：挂进 c_tool / c_run_tools 两个执行点
   // 不做 config_keys 白名单（生成器侧防护；wfr 跑手写/内置 workflow 由 --set 提供键）
-  auto wf = compile_workflow(*ir, registry, nullptr, opts);
+  // wfr-㊸ @②：人审悬挂（interrupt）需要 checkpointer + thread_id。用**进程内**
+  // MemoryCheckpointer：悬挂↔恢复只发生在同一次 wfr 调用内；跨进程续聊仍走会话
+  // 日志 replay（cp 每次进程重建，"日志即事实源"语义不变）。
+  state::MemoryCheckpointer mcp;
+  auto wf = compile_workflow(*ir, registry, &mcp, opts);
   if (!wf) {
     std::println("编译失败: {}", wf.error().message);
     return 2;
@@ -509,18 +525,70 @@ int main(int argc, char** argv) {
 
   FireOptions fo;
   fo.log = &slog;
+  fo.thread_id = "fire";  // wfr-㊸ @②：人审悬挂/恢复共用的线程（进程内 cp）
   Json inp = Json::array();
   inp.push_back(message::human_message(input));
   fo.input_messages = std::move(inp);
 
   Json config{{"workspace", workdir}, {"session", session}};
   for (auto const& [k, v] : sets) config[k] = v;
-  auto r = fire_once(*wf, std::move(config), std::move(fo));
-  if (!r) {
-    std::println("触发失败: {}", r.error().message);
-    return 1;
+
+  // wfr-㊸ @②：一次触发 = fire 循环直至跑完。每逢 approve_tools 悬挂（bash 等
+  // NeedHuman 工具），打印待批请求、读一行人工裁决（approve / reject <理由> / abort），
+  // 再 resume 续跑。不悬挂的 workflow 只走一次 fire，与既有行为一致。
+  Json result_state;
+  for (;;) {
+    auto r = fire_once(*wf, config, fo);
+    if (!r) {
+      std::println("触发失败: {}", r.error().message);
+      return 1;
+    }
+    result_state = *r;
+    auto const& pend = wf->graph.last_interrupt();
+    if (!pend.interrupted) break;  // 跑完（或本就不需要人审）
+
+    // —— 悬挂：人工审批 ——
+    std::println();
+    std::println("⏸ 需人工审批（节点 {}）—— 本轮执行停在审批点：", pend.node);
+    if (pend.payload.contains("calls") && pend.payload["calls"].is_array()) {
+      for (Json const& c : pend.payload["calls"])
+        std::println("  · tool={}  id={}  args={}", c.value("tool", "?"), c.value("id", "?"),
+                     c.value("args", Json::object()).dump());
+    } else {
+      std::println("  待批请求: {}", pend.payload.dump());
+    }
+    std::print("  批准？[approve | reject <理由> | abort]：");
+    std::cout.flush();
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+      std::println();
+      std::println("（stdin 结束，未获裁决 —— 本次触发止于审批点，可留待下次续审。）");
+      return 0;
+    }
+    std::string const t = cppchain::wfr::trim(line);
+    if (t.empty() || t == "abort" || t == "q" || t == "quit") {
+      std::println("（已中止 —— 本次触发止于审批点。）");
+      return 0;
+    }
+    Json resume;
+    if (t == "y" || t.starts_with("approve")) {
+      resume = Json{{"action", "approve"}};
+    } else if (t == "n") {
+      resume = Json{{"action", "reject"}};
+    } else if (t.starts_with("reject") || t.starts_with("拒")) {
+      std::string const fb =
+          cppchain::wfr::trim(t.substr(std::string("reject").size()));
+      resume = Json{{"action", "reject"}, {"feedback", fb}};
+    } else {
+      // 未识别输入 → 按拒绝处理（fail-closed：不执行）
+      resume = Json{{"action", "reject"}, {"feedback", t}};
+    }
+    fo.resume = std::move(resume);
+    fo.input_messages.clear();  // 恢复续跑：input 由引擎忽略（快照已含本轮前半段）
+    std::println("  → 裁决 {}\n", fo.resume->dump());
   }
-  std::string answer = last_ai_text(*r);
+
+  std::string answer = last_ai_text(result_state);
   message::sanitize_utf8(answer);  // 模型串流拼接可能带断字节：净化后完整打印（不截断）
   std::println("\n{}", answer.empty() ? "(无文本回复)" : answer);
   // wfr-㊷：副作用防护统计（验证陷阱纪律：计数/审计行数证明被测路径真被走到）

@@ -268,6 +268,7 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   // 全模式事件：host 要的是事件流本身；没传 stream 时 sink=null → 零事件（仅构造无磨损）
   iopts.mode = graph::EventMode::All;
   iopts.fork = opts.fork;
+  iopts.resume = opts.resume;  // wfr-㊸ @②：interrupt 悬挂的答复（人审裁决）
   // 包装 host 的 stream sink：给事件填 node_kind（引擎不默认图内 kind，kinds 表编译期建立；
   // 投影据此识别 load_history 之类的回声 update 并抑制 —— 与 wrapper 路径一致）
   if (opts.stream) {

@@ -117,6 +117,10 @@ struct FireOptions {
   // M10: 时间旅行分叉 —— 从 source_thread 的历史 checkpoint 恢复并继续（新快照落到
   // thread_id）。需要编译期注入 checkpointer（cp 非空）。分叉点找不到 → fail-closed。
   std::optional<graph::ForkSpec> fork = std::nullopt;
+  // wfr-㊸ @②：对上次 interrupt 悬挂的答复（approve_tools 的人工裁决等）。
+  // 与 thread_id 配合：带 resume 的第二次 fire 从该线程的悬挂快照恢复续跑，
+  // 悬挂节点从头重跑、interrupt() 返回本值（引擎语义见 graph.hpp / 01-discuss/06 §5 L3）。
+  std::optional<Json> resume = std::nullopt;
 };
 
 // 把 graph 运行期事件投影成会话日志记录（供宿主在 FireOptions.stream 里自选落地）。

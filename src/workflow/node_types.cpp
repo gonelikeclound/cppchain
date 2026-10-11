@@ -33,6 +33,7 @@ namespace cppchain::workflow {
 
 using cppchain::graph::Command;
 using cppchain::graph::NodeContext;
+using cppchain::graph::interrupt;
 
 namespace {
 
@@ -996,20 +997,23 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
-// ---- wfr-㊷：approve_tools（副作用审批，决策层）----
-// 读最后一条 AI 消息的 tool_calls → 逐 call 审批（deny 名单 + read_only 免审）：
-//   · denied  → 产 status="error" 的 ToolMessage（tool_call_id 保留）追加进 messages
-//     —— 协议满足（AI 声明 c2 + 紧跟 Tool(c2)）、模型下一轮可见"被拒"、run_tools 靠过滤跳过它。
-//   · approved → 只把 id 列表写进 results（供审计/echo 引用），**不执行**（执行在 run_tools）。
-// 判定纯函数：复用 agent::ToolApproval 的名单/免审逻辑（编译期构造、MemoPolicy::Off），
-// 图节点行为 = state 纯函数（重放不分叉，见 state.cpp 的 replay 铁律）。
+// ---- wfr-㊷/㊸：approve_tools（副作用审批决策层 + wfr-㊸ @② 人工悬挂）----
+// 读最后一条 AI 消息的 tool_calls → 逐 call 审批：
+//   · 未知工具 / deny 名单   → 静态拒绝：error ToolMessage 回喂（run_tools 靠过滤跳过）
+//   · read_only / 名单外      → 放行：id 写 results（**不执行**，执行在 run_tools）
+//   · NeedHuman 工具（bash） → **整节点悬挂**：interrupt 抛 InterruptSignal（落快照 +
+//     payload 供宿主渲染待批请求）；恢复时节点从头重跑、interrupt() 返回人工裁决：
+//       action=="approve" → 放行；其余（缺失/坏值）→ 视为拒绝 + feedback 回喂（fail-closed）。
+//     注释：悬挂前 rejects 的静态判定（deny/未知）在重跑时会重算 —— 该节点是**纯 state
+//     函数**（不碰外部），重跑一致；deny 名单硬拦先于 NeedHuman 判定（硬名单 > 人审）。
+// 判定纯函数：复用 agent::ToolApproval（编译期构造、MemoPolicy::Off），节点行为 = state 纯函数。
 void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   auto const reg = ctx.registry;
   agent::ToolApproval app{n.deny, agent::ToolApproval::Options{
                                        .memo = agent::ToolApproval::MemoPolicy::Off,
                                        .registry = reg}};  // 按值捕获：节点 = state 纯函数
   ctx.graph.add_node(
-      n.id, [app, reg, node_id = n.id](Json const& state, NodeContext&) mutable {
+      n.id, [app, reg, node_id = n.id](Json const& state, NodeContext& nc) mutable -> Command {
         auto const msgs = messages_from_state(state);
         std::vector<message::ToolCall> calls;
         for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
@@ -1019,23 +1023,55 @@ void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
           }
         if (calls.empty()) return Command{};  // 无工具调用（text 轮）→ 不产任何东西
 
-        Json msgs_update = Json::array();   // denied 的 error ToolMessage
+        Json msgs_update = Json::array();   // denied / 人类拒绝的 error ToolMessage
         Json approved_ids = Json::array();
         Json denied = Json::array();
+        std::vector<message::ToolCall> pending;  // wfr-㊸ @②：NeedHuman 工具 → 待人工
         for (message::ToolCall const& c : calls) {
-          std::string why;
-          // find == nullptr（未知工具）→ approve_tool_call 不会免审 → 走名单/回退 deny。
-          // 但 ToolApproval 是"名单外放行"，未知工具不在名单里会被放行 → 这里显式 fail-closed：
-          // 未知工具一律 deny（与 guard 对未知 spec 走非只读路一致）。
           tool::ToolSpec const* spec = reg ? reg->find(c.name) : nullptr;
           if (spec == nullptr) {
-            why = "未知工具 '" + c.name + "'（不在注册表里），拒绝执行";
-          } else if (!app.approve_tool_call(c, why)) {
+            // 未知工具 → fail-closed deny（ToolApproval"名单外放行"的兜底）
+            std::string const why = "未知工具 '" + c.name + "'（不在注册表里），拒绝执行";
             denied.push_back(Json{{"id", c.id}, {"tool", c.name}, {"why", why}});
             msgs_update.push_back(message::tool_message("审批拒绝：" + why, c.id, "error"));
             continue;
           }
-          approved_ids.push_back(c.id);
+          std::string why;
+          if (!app.approve_tool_call(c, why)) {  // deny 名单硬拦（read_only 在 approve_tool_call 内免审）
+            denied.push_back(Json{{"id", c.id}, {"tool", c.name}, {"why", why}});
+            msgs_update.push_back(message::tool_message("审批拒绝：" + why, c.id, "error"));
+            continue;
+          }
+          if (spec->approval == tool::ToolApprovalLevel::NeedHuman)
+            pending.push_back(c);  // 需人工裁决（不会被静态策略放行/拦截）
+          else
+            approved_ids.push_back(c.id);
+        }
+
+        // wfr-㊸ @②：有 NeedHuman 调用 → 整节点悬挂。
+        // 首次跑：interrupt 抛 InterruptSignal（引擎落快照、payload 携待批请求）；
+        // 恢复跑：节点从头重算（纯函数，结果一致）→ interrupt() 返回人工裁决。
+        if (!pending.empty()) {
+          Json req = Json::array();
+          for (message::ToolCall const& c : pending)
+            req.push_back(Json{{"id", c.id}, {"tool", c.name}, {"args", c.args}});
+          Json const decision =
+              interrupt(Json{{"kind", "approve_tools_request"}, {"node", node_id},
+                             {"calls", std::move(req)}},
+                        nc);
+          std::string const action = decision.is_object() ? decision.value("action", "") : "";
+          std::string const feedback =
+              decision.is_object() ? decision.value("feedback", "") : "";
+          if (action == "approve") {
+            for (message::ToolCall const& c : pending) approved_ids.push_back(c.id);
+          } else {
+            std::string const why = "人工审批拒绝" +
+                                    (feedback.empty() ? std::string{} : "：" + feedback);
+            for (message::ToolCall const& c : pending) {
+              denied.push_back(Json{{"id", c.id}, {"tool", c.name}, {"why", why}});
+              msgs_update.push_back(message::tool_message(why, c.id, "error"));
+            }
+          }
         }
 
         Json update = Json::object();
