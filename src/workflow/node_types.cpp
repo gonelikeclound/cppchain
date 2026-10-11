@@ -6,6 +6,7 @@
 
 #include <cctype>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <print>
@@ -20,6 +21,7 @@
 #include "cppchain/message/content_block.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/message/utf8.hpp"
+#include "cppchain/tool/exec_guard.hpp"
 #include "cppchain/tool/tool_node.hpp"
 #include "cppchain/workflow/expr.hpp"
 #include "cppchain/workflow/ir_walk.hpp"
@@ -634,9 +636,11 @@ void c_tool(NodeIR const& n, NodeType::CompileContext& ctx) {
           ? std::optional<std::string>(ctx.resolve(*n.on_error->fallback))
           : std::nullopt;
   tool::ToolRegistry const* reg = ctx.registry;
+  tool::ExecutionGuard const* guard = ctx.guard;  // wfr-㊷：副作用防护（null = 不防护）
 
   ctx.graph.add_node(
-      n.id, [node_id, tool, parameters, retry, fallback, reg](Json const& state, NodeContext&) {
+      n.id, [node_id, tool, parameters, retry, fallback, reg, guard](Json const& state,
+                                                                      NodeContext&) {
         tool::ToolSpec const* spec = reg->find(tool);
         if (spec == nullptr)
           throw tool::ToolException("tool '" + tool + "' not in registry (node '" + node_id + "')");
@@ -644,6 +648,25 @@ void c_tool(NodeIR const& n, NodeType::CompileContext& ctx) {
         Json const args = resolve_args(parameters, state);
         tool::ToolContext tctx;
         tctx.tool_call_id = node_id;  // 幂等/审计兜底：节点 id 即本次调用的标识
+
+        // wfr-㊷：执行点防护（单工具节点无并发 → prepare 决策门；保持 handler 的 JSON 语义）。
+        //   决策不通过（重放/拦截）：不执行 handler，把报告文本当结果（尽力 parse 回 JSON）；
+        //   决策通过：原 handler + retry/fallback 逻辑不变。
+        if (guard != nullptr) {
+          // prepare 内部对 read_only 免查日志/审计 → 只读工具不受影响
+          tool::ExecutionGuard::Prepared const prep =
+              guard->prepare(message::ToolCall{node_id, tool, args}, spec, "host");
+          if (!prep.execute) {
+            Json result;
+            try {  // 重放内容若是 handler 结果的 JSON dump → parse 回原形（expr/route 继续能用）
+              result = Json::parse(prep.report.text());
+            } catch (...) {
+              result = prep.report.text();  // 非 JSON（拦截说明/字符串结果）→ 原样字符串
+            }
+            Json update = Json{{kResultsKey, Json{{node_id, result}}}, {kLastExecKey, node_id}};
+            return Command::with_update(std::move(update));
+          }
+        }
 
         std::string last_err;
         for (int a = 0; a <= retry; ++a) {
@@ -831,18 +854,52 @@ void c_route(NodeIR const& n, NodeType::CompileContext& ctx) {
 
 void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   tool::ToolNode tn(ctx.registry);  // 复用 M3 的实现（并行、顺序对齐、错误回喂）
-  ctx.graph.add_node(n.id, [tn, node_id = n.id](Json const& state, NodeContext&) {
-    std::vector<message::ToolCall> calls;
-    auto const msgs = messages_from_state(state);
-    for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
-      if (it->type == message::Role::Ai) {
-        calls = it->tool_calls;
-        break;
-      }
-    if (calls.empty())
-      throw tool::ToolException("run_tools 节点：最后一条 AI 消息没有 tool_calls");
-    std::vector<message::Message> tool_msgs = tn.run(calls);
-    Json arr = Json::array();
+  tool::ExecutionGuard const* guard = ctx.guard;  // wfr-㊷：副作用防护（null = 不防护）
+  tool::ToolRegistry const* reg = ctx.registry;
+  ctx.graph.add_node(
+      n.id, [tn, guard, reg, node_id = n.id](Json const& state, NodeContext&) {
+        std::vector<message::ToolCall> calls;
+        auto const msgs = messages_from_state(state);
+        for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
+          if (it->type == message::Role::Ai) {
+            calls = it->tool_calls;
+            break;
+          }
+        if (calls.empty())
+          throw tool::ToolException("run_tools 节点：最后一条 AI 消息没有 tool_calls");
+
+        std::vector<message::Message> tool_msgs;
+        if (guard == nullptr) {
+          // 原路：ToolNode 自己并行执行（无防护时的行为与现状完全一致）
+          tool_msgs = tn.run(calls);
+        } else {
+          // wfr-㊷：先**串行 prepare** 全部（审批/查重/登记意图，单线程访问日志与审计），
+          // 放行的再**并行 run**（handler 直跑，不碰日志 → 并行安全）。顺序按下标回填。
+          std::size_t const width = std::max<std::size_t>(1, tn.options().max_parallel);
+          struct Plan {
+            tool::ExecutionGuard::Prepared prep;
+            tool::ToolSpec const* spec = nullptr;
+          };
+          std::vector<Plan> plans(calls.size());
+          for (std::size_t i = 0; i < calls.size(); ++i) {  // 串行段
+            plans[i].spec = reg ? reg->find(calls[i].name) : nullptr;
+            plans[i].prep = guard->prepare(calls[i], plans[i].spec, "model");
+          }
+          tool_msgs.resize(calls.size());
+          for (std::size_t base = 0; base < calls.size(); base += width) {  // 并行段
+            std::size_t const end = std::min(base + width, calls.size());
+            std::vector<std::future<message::Message>> batch;
+            batch.reserve(end - base);
+            for (std::size_t i = base; i < end; ++i) {
+              batch.push_back(std::async(std::launch::async, [&, i] {
+                if (!plans[i].prep.execute) return plans[i].prep.report;  // 重放/拦截 → 报告
+                return guard->run(calls[i], plans[i].spec, calls[i].args);  // 真执行
+              }));
+            }
+            for (std::size_t i = base; i < end; ++i) tool_msgs[i] = batch[i - base].get();
+          }
+        }
+        Json arr = Json::array();
     for (message::Message& m : tool_msgs) {
       // 工具输出（含 CJK/截断字节）可能非法 UTF-8 → 净化后再进 state，避免 dump 崩溃
       for (auto& blk : m.content)

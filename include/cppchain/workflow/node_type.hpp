@@ -24,6 +24,10 @@
 #include "cppchain/workflow/refs.hpp"
 #include "cppchain/workflow/session_log.hpp"  // SessionSink
 
+namespace cppchain::tool {
+class ExecutionGuard;  // 前置声明：CompileContext 只持有非拥有指针，规避 tool.hpp 重 include
+}
+
 namespace cppchain::workflow {
 
 // 一个节点类型的全部"与类型有关"的行为。用函数表而非虚基类：与既有 ToolSpec 同风格，
@@ -67,6 +71,9 @@ struct NodeType {
     // 运行期经 sink->nlog() 写 source=node 的诊断日志；引擎结构事件由 compiler 的
     // LoggingStateGraph 统一埋点，节点不用管。可为空（不落日志的触发）。
     std::shared_ptr<SessionSink> sink;
+    // wfr-㊷：副作用执行点防护（非拥有；null = 不防护）。c_tool / c_run_tools 编译时捕获，
+    // 运行期在工具执行点调用。由 CompileOptions::tool_policy 注入。
+    tool::ExecutionGuard const* guard = nullptr;
   };
   std::function<void(NodeIR const&, CompileContext&)> compile;
 

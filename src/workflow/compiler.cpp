@@ -155,6 +155,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   std::string compile_error;
   // 一份 cctx 复用（registered 要累加），只按当前作用域换 resolve。
   NodeType::CompileContext cctx{g, &registry, opts.components, resolve, 0, {}, sink};
+  cctx.guard = opts.tool_policy;  // wfr-㊷：副作用执行点防护（null = 不防护）
   std::function<void(std::vector<NodeIR> const&, LoopScope const*)> compile_list =
       [&](std::vector<NodeIR> const& nodes, LoopScope const* scope) {
         for (NodeIR const& n : nodes) {

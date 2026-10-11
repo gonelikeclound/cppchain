@@ -26,6 +26,10 @@
 #include "cppchain/workflow/ir.hpp"
 #include "cppchain/workflow/session_log.hpp"  // SessionLog / SessionSink
 
+namespace cppchain::tool {
+class ExecutionGuard;  // 前置声明：CompileOptions 仅持非拥有指针
+}
+
 namespace cppchain::workflow {
 
 using Json = nlohmann::json;
@@ -51,6 +55,10 @@ struct CompileOptions {
 
   // M12 组件注册表（nullptr = 含 model 节点时报错，因为无模型可用）
   ComponentRegistry const* components = nullptr;
+
+  // wfr-㊷：副作用执行点防护（非拥有；null = 不防护）。编译期注入 CompileContext.guard，
+  // c_tool / c_run_tools 在工具执行点调用（防重放 / 幂等 / probe）。宿主负责构造并保活。
+  tool::ExecutionGuard const* tool_policy = nullptr;
 };
 
 struct CompiledWorkflow {
