@@ -12,6 +12,8 @@
 #include <string_view>
 
 #include "cppchain/core/cancel.hpp"
+#include "cppchain/tool/command_classify.hpp"
+#include "cppchain/tool/executor.hpp"
 #include "cppchain/tool/probe.hpp"
 
 namespace cppchain::tool {
@@ -28,7 +30,19 @@ struct ToolException : std::runtime_error {
 struct ToolContext {
   std::string tool_call_id;
   core::CancelToken cancel;
+  // 命令类工具（bash 等）的执行后端：由 ExecutionGuard::run 从 ToolSpec::executor 注入。
+  // 无执行器 → 命令工具的 handler 必须 fail-closed 拒跑（wfr-㊸ @① 铁律：不直接 system()）。
+  ToolExecutor const* executor = nullptr;
   // 预留：StateRef state; Store* store; StreamWriter* writer;
+};
+
+// 审批级别（wfr-㊸ @① L3）：工具声明"谁来放行它的副作用"。
+//   消费方链：approve_tools 节点（静态策略）+ 批② 的 interrupt 悬挂；read_only 工具天然免审。
+//   命名避开 agent::ToolApproval（审批中间件类）—— 那是通道层，这里是规格契约层。
+enum class ToolApprovalLevel : unsigned char {
+  Never,     // 免审批（只读工具默认）
+  Policy,    // 静态策略决定（现在 approve_tools 的行为，多数工具默认）
+  NeedHuman, // 越过静态策略，直接要求人审（bash 出厂值；批② 起 approve_tools 对该类悬挂）
 };
 
 struct ToolSpec {
@@ -56,6 +70,21 @@ struct ToolSpec {
   // 词表见下面的 kToolCategories / is_known_category。**不进 to_openai()** ——
   // 类别是库内分类，不是 function schema 的一部分；真端点对未知字段敏感（见 to_openai 的教训）。
   std::string category = "general";
+
+  // wfr-㊸ @① 副作用契约：审批级别（L3 消费；bash 出厂 NeedHuman，其余默认 Policy）
+  ToolApprovalLevel approval = ToolApprovalLevel::Policy;
+
+  // wfr-㊸ @① 命令执行超时（L5 消费；bash 出厂 120s，执行器侧以它为强杀上限）
+  std::optional<std::chrono::milliseconds> timeout_ms;
+
+  // wfr-㊸ @① 命令类工具的执行后端（L4 抽象）：无执行器时命令工具 fail-closed 拒跑。
+  // 批① 注入 make_plain_spawn_executor()（进程级隔离）；批③ 由 SandboxManager provider 替换。
+  ToolExecutor const* executor = nullptr;
+
+  // wfr-㊸ @① 命令词面分类器（L2 静态门禁）：在参数上做保守分类。
+  // 消费方：ExecutionGuard::prepare 的"未开始"分支 —— ReadOnly 放行、其余 fail-closed 阻断
+  // （批② 起升级为 interrupt 悬挂）。read_only 工具不经过它（只读早退在前）。
+  std::function<CommandClass(nlohmann::json const& args)> command_classify = nullptr;
 
   // 链式设置类别：`reg.add(make_tool(...).with_category("retrieval"))`
   ToolSpec& with_category(std::string c) {

@@ -58,6 +58,41 @@ std::string iso_now() {
   return oss.str();
 }
 
+// ---- wfr-㊸ @① L2 词面门禁的审计词/理由/阻断文案 ----
+
+std::string classify_decision(CommandClass c) {
+  switch (c) {
+    case CommandClass::ReadOnly: return "command_readonly";
+    case CommandClass::Write: return "command_write";
+    case CommandClass::Risky: return "command_risky";
+    case CommandClass::Unknown: return "command_unknown";
+  }
+  return "command_unknown";
+}
+
+std::string classify_why(CommandClass c) {
+  switch (c) {
+    case CommandClass::ReadOnly: return "词面可证纯只读 → 放行";
+    case CommandClass::Write: return "有写副作用 → 需审批";
+    case CommandClass::Risky: return "危险签名 → 需审批";
+    case CommandClass::Unknown: return "无法静态分析 → fail-closed";
+  }
+  return "无法静态分析 → fail-closed";
+}
+
+std::string classify_message(CommandClass c) {
+  switch (c) {
+    case CommandClass::Write:
+      return "该命令有写副作用，未经批准不执行；接入人工审批（wfr-㊸ 批②）后可放行。";
+    case CommandClass::Risky:
+      return "该命令含危险签名，已拒绝执行；如需执行请人工审批（wfr-㊸ 批② 起可放行）。";
+    case CommandClass::Unknown:
+    default:
+      return "该命令无法静态判断其效果（fail-closed），已拒绝执行；"
+             "如需执行请人工审批（wfr-㊸ 批② 起可放行）。";
+  }
+}
+
 }  // namespace
 
 std::string ExecutionGuard::key_for(ToolCall const& call, ExecKeyMode mode) {
@@ -90,8 +125,28 @@ ExecutionGuard::Prepared ExecutionGuard::prepare(ToolCall const& call, ToolSpec 
 
   LogState const st = lookup(call, spec);
 
-  // 未开始在日志里 → 正常执行
+  // 未开始在日志里 → 正常执行。命令类工具先过 L2 词面门禁（批① 静态；批② 起对
+  // 非只读类升级为 interrupt 悬挂，见 01-discuss/06 §5 L2/L3）。
   if (!st.intent && !st.completed) {
+    if (spec != nullptr && spec->command_classify) {
+      CommandClass cc = CommandClass::Unknown;
+      try {
+        cc = spec->command_classify(call.args);
+      } catch (...) {
+        cc = CommandClass::Unknown;  // 分类器自身异常 → Unknown，绝不当作可读放行
+      }
+      if (cc != CommandClass::ReadOnly) {
+        ++blocked_;
+        audit({.tool = call.name, .key = key_for(call, opts_.key_mode),
+               .decision = classify_decision(cc), .who = std::string(who),
+               .why = "L2 词面门禁：" + classify_why(cc) + " → 阻断"});
+        return {.execute = false, .report = error_tool_message(call.id, classify_message(cc))};
+      }
+      audit({.tool = call.name, .key = key_for(call, opts_.key_mode),
+             .decision = "command_readonly", .who = std::string(who),
+             .why = "L2 词面门禁：" + classify_why(cc)});
+      return {.execute = true};
+    }
     audit({.tool = call.name, .key = key_for(call, opts_.key_mode),
            .decision = "allow", .who = std::string(who), .why = "未见过 → 正常执行"});
     return {.execute = true};
@@ -179,6 +234,7 @@ Message ExecutionGuard::run(ToolCall const& call, ToolSpec const* spec, nlohmann
 
   ToolContext ctx;
   ctx.tool_call_id = call.id;
+  ctx.executor = spec != nullptr ? spec->executor : nullptr;  // wfr-㊸ @①：命令工具的执行后端
 
   std::expected<nlohmann::json, ToolError> result;
   try {

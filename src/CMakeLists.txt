@@ -51,6 +51,9 @@ add_library(cppchain_tool STATIC
   tool/file_tools.cpp
   tool/probe.cpp
   tool/exec_guard.cpp
+  tool/command_classify.cpp
+  tool/spawn_executor.cpp
+  tool/bash_tool.cpp
   tool/arxiv.cpp
   tool/hybrid_selector.cpp)
 

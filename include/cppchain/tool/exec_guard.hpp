@@ -27,7 +27,9 @@
 namespace cppchain::tool {
 
 // 审计一次判定/探测。decision ∈ {allow, replay, blocked, probe_complete, probe_partial,
-// probe_absent}。原文不落 audit（key 是参数指纹，正文在会话日志）。
+// probe_absent, command_readonly, command_write, command_risky, command_unknown}
+// （后四者为 wfr-㊸ @① L2 词面门禁的判定，见 exec_guard.cpp）。
+// 原文不落 audit（key 是参数指纹，正文在会话日志）。
 struct AuditRecord {
   std::string ts = {};       // ISO 时间（ExecutionGuard::audit 统一填，调用方可不给）
   std::string tool;          // 工具名
