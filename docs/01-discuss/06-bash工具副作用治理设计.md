@@ -1,6 +1,6 @@
 # 06 · bash 工具副作用治理（wfr-㊸ 设计稿）
 
-> **状态**：🟡 已建档待启动（讨论见结论、设计已定稿，落地按 wfr-㊸ 分四批进行）
+> **状态**：🟢 进行中（批①② 已落地，批③④ 待启动；落地点位见 §9/§10）
 > **一句话**：bash 内容不确定 → 不预测语义，改管三件事——**声明**（把任意效果标成不可信输入）、
 > **环境**（可丢弃的沙箱边界）、**决策点**（词面保守分类 + interrupt 人审），审计兜底、回滚=丢弃边界。
 > **研究来源**：六路并行深度研究（Claude Code / OpenAI Codex+Agents SDK+Code Interpreter /
@@ -121,7 +121,7 @@ bash 记录打进 `{command, cwd, exit_code, stdout(截断), decision, reviewer}
 | 批 | 内容 | 交付 | 验收 |
 |---|---|---|---|
 | ① ✅ | ToolSpec 契约扩展（approval/timeout_ms/executor）+ 壳感知分类器（lexer+白/黑名单，纯函数） | `tool/` + `tests/tool/*` | 首条 bash 命令过 guard；全绿数字 |
-| ② | approve_tools 接 interrupt：need_human 悬挂 + resume 条件边，真机人工审批闭环 | `node_types.cpp` + `examples/` | 「真机批/拒」闭环，审计断言 |
+| ② ✅ | approve_tools 接 interrupt：need_human 悬挂 + resume 放行/拒绝，真机人工审批闭环 | `node_types.cpp` + `examples/` | 「真机批/拒」闭环，审计断言 |
 | ③ | SandboxManager 抽象（bwrap provider + fail-closed 无 provider 拒绝）+ timeout/输出截断 | `src/tool/` + `tests/` | 无 provider 时拒绝执行用例 |
 | ④ | 会话级 allow 前缀持久化（范围不变量）+ git 快照回滚实践 + problems/NN 验收记录定稿 | `share/wfr/workflows/*.json` + `docs/04-problems/22` | 615→全绿，真机 A/B/C 场景 |
 
@@ -163,3 +163,36 @@ bash 记录打进 `{command, cwd, exit_code, stdout(截断), decision, reviewer}
   无执行器拒跑、已完成重放不经过门禁、PlainSpawn 输出/退出码/超时强杀）。
 - 已知边界（留给后续批）：`exec env VAR=1 cmd` 判 Write 属保守过拦；glob 敏感命令集为固定表；
   超时/输出限额的对模型回传（L5）随批③ SandboxManager 一起落实。
+
+## 10. 批② 落地记录（2026-10-11）
+
+批次 ② 已实现并全绿（633→**639**，全量构建零告警），核心 = **把批① 的静态"阻断"升级为
+interrupt "悬挂"**，NeedHuman 工具（bash）的副作用进入「悬挂 → 人审 → 放行/拒绝」闭环：
+
+- **`c_approve_tools` 接 M10 interrupt**（`node_types.cpp`）：逐 call 判定 —— 未知工具/deny 名单
+  静态拒绝（先于人审，硬名单 > 人审）、read_only 免审（`approve_tool_call` 内）、
+  `ToolApprovalLevel::NeedHuman` → 攒入 pending → 整节点 `interrupt()`（payload 形如
+  `{"kind":"approve_tools_request","node","calls":[{id,tool,args}]}` 供宿主渲染）；
+  恢复时节点从头重跑（**纯 state 函数，重跑一致**）、`interrupt()` 返回裁决 ——
+  `action=="approve"` → 放行进 `approved_ids`；其余（缺失/坏值）→ 拒绝 + feedback 进
+  error ToolMessage 回喂（fail-closed）。**图拓扑不变**：拒绝复用 wfr-㊷ 的
+  `c_run_tools` 过滤（error ToolMessage → 跳过不执行 → 模型下一轮可见）。
+- **`FireOptions.resume` 通道**（`compiler.hpp/cpp`）：`fire_once` 透传 `InvokeOptions.resume`；
+  配合 `thread_id` + 编译期 checkpointer，第二次 fire 从悬挂快照恢复续跑。
+- **wfr 真机闭环**（`src/wfr/main.cpp`）：注册 bash（`PlainSpawnExecutor` 执行后端，见 §9）
+  + 新工具集 `chat_bash`；编译注入进程内 `MemoryCheckpointer`；触发改"fire 循环"——
+  悬挂时打印待批请求、读一行标准输入（`approve | reject <理由> | abort`），再 resume 续跑。
+  不悬挂的 workflow 只走一次 fire（既有行为不变）；stdin EOF / abort → 止于审批点。
+  新增真机演示 workflow：`share/wfr/workflows/approve_bash_demo.json`（`chat_bash`）。
+- **ToolNode 注入执行器修正**（`src/tool/tool_node.cpp`）：执行器从 `ToolSpec::executor` 注入
+  `ctx.executor`（此前只在 `ExecutionGuard::run` 注入）—— 命令工具在无 guard 的直跑路径
+  也能执行（demo 不加 guard 即验证）。
+- **测试 +6**（`wf/approve_tools_interrupt_test.cpp`，全带 MemoryCheckpointer）：
+  悬挂→approve 真执行（含 guard 审计"allow"）、拒绝+feedback 回喂不执行（审计为空）、
+  坏裁决 fail-closed 拒绝、只读不悬挂、deny 名单硬拦不悬挂、混合（静态放行+悬挂同批，
+  恢复后都放行）。既有 approve_tools 8 例回归不变。
+- **示例**：`examples/approve_interrupt/main.cpp`（workflow 级 HITL 闭环，真实 bash 子进程：
+  批准 → `exit_code: 0` + 输出；拒绝 → 不执行 + denied 记录）。
+- 已知边界：人为裁决目前是**批决策**（action 作用于全部 pending 调用），逐调用/编辑参数
+  （`update_state` 改写）是后续项；悬挂态在 wfr 里是进程内的（跨进程续聊仍走会话日志
+  replay，批④ 会话级 allow 前缀持久化时一并定夺）。
