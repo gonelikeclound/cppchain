@@ -72,6 +72,8 @@ enum class NodeKind {
   // ---- wfr-㊵：历史消息处理（见 02-arch-design/17）----
   Summarize,      // 把较早的一段历史折叠成一条 LLM 摘要（产 fold op 落日志）
   RefineHistory,  // 按规则精简/裁剪历史（产 transform op 落日志）
+  // ---- wfr-㊷：副作用审批（见 02-arch-design/18）----
+  ApproveTools,  // 审批决策：deny 名单 + read_only 免审；denied → error ToolMessage 回喂
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -158,6 +160,11 @@ struct NodeIR {
   std::string artifact_dir;  // clip_mode=artifact 时的落盘目录
   std::vector<std::string> rules;       // 静态规则清单（与 preset 取并集）
   std::vector<std::string> categories;  // drop_category 的类别（元素可为 @config.*，逗号分隔）
+
+  // ApproveTools 节点（wfr-㊷）：副作用审批。deny = 要拒绝的工具名单
+  // （元素可为 @config.resources 这类整串引用，运行期解析成数组）。
+  // read_only 免审由 registry 推断（deny 一个只读工具会在校验期被 VN17 拒绝）。
+  std::vector<std::string> deny;
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

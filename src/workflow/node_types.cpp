@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "cppchain/agent/agent.hpp"
@@ -319,6 +320,44 @@ void v_route(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorS
 void v_run_tools(NodeIR const& n, NodeType::ValidateContext const&,
                  NodeType::ErrorSink const& err) {
   if (n.next.empty()) err("VN10", "run_tools 节点 '" + n.id + "' 缺少 next");
+}
+
+// ---- wfr-㊷：approve_tools（副作用审批，见 02-arch-design/18） ----
+
+void v_approve_tools(NodeIR const& n, NodeType::ValidateContext const& ctx,
+                     NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN17", "approve_tools 节点 '" + n.id + "' 缺少 next");
+
+  // deny 名单：字面量必须在注册表里且**不能是只读工具**（deny 免审工具=死配置）；
+  // 整串 @config 引用留给运行期（与 RefineHistory 对 categories 的手法一致）。
+  std::vector<std::string> seen;
+  for (std::string const& d : n.deny) {
+    if (d.empty()) {
+      err("VN17", "approve_tools 节点 '" + n.id + "' 的 deny 含空工具名");
+      continue;
+    }
+    if (std::find(seen.begin(), seen.end(), d) != seen.end()) {
+      err("VN17", "approve_tools 节点 '" + n.id + "' 的 deny 重复：'" + d + "'");
+      continue;
+    }
+    seen.push_back(d);
+    if (is_whole_ref(d)) continue;  // 运行期解析
+    if (ctx.registry == nullptr) continue;  // 无注册表时不做存在性检查（如纯编译测试）
+    tool::ToolSpec const* spec = ctx.registry->find(d);
+    if (spec == nullptr)
+      err("VN17", "approve_tools 节点 '" + n.id + "' 的 deny 引用目录里不存在的工具 '" + d +
+                      "'");
+    else if (spec->read_only)
+      err("VN17", "approve_tools 节点 '" + n.id + "' 的 deny 含只读工具 '" + d +
+                      "'（只读工具本来就免审，拒绝它是死配置）");
+  }
+}
+
+// ref_texts：deny 元素也可能是 @config 引用，要让 VR1/VR4 的引用收集覆盖它们
+std::vector<std::string> t_approve_tools(NodeIR const& n) {
+  std::vector<std::string> out;
+  for (std::string const& d : n.deny) out.push_back(d);
+  return out;
 }
 
 // ---- wfr-㉚：loop 容器 ----
@@ -858,15 +897,36 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   tool::ToolRegistry const* reg = ctx.registry;
   ctx.graph.add_node(
       n.id, [tn, guard, reg, node_id = n.id](Json const& state, NodeContext&) {
+        // 找最后一条 AI 消息：它（若在位置 i）之后的 ToolMessage 视为"已回执的调用"
         std::vector<message::ToolCall> calls;
         auto const msgs = messages_from_state(state);
-        for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
-          if (it->type == message::Role::Ai) {
-            calls = it->tool_calls;
+        std::size_t last_ai_at = msgs.size();  // 哨兵：默认"AI 在最前/无 AI"，其后 Tool 全算
+        for (std::size_t ii = msgs.size(); ii-- > 0;)
+          if (msgs[ii].type == message::Role::Ai) {
+            last_ai_at = ii;
+            calls = msgs[ii].tool_calls;
             break;
           }
         if (calls.empty())
           throw tool::ToolException("run_tools 节点：最后一条 AI 消息没有 tool_calls");
+
+        // wfr-㊷：approve_tools 可能已给**最后一条 AI 之后**的某些调用补过 error ToolMessage
+        // （审批拒绝）。这些调用必须跳过执行 —— 且必须在这里（guard.prepare 之前）过滤：
+        // 否则 guard 会当"未见过 → 正常执行"，把被拒的调用真实执行（deny 被静默反转）。
+        // 判据 = "最后 AI 之后已存在同 id ToolMessage"（approve 的 error 恰好落在那里）；
+        // 不扫全 state —— 避免把 load_history 投影出的历史 ToolMessage 误算进来（那会让
+        // 新 AI 变成"调了工具无对应 ToolMessage" → 真端点 400）。
+        {
+          std::unordered_set<std::string> done_ids;
+          for (std::size_t j = last_ai_at + 1; j < msgs.size(); ++j)
+            if (msgs[j].is_tool() && msgs[j].tool_call_id) done_ids.insert(*msgs[j].tool_call_id);
+          if (!done_ids.empty())
+            calls.erase(std::remove_if(calls.begin(), calls.end(),
+                                       [&](message::ToolCall const& c) {
+                                         return done_ids.count(c.id) > 0;
+                                       }),
+                        calls.end());
+        }
 
         std::vector<message::Message> tool_msgs;
         if (guard == nullptr) {
@@ -932,6 +992,60 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
     update[kResultsKey] = std::move(results);
     return Command::with_update(std::move(update));
   });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+// ---- wfr-㊷：approve_tools（副作用审批，决策层）----
+// 读最后一条 AI 消息的 tool_calls → 逐 call 审批（deny 名单 + read_only 免审）：
+//   · denied  → 产 status="error" 的 ToolMessage（tool_call_id 保留）追加进 messages
+//     —— 协议满足（AI 声明 c2 + 紧跟 Tool(c2)）、模型下一轮可见"被拒"、run_tools 靠过滤跳过它。
+//   · approved → 只把 id 列表写进 results（供审计/echo 引用），**不执行**（执行在 run_tools）。
+// 判定纯函数：复用 agent::ToolApproval 的名单/免审逻辑（编译期构造、MemoPolicy::Off），
+// 图节点行为 = state 纯函数（重放不分叉，见 state.cpp 的 replay 铁律）。
+void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
+  auto const reg = ctx.registry;
+  agent::ToolApproval app{n.deny, agent::ToolApproval::Options{
+                                       .memo = agent::ToolApproval::MemoPolicy::Off,
+                                       .registry = reg}};  // 按值捕获：节点 = state 纯函数
+  ctx.graph.add_node(
+      n.id, [app, reg, node_id = n.id](Json const& state, NodeContext&) mutable {
+        auto const msgs = messages_from_state(state);
+        std::vector<message::ToolCall> calls;
+        for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
+          if (it->type == message::Role::Ai) {
+            calls = it->tool_calls;
+            break;
+          }
+        if (calls.empty()) return Command{};  // 无工具调用（text 轮）→ 不产任何东西
+
+        Json msgs_update = Json::array();   // denied 的 error ToolMessage
+        Json approved_ids = Json::array();
+        Json denied = Json::array();
+        for (message::ToolCall const& c : calls) {
+          std::string why;
+          // find == nullptr（未知工具）→ approve_tool_call 不会免审 → 走名单/回退 deny。
+          // 但 ToolApproval 是"名单外放行"，未知工具不在名单里会被放行 → 这里显式 fail-closed：
+          // 未知工具一律 deny（与 guard 对未知 spec 走非只读路一致）。
+          tool::ToolSpec const* spec = reg ? reg->find(c.name) : nullptr;
+          if (spec == nullptr) {
+            why = "未知工具 '" + c.name + "'（不在注册表里），拒绝执行";
+          } else if (!app.approve_tool_call(c, why)) {
+            denied.push_back(Json{{"id", c.id}, {"tool", c.name}, {"why", why}});
+            msgs_update.push_back(message::tool_message("审批拒绝：" + why, c.id, "error"));
+            continue;
+          }
+          approved_ids.push_back(c.id);
+        }
+
+        Json update = Json::object();
+        if (!msgs_update.empty()) update[kMessagesKey] = std::move(msgs_update);
+        Json results = Json::object();
+        results[node_id] = Json{{"approved_ids", std::move(approved_ids)},
+                                {"denied", std::move(denied)}};
+        update[kResultsKey] = std::move(results);
+        return Command::with_update(std::move(update));
+      });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
   ++ctx.registered;
 }
@@ -1377,6 +1491,29 @@ std::vector<NodeType> const& builtin_node_types() {
          node["next"] = n.next;
        },
        [](NodeIR const& n) { return "run_tools → " + n.next; }, v_run_tools, c_run_tools, e_next, t_none},
+
+      // ---------------- approve_tools（wfr-㊷）----------------
+      // 副作用审批：deny 名单 + read_only 免审；denied → error ToolMessage 回喂。
+      {NodeKind::ApproveTools, "approve_tools",
+       [](Json const& n) { return kind_is(n, "approve_tools"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "next", out.next);
+         if (node.contains("deny") && node["deny"].is_array())
+           for (Json const& d : node["deny"])
+             if (d.is_string()) out.deny.push_back(d.get<std::string>());
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "approve_tools";
+         node["next"] = n.next;
+         if (!n.deny.empty()) node["deny"] = n.deny;
+       },
+       [](NodeIR const& n) {
+         std::string d = "approve_tools deny=[";
+         for (std::size_t i = 0; i < n.deny.size(); ++i)
+           d += (i ? "," : "") + n.deny[i];
+         d += "] → " + n.next;
+         return d;
+       }, v_approve_tools, c_approve_tools, e_next, t_approve_tools},
 
       // ---------------- summarize（wfr-㊵）----------------
       // 把较早的一段历史折叠成一条 LLM 摘要；产出 fold op 落日志（重跑不重新摘要）。

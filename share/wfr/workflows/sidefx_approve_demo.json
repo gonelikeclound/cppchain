@@ -1,0 +1,22 @@
+{
+  "id": "sidefx_approve_demo",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 3, "next": "_turn_end",
+      "body": [
+        { "id": "think", "kind": "model", "model": "main", "tools": "chat",
+          "system_prompt": "你是审批演示助手。用户让你写文件时用 file_write（参数 path/content）；回答时如实报告工具结果，被拒绝就说明被拒绝。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "approve", "invalid_tool_calls": "_fail", "text": "_turn_end" },
+          "default": "_fail" },
+        { "id": "approve", "kind": "approve_tools",
+          "deny": ["file_write"],
+          "next": "act" },
+        { "id": "act", "kind": "run_tools", "next": "echo_tool" },
+        { "id": "echo_tool", "kind": "echo",
+          "text": "🔧 $act.result.summary", "next": "_continue" }
+      ] }
+  ]
+}

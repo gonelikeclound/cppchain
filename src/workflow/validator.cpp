@@ -437,7 +437,8 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
           first_of_in(sc, [](NodeIR const& n) { return n.kind == NodeKind::LoadHistory; });
       auto const use_i = first_of_in(sc, [](NodeIR const& n) {
         return n.kind == NodeKind::Model || n.kind == NodeKind::RunTools ||
-               n.kind == NodeKind::Summarize || n.kind == NodeKind::RefineHistory;
+               n.kind == NodeKind::Summarize || n.kind == NodeKind::RefineHistory ||
+               n.kind == NodeKind::ApproveTools;
       });
       if (load_i && use_i && *load_i > *use_i) {
         std::string const where = sc == nullptr ? std::string("顶层") : ("loop '" + sc->loop_id + "'");
@@ -598,11 +599,13 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                                    target.kind == NodeKind::LoadHistory ||
                                    target.kind == NodeKind::Route ||
                                    target.kind == NodeKind::Summarize ||
-                                   target.kind == NodeKind::RefineHistory;
+                                   target.kind == NodeKind::RefineHistory ||
+                                   target.kind == NodeKind::ApproveTools;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
                                "' 指向非 result 节点（仅 tool / model / run_tools / "
-                               "load_history / route / summarize / refine_history 发布 result）");
+                               "load_history / route / summarize / refine_history / "
+                               "approve_tools 发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");

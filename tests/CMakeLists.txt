@@ -143,6 +143,7 @@ add_executable(workflow_tests
   wf/fakes_test.cpp
   wf/agent_loop_test.cpp
   wf/side_effect_workflow_test.cpp
+  wf/approve_tools_test.cpp
   wf/history_nodes_test.cpp
   wf/plugin_import_test.cpp
   wf/m10_runtime_test.cpp
