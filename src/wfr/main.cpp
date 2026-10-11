@@ -20,6 +20,7 @@
 #include <cppchain/model/openai/openai_chat_model.hpp>
 #include <cppchain/tool/calculator.hpp>
 #include <cppchain/tool/datetime.hpp>
+#include <cppchain/tool/exec_guard.hpp>
 #include <cppchain/tool/file_tools.hpp>
 #include <cppchain/tool/registry.hpp>
 #include <cppchain/tool/weather.hpp>
@@ -400,22 +401,21 @@ int main(int argc, char** argv) {
     ws_cfg.api_key = env_or(dotenv, "WEB_SEARCH_API_KEY");     // feedcoop Bearer；未配则运行时搜索报错
     registry.add(make_web_search_tool(transport, std::move(ws_cfg)));
   }
-  // wfr-㊶：文件系统只读对（file_read / list_dir）——sandbox 根 = 工作区。让历史裁剪的
-  // 「完整结果已落盘」引用行真的可兑现：模型把引用行里的相对路径直接喂 file_read 即可读回全文。
-  // file_write 是副作用（read_only=false）且 wfr loop 没有审批中间件 → **不默认挂**，要挂得先接审批。
-  {
-    tool::FileToolsConfig ft_cfg;
-    ft_cfg.root_dir = std::filesystem::absolute(workdir);  // 沙箱根 = 工作区；越界/绝对路径/链接逃逸由工具拒
-    registry.add(make_file_read_tool(ft_cfg));
-    registry.add(make_list_dir_tool(ft_cfg));
-  }
+  // wfr-㊶：文件系统对（file_read / list_dir / **file_write**）——sandbox 根 = 工作区。
+  // 只读对兑现 artifact 引用行；file_write（read_only=false）由 ExecutionGuard 防护
+  // （wfr-㊷）：防重放/幂等以会话日志为事实源，崩溃缺环由磁盘 probe 兜底。
+  tool::FileToolsConfig ft_cfg;
+  ft_cfg.root_dir = std::filesystem::absolute(workdir);  // 沙箱根 = 工作区；越界/绝对路径/链接逃逸由工具拒
+  registry.add(make_file_read_tool(ft_cfg));
+  registry.add(make_list_dir_tool(ft_cfg));
+  registry.add(make_file_write_tool(ft_cfg));
   ComponentRegistry comps;
   std::vector<std::string> all_tools;
   for (tool::ToolSpec const& t : registry.all()) all_tools.push_back(t.name);
   comps.toolsets["all"] = all_tools;
   comps.toolsets["ts"] = all_tools;
-  // 内置 chat 专用：常用件 + 只读文件对（天气/搜索之外，读工作区文件以兑现 artifact 引用）
-  comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir"};
+  // 内置 chat 专用：常用件 + 文件对（天气/搜索之外，兑现 artifact 引用 + 写文件）
+  comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir", "file_write"};
 
   std::optional<model::openai::OpenAIChatModel> model;
   if (model_needed_key) {
@@ -433,8 +433,47 @@ int main(int argc, char** argv) {
     comps.models["main"] = &*model;
   }
 
+  // ---- wfr-㊷：副作用执行点防护 ----
+  // guard 以**会话日志为事实源**：跨进程续聊时读旧会话历史，判定 file_write 等副作用
+  // 工具的执行状态（未开始/已完成/Intent 残留）。审计信**写到本会话目录**（.wfr/audit/）。
+  // 注：guard 在 main 作用域持有 → 生命周期覆盖 compile + 全部 fire_once。
+  std::vector<message::Message> hist_msgs;
+  {
+    std::string const hp = session_path(workdir, session);
+    std::error_code ec;
+    if (std::filesystem::exists(hp, ec))
+      hist_msgs = replay_session_messages(hp);  // 首跑无文件 → 空历史（未开始 → 可安全执行）
+  }
+  std::size_t audit_written = 0;  // 审计落盘计数（供调试验证，非同步关键路径）
+  tool::ExecutionGuard::Options guard_opts;
+  guard_opts.log = cppchain::workflow::replay_exec_log_reader(hist_msgs);  // 只建一次，运行期只查
+  guard_opts.audit = [&](tool::AuditRecord const& rec) {
+    // 追加写 .wfr/audit/session-<name>.jsonl（原子改写：临时 + rename，同 FileJournal 纪律）。
+    // 审计不是关键路径：写失败只计数不打断（fail-open 于可观测性，fail-closed 于副作用本身）。
+    std::filesystem::path const af =
+        wfr_root(workdir) / "audit" / ("session-" + (session.empty() ? "default" : session) +
+                                      ".audit.jsonl");
+    std::error_code ec;
+    std::filesystem::create_directories(af.parent_path(), ec);
+    std::string tmp = af.string() + ".tmp";
+    {
+      std::ifstream in(af);
+      std::ofstream out(tmp, std::ios::app);
+      if (in && out) out << in.rdbuf();  // 拷贝现有再追加（简单原子）；会话量小，可接受
+      if (out) out << nlohmann::json{{"ts", rec.ts},   {"tool", rec.tool},
+                                     {"key", rec.key}, {"decision", rec.decision},
+                                     {"who", rec.who}, {"why", rec.why}}
+                          .dump()
+                   << "\n";
+    }
+    if (!ec) std::filesystem::rename(tmp, af, ec);  // rename 失败 → tmp 残留文件（无害，下轮覆盖）
+    ++audit_written;
+  };
+  tool::ExecutionGuard guard{std::move(guard_opts)};
+
   CompileOptions opts;
   opts.components = &comps;
+  opts.tool_policy = &guard;  // wfr-㊷：挂进 c_tool / c_run_tools 两个执行点
   // 不做 config_keys 白名单（生成器侧防护；wfr 跑手写/内置 workflow 由 --set 提供键）
   auto wf = compile_workflow(*ir, registry, nullptr, opts);
   if (!wf) {
@@ -484,6 +523,10 @@ int main(int argc, char** argv) {
   std::string answer = last_ai_text(*r);
   message::sanitize_utf8(answer);  // 模型串流拼接可能带断字节：净化后完整打印（不截断）
   std::println("\n{}", answer.empty() ? "(无文本回复)" : answer);
+  // wfr-㊷：副作用防护统计（验证陷阱纪律：计数/审计行数证明被测路径真被走到）
+  if (guard.has_log())
+    std::println("副作用防护: 执行 {} · 重放 {} · fail-closed {} · 审计 {} 行",
+                 guard.executions(), guard.replays(), guard.blocked(), audit_written);
   std::println("会话已更新: {} 条消息", replay_session_messages(slog_path).size());
   return 0;
 }

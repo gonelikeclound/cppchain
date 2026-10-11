@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 
 #include "cppchain/message/serializer.hpp"
@@ -271,6 +272,72 @@ std::vector<message::Message> replay_session_messages(std::string const& path) {
   auto const mit = state.find(std::string(kMessagesKey));  // 见 workflow/refs.hpp
   if (mit == state.end() || !mit->is_array()) return {};
   return messages_from_json(*mit);
+}
+
+tool::ExecutionGuard::LogReader replay_exec_log_reader(std::vector<message::Message> const& msgs) {
+  // 扫描消息流，按"AI.tool_calls（发起）→ ToolMessage（完成）"配对建状态表。
+  //   遍历到 Tool 消息时，其 tool_call_id 指向某次发起 —— 那次调用即完成。
+  struct CallInfo {
+    std::string key;   // 幂等键（NameAndArgs）
+    bool done = false; // 是否见过对应 ToolMessage
+  };
+  std::unordered_map<std::string, CallInfo> calls;  // tool_call_id → 调用
+  for (message::Message const& m : msgs) {
+    if (m.type == message::Role::Ai) {
+      for (message::ToolCall const& tc : m.tool_calls) {
+        CallInfo& ci = calls[std::string{tc.id.empty() ? tc.name : tc.id}];
+        ci.key = tool::ExecutionGuard::key_for(tc, tool::ExecKeyMode::NameAndArgs);
+        // 同一 AI 消息里 id 与 name/args 一定成对；若 id 撞（不太可能），后写覆盖，可接受
+      }
+    } else if (m.type == message::Role::Tool && m.tool_call_id) {
+      auto it = calls.find(*m.tool_call_id);
+      if (it != calls.end()) it->second.done = true;
+    }
+  }
+
+  // 汇总：同一 key 出现多次 → 取"最后一次"语义：展开到第一次完成之前算 intent，
+  // 一旦出现过 ToolMessage → completed。sorted 靠输入序：calls 遍历顺序即消息序。
+  // 简化：key 维度聚合 ——
+  //   · key 有一个**已完成**调用 → completed（内容取最后一次完成的）
+  //   · key 只有发起、无任何完成 → intent 残留
+  struct KeyState {
+    bool completed = false;
+    bool intent = false;
+    std::string content;
+    std::string status = "success";
+  };
+  std::unordered_map<std::string, KeyState> states;
+  // 重建 ToolMessage content 需要回查消息：这里直接在扫描时收集。
+  // 上面只记了 done，没存 content —— 重扫一遍收集（消息不多，成本可忽略）。
+  for (message::Message const& m : msgs) {
+    if (m.type != message::Role::Tool || !m.tool_call_id) continue;
+    auto const it = calls.find(*m.tool_call_id);
+    if (it == calls.end() || !it->second.done) continue;
+    KeyState& ks = states[it->second.key];
+    ks.completed = true;
+    ks.content = m.text();   // 最后一次完成的内容
+    ks.status = m.status;
+  }
+  for (auto const& [id, ci] : calls)
+    if (!ci.done && !ci.key.empty()) {
+      auto& ks = states[ci.key];
+      if (!ks.completed) ks.intent = true;  // 已完成过的不覆盖成 intent
+    }
+
+  // LogState 闭包：只读快照（msgs 副本），运行期可被并行/多次查 —— 安全。
+  auto table = std::make_shared<std::unordered_map<std::string, KeyState>>(std::move(states));
+  return [table](std::string const& key) -> tool::ExecutionGuard::LogState {
+    auto const it = table->find(key);
+    if (it == table->end()) return {};  // 未开始
+    tool::ExecutionGuard::LogState st;
+    if (it->second.completed) {
+      st.completed = true;
+      st.content = it->second.content;
+      st.status = it->second.status;
+    }
+    if (it->second.intent) st.intent = true;
+    return st;
+  };
 }
 
 }  // namespace cppchain::workflow

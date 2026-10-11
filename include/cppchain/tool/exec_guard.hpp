@@ -73,33 +73,35 @@ class ExecutionGuard {
     ProbeResult probe_res = ProbeResult::Unknown;
   };
   [[nodiscard]] Prepared prepare(message::ToolCall const& call, ToolSpec const* spec,
-                                 std::string_view who = "model");
+                                 std::string_view who = "model") const;
   // 只有 Prepared.execute==true 才调。handler 直跑（异常→error 回喂），计 executions_。
   // 并行安全：不碰日志/审计。
   [[nodiscard]] message::Message run(message::ToolCall const& call, ToolSpec const* spec,
-                                     nlohmann::json const& args);
+                                     nlohmann::json const& args) const;
 
   // ---- 一步 API（c_tool 单工具节点无并发）----
   [[nodiscard]] message::Message execute(message::ToolCall const& call, ToolSpec const* spec,
                                          nlohmann::json const& args,
-                                         std::string_view who = "model");
+                                         std::string_view who = "model") const;
 
   [[nodiscard]] std::size_t replays() const { return replays_; }
   [[nodiscard]] std::size_t blocked() const { return blocked_; }  // Intent→fail-closed 次数
   [[nodiscard]] std::size_t executions() const { return executions_; }
   [[nodiscard]] std::size_t audit_lines() const { return mem_audit_.size(); }
+  // 是否配了日志事实源（决定防重放是否生效；logger 为 nullptr 时 guard 是纯审计穿透）
+  [[nodiscard]] bool has_log() const { return opts_.log != nullptr; }
 
   [[nodiscard]] static std::string key_for(message::ToolCall const& call, ExecKeyMode mode);
 
  private:
   [[nodiscard]] LogState lookup(message::ToolCall const& call, ToolSpec const* spec) const;
-  void audit(AuditRecord rec);  // 走 sink + 内存兜底，记 decision
+  void audit(AuditRecord rec) const;  // 走 sink + 内存兜底，记 decision
 
   Options opts_;
-  std::size_t replays_ = 0;
-  std::size_t blocked_ = 0;
-  std::size_t executions_ = 0;
-  std::vector<AuditRecord> mem_audit_;  // 未落盘时的内存审计（离线测试断言用）
+  mutable std::size_t replays_ = 0;
+  mutable std::size_t blocked_ = 0;
+  mutable std::size_t executions_ = 0;
+  mutable std::vector<AuditRecord> mem_audit_;  // 未落盘时的内存审计（离线测试断言用）
   mutable std::mutex mu_;               // 保护 executions_（run 并行段）与 mem_audit_
 };
 

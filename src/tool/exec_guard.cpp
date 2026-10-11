@@ -74,7 +74,7 @@ ExecutionGuard::LogState ExecutionGuard::lookup(ToolCall const& call,
   return opts_.log(key_for(call, opts_.key_mode));
 }
 
-void ExecutionGuard::audit(AuditRecord rec) {
+void ExecutionGuard::audit(AuditRecord rec) const {
   rec.ts = iso_now();
   {
     std::lock_guard<std::mutex> lk(mu_);
@@ -84,7 +84,7 @@ void ExecutionGuard::audit(AuditRecord rec) {
 }
 
 ExecutionGuard::Prepared ExecutionGuard::prepare(ToolCall const& call, ToolSpec const* spec,
-                                                 std::string_view who) {
+                                                 std::string_view who) const {
   // 只读工具完全免防护：不查日志、不审计、直接执行（重跑查询无害，无副作用可重复）
   if (spec != nullptr && spec->read_only) return {.execute = true};
 
@@ -169,7 +169,7 @@ ExecutionGuard::Prepared ExecutionGuard::prepare(ToolCall const& call, ToolSpec 
   }
 }
 
-Message ExecutionGuard::run(ToolCall const& call, ToolSpec const* spec, nlohmann::json const& args) {
+Message ExecutionGuard::run(ToolCall const& call, ToolSpec const* spec, nlohmann::json const& args) const {
   // 与 ToolNode::execute_one 同纪律：handler 异常/返回 unexpected → error 回喂，不抛出
   if (spec == nullptr || !spec->handler) {
     ++executions_;  // 计入一次（实际走了执行路径）
@@ -204,7 +204,7 @@ Message ExecutionGuard::run(ToolCall const& call, ToolSpec const* spec, nlohmann
 }
 
 Message ExecutionGuard::execute(ToolCall const& call, ToolSpec const* spec,
-                                nlohmann::json const& args, std::string_view who) {
+                                nlohmann::json const& args, std::string_view who) const {
   Prepared const p = prepare(call, spec, who);
   if (!p.execute) return p.report;
   return run(call, spec, args);

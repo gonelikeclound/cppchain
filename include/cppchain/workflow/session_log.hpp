@@ -24,6 +24,7 @@
 #include <nlohmann/json.hpp>
 
 #include "cppchain/message/message.hpp"
+#include "cppchain/tool/exec_guard.hpp"
 
 namespace cppchain::workflow {
 
@@ -123,5 +124,15 @@ struct SessionSink {
 // 读会话日志 → 按 seq 依次 apply（source=engine && phase=exit && status=ok 记录）→ 取 messages。
 // 只读不写（replay 不该修复/变更文件）；文件缺失（首次使用）→ 空。
 [[nodiscard]] std::vector<message::Message> replay_session_messages(std::string const& path);
+
+// wfr-㊷：从会话日志重建"副作用执行状态"的读取器 —— 供 ExecutionGuard 当事实源。
+// 判定依据：消息流里每个工具调用的生命周期 ——
+//   无该 key 的记录          → 未开始（可执行）
+//   AI.tool_calls 已见 / 无对应 ToolMessage → Intent 残留（执行中崩溃缺环）
+//   有 ToolMessage（success/error）→ 已完成（重放其内容）
+// 幂等键 = ExecutionGuard 的 NameAndArgs（工具名 + 参数指纹）。
+// 只读工具、无副作用通道的消息不进判定（guard 侧 read_only 早退更优先）。
+[[nodiscard]] tool::ExecutionGuard::LogReader
+replay_exec_log_reader(std::vector<message::Message> const& msgs);
 
 }  // namespace cppchain::workflow

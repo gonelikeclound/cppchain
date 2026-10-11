@@ -19,6 +19,7 @@
 #include "cppchain/workflow/compiler.hpp"
 #include "cppchain/workflow/components.hpp"
 #include "cppchain/workflow/ir.hpp"
+#include "cppchain/workflow/session_log.hpp"
 #include "support/fakes.hpp"
 
 using namespace cppchain;
@@ -185,4 +186,60 @@ TEST(WfSideEffectGuard, intent_without_probe_blocks_in_workflow) {
   EXPECT_EQ(f.sinks.notifications.size(), 0u);  // 不重发
   EXPECT_EQ(f.guard->blocked(), 1u);             // fail-closed
   EXPECT_EQ(f.guard->executions(), 0u);
+}
+
+// ---- replay_exec_log_reader：会话日志 → 执行状态三态（wfr 装配的事实源） ----
+
+TEST(WfSideEffectGuard, log_reader_three_states) {
+  // 未开始：日志里没有任何记录 → 读取器返回"空"（执行）
+  std::vector<Message> empty;
+  auto reader = replay_exec_log_reader(empty);
+  ToolCall probe_call{"k", std::string(kToolSendNotification),
+                      Json{{"title", "hello"}, {"body", "world"}}};
+  std::string const key =
+      ExecutionGuard::key_for(probe_call, ExecKeyMode::NameAndArgs);
+
+  ExecutionGuard::LogState st0 = reader(key);
+  EXPECT_FALSE(st0.intent);
+  EXPECT_FALSE(st0.completed);
+
+  // 已完成：AI(tool_call) → Tool(结果)
+  Message ai = cppchain::message::ai_message("");
+  ai.tool_calls.push_back(ToolCall{"c1", std::string(kToolSendNotification),
+                                   Json{{"title", "hello"}, {"body", "world"}}});
+  Message tool = cppchain::message::tool_message(R"({"ok":true})", "c1");
+  auto reader1 = replay_exec_log_reader(std::vector<Message>{ai, tool});
+  ExecutionGuard::LogState st1 = reader1(key);
+  EXPECT_TRUE(st1.completed);               // 有发有回 → 已完成
+  EXPECT_FALSE(st1.intent);
+  EXPECT_EQ(st1.content, R"({"ok":true})"); // 重放内容
+}
+
+TEST(WfSideEffectGuard, log_reader_intent_residue) {
+  // Intent 残留：AI 发了调用、没有对应 ToolMessage（崩溃缺环）
+  Message ai = cppchain::message::ai_message("");
+  ai.tool_calls.push_back(ToolCall{"c1", std::string(kToolSendNotification),
+                                   Json{{"title", "hello"}, {"body", "world"}}});
+  auto reader = replay_exec_log_reader(std::vector<Message>{ai});
+  std::string const key = ExecutionGuard::key_for(
+      ToolCall{"k", std::string(kToolSendNotification), Json{{"title", "hello"}, {"body", "world"}}},
+      ExecKeyMode::NameAndArgs);
+  ExecutionGuard::LogState st = reader(key);
+  EXPECT_TRUE(st.intent);                   // 有发起、无结果 → 崩溃缺环
+  EXPECT_FALSE(st.completed);
+}
+
+TEST(WfSideEffectGuard, log_reader_param_fingerprint_is_key) {
+  // 键是参数指纹：参数键序不同 → 同一键（completed 命中）
+  Message ai = cppchain::message::ai_message("");
+  ai.tool_calls.push_back(ToolCall{"c1", std::string(kToolSendNotification),
+                                   Json{{"body", "world"}, {"title", "hello"}}});  // 键序反
+  Message tool = cppchain::message::tool_message(R"({"ok":true})", "c1");
+  auto reader = replay_exec_log_reader(std::vector<Message>{ai, tool});
+  // 用"正序"的键查 → 应命中（canonical 后同键）
+  std::string const key = ExecutionGuard::key_for(
+      ToolCall{"k", std::string(kToolSendNotification), Json{{"title", "hello"}, {"body", "world"}}},
+      ExecKeyMode::NameAndArgs);
+  ExecutionGuard::LogState st = reader(key);
+  EXPECT_TRUE(st.completed);
 }
