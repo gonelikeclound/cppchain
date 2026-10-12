@@ -119,7 +119,7 @@ void ExecutionGuard::audit(AuditRecord rec) const {
 }
 
 ExecutionGuard::Prepared ExecutionGuard::prepare(ToolCall const& call, ToolSpec const* spec,
-                                                 std::string_view who) const {
+                                                 std::string_view who, bool pre_approved) const {
   // 只读工具完全免防护：不查日志、不审计、直接执行（重跑查询无害，无副作用可重复）
   if (spec != nullptr && spec->read_only) return {.execute = true};
 
@@ -136,6 +136,15 @@ ExecutionGuard::Prepared ExecutionGuard::prepare(ToolCall const& call, ToolSpec 
         cc = CommandClass::Unknown;  // 分类器自身异常 → Unknown，绝不当作可读放行
       }
       if (cc != CommandClass::ReadOnly) {
+        // wfr-㊸ ⑤：人审已批准（approve_tools approved_ids）→ 词面门禁不重复拦
+        // （人审看的正是这个 args）。未批准者仍 fail-closed —— 这是注入兜底：
+        // 模型被骗发危险命令，只要没走人审，这里照拦。
+        if (pre_approved) {
+          audit({.tool = call.name, .key = key_for(call, opts_.key_mode),
+                 .decision = "approved_human", .who = std::string(who),
+                 .why = "人工审批放行（L2 词面门禁：" + classify_why(cc) + " 不再重复拦）"});
+          return {.execute = true};
+        }
         ++blocked_;
         audit({.tool = call.name, .key = key_for(call, opts_.key_mode),
                .decision = classify_decision(cc), .who = std::string(who),
@@ -260,8 +269,9 @@ Message ExecutionGuard::run(ToolCall const& call, ToolSpec const* spec, nlohmann
 }
 
 Message ExecutionGuard::execute(ToolCall const& call, ToolSpec const* spec,
-                                nlohmann::json const& args, std::string_view who) const {
-  Prepared const p = prepare(call, spec, who);
+                                nlohmann::json const& args, std::string_view who,
+                                bool pre_approved) const {
+  Prepared const p = prepare(call, spec, who, pre_approved);
   if (!p.execute) return p.report;
   return run(call, spec, args);
 }

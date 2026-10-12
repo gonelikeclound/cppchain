@@ -29,4 +29,7 @@ struct CommandClassify {
 // 详情入口：类别 + 依据。
 [[nodiscard]] CommandClassify classify_bash_command_detail(std::string_view command);
 
+// 类别的稳定名字（wfr-㊸ ⑤：allow 前缀记录里落盘用；持久化格式要稳定、可读）。
+[[nodiscard]] char const* command_class_name(CommandClass cl);
+
 }  // namespace cppchain::tool

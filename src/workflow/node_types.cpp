@@ -22,6 +22,7 @@
 #include "cppchain/message/content_block.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/message/utf8.hpp"
+#include "cppchain/tool/command_classify.hpp"  // wfr-㊸ ⑤：allow 前缀按类别封顶
 #include "cppchain/tool/exec_guard.hpp"
 #include "cppchain/tool/tool_node.hpp"
 #include "cppchain/workflow/expr.hpp"
@@ -929,6 +930,23 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
                         calls.end());
         }
 
+        // wfr-㊸ ⑤：approve_tools 人审放行的调用（approved_ids）→ guard 不再重复拦词面门禁
+        // （人审看的正是这个 args；未批准的写/危险仍由 guard fail-closed 兜注入）。
+        // 从 state results 里找 approve 节点发布的 approved_ids（state 纯函数的产物）。
+        std::unordered_set<std::string> approved_ids;
+        {
+          auto const res = state.find(kResultsKey);
+          if (res != state.end() && res->is_object()) {
+            for (auto const& [k, v] : res->items()) {
+              if (!v.is_object()) continue;
+              auto const it = v.find("approved_ids");
+              if (it == v.end() || !it->is_array()) continue;
+              for (auto const& id : *it)
+                if (id.is_string()) approved_ids.insert(id.get<std::string>());
+            }
+          }
+        }
+
         std::vector<message::Message> tool_msgs;
         if (guard == nullptr) {
           // 原路：ToolNode 自己并行执行（无防护时的行为与现状完全一致）
@@ -944,7 +962,9 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
           std::vector<Plan> plans(calls.size());
           for (std::size_t i = 0; i < calls.size(); ++i) {  // 串行段
             plans[i].spec = reg ? reg->find(calls[i].name) : nullptr;
-            plans[i].prep = guard->prepare(calls[i], plans[i].spec, "model");
+            plans[i].prep =
+                guard->prepare(calls[i], plans[i].spec, "model",
+                               approved_ids.count(calls[i].id) > 0);  // ⑤：人审放行 ≠ 重复拦
           }
           tool_msgs.resize(calls.size());
           for (std::size_t base = 0; base < calls.size(); base += width) {  // 并行段
@@ -1007,6 +1027,24 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
 //     注释：悬挂前 rejects 的静态判定（deny/未知）在重跑时会重算 —— 该节点是**纯 state
 //     函数**（不碰外部），重跑一致；deny 名单硬拦先于 NeedHuman 判定（硬名单 > 人审）。
 // 判定纯函数：复用 agent::ToolApproval（编译期构造、MemoPolicy::Off），节点行为 = state 纯函数。
+// wfr-㊸ ⑤：命令危险度排序（allow 前缀"类别封顶"用）—— 干净→危险 = RO < Write < Risky ≤ Unknown。
+int command_risk_rank(tool::CommandClass c) {
+  switch (c) {
+    case tool::CommandClass::ReadOnly: return 0;
+    case tool::CommandClass::Write: return 1;
+    case tool::CommandClass::Risky: return 2;
+    case tool::CommandClass::Unknown: return 3;
+  }
+  return 3;
+}
+// 类别名字 → 枚举（allowlist 记录持久化用的是 command_class_name；名字稳定可读）。
+tool::CommandClass command_class_from_name(std::string const& s) {
+  if (s == "ReadOnly") return tool::CommandClass::ReadOnly;
+  if (s == "Write") return tool::CommandClass::Write;
+  if (s == "Risky") return tool::CommandClass::Risky;
+  return tool::CommandClass::Unknown;  // 未识别名 → Unknown（fail-closed 方向）
+}
+
 void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   auto const reg = ctx.registry;
   agent::ToolApproval app{n.deny, agent::ToolApproval::Options{
@@ -1029,7 +1067,10 @@ void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
         std::vector<message::ToolCall> pending;  // wfr-㊸ @②：NeedHuman 工具 → 待人工
 
         // wfr-㊸ @④：会话级 allow 前缀（宿主从 <session>.allowlist.jsonl 灌进 config）。
-        // 匹配 = 命令字符串 starts_with(前缀)，且记录的 sandbox provider == 当前（范围不变量）。
+        // 匹配 = 命令字符串 starts_with(前缀)，且记录的 sandbox provider == 当前（范围不变量）,
+        // 且（⑤ 注入封顶）**新命令的词面类别不比已批准记录更危险** ——
+        //   批过只读前缀 `echo hi`，`echo hi; rm -rf /` 是 Risky → 不自动放行（照旧人审），
+        //   防止「注入文本 → 模型在已批前缀后串联危险命令」被自动放行。
         // 缺配置（没开 allow_prefixes / 没有记录）→ approved_prefixes=null → 一律不命中（照旧人审）。
         Json const ap_cfg = resolve_parameter(Json("@config.approved_prefixes"), state);
         Json const sbx_cfg = resolve_parameter(Json("@config.sandbox_provider"), state);
@@ -1041,12 +1082,17 @@ void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
             return false;
           std::string const cmd = c.args["command"].get<std::string>();
           if (cmd.empty()) return false;
+          tool::CommandClass const cur = tool::classify_bash_command(cmd);
+          int const cur_rank = command_risk_rank(cur);
           for (auto const& rec : ap_cfg) {
             if (!rec.is_object()) continue;
             if (rec.value("provider", "") != sbx_now) continue;  // 沙箱身份一致才作数
             std::string const pfx = rec.value("prefix", "");
             if (pfx.empty() || !cmd.starts_with(pfx)) continue;
-            return true;  // 前缀命中 → 自动放行（语义：允许 P 即允许以 P 开头的命令，见 problems/22）
+            std::string const cls = rec.value("class", "");
+            if (cls.empty()) continue;  // ⑤：旧记录无类别 → 不自动放行（fail-closed，需重新人审）
+            if (cur_rank > command_risk_rank(command_class_from_name(cls))) continue;
+            return true;  // 前缀命中 且 类别不封顶 → 自动放行（语义见 problems/22）
           }
           return false;
         };

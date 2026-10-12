@@ -20,6 +20,7 @@
 #include <cppchain/model/openai/openai_chat_model.hpp>
 #include <cppchain/state/checkpointer.hpp>  // wfr-㊸ @②：人审悬挂/恢复的进程内快照
 #include <cppchain/tool/bash_tool.hpp>      // wfr-㊸ @①/@②：bash 工具（NeedHuman 人审）
+#include <cppchain/tool/command_classify.hpp>  // wfr-㊸ ⑤：allow 前缀记录命令类别（封顶自动放行）
 #include <cppchain/tool/calculator.hpp>
 #include <cppchain/tool/datetime.hpp>
 #include <cppchain/tool/exec_guard.hpp>
@@ -633,8 +634,11 @@ int main(int argc, char** argv) {
             continue;
           std::string const cmd = args["command"].get<std::string>();
           if (cmd.empty()) continue;
+          // wfr-㊸ ⑤：落盘时记命令的**词面类别** —— allow 前缀自动放行按类别封顶，
+          // 防止「批过只读前缀 → 注入/串联危险后缀」被自动放行。
           cppchain::workflow::wfr_append_allow_prefix(
-              workdir, session, cmd, config.value("sandbox_provider", ""));
+              workdir, session, cmd, config.value("sandbox_provider", ""),
+              tool::command_class_name(tool::classify_bash_command(cmd)));
           ++added;
         }
       }

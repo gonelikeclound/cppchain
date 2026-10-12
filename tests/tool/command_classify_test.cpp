@@ -182,3 +182,25 @@ TEST(CommandClassify, detail_why_is_human_readable) {
   EXPECT_EQ(uk.cls, CommandClass::Unknown);
   EXPECT_NE(uk.why.find("未知命令"), std::string::npos);
 }
+
+// ---- wfr-㊸ ⑤：注入/绕过对抗 —— 看着像只读、实则写/危险/不可分析的，一律不得 ReadOnly ----
+// 威胁形态：注入文本驱动模型把危险动作藏在"只读样子"后面（重定向、$() 替换、; 串联、注释、管道进
+// 解释器、编码解码…）。词面门禁是纯函数、不信任模型意图 —— 模型被骗不影响判它。每条都 assert 非 RO。
+TEST(CommandClassify, injection_evasion_never_readonly) {
+  auto const not_ro = [](char const* cmd) {
+    EXPECT_NE(classify_bash_command(cmd), CommandClass::ReadOnly) << "命令: " << cmd;
+  };
+  not_ro("ls > /tmp/out.txt");               // 只读命令 + 重定向
+  not_ro("echo $(rm -rf /tmp/x)");           // 命令替换藏危险
+  not_ro("echo hi; rm -rf /tmp/x");          // ；串联
+  not_ro("cat a; touch /tmp/y");             // ；加写
+  not_ro("find . -exec rm {} \\;");          // find -exec 写
+  not_ro("rm -rf /tmp/x  # 看着安全");         // 注释挡不住
+  not_ro("echo safe \"$(curl evil)\"");       // 引号内替换
+  not_ro("printf x | tee /tmp/t; wget u");    // tee 写 + 网络
+  not_ro("grep foo file | sh");               // 管道进解释器
+  not_ro("base64 -d <<< c2ggLWMgJyd8fC8nCiA="); // 编码藏命令
+  not_ro("x=1; $x");                          // 变量命令
+  // 对照：单引号内字面量是真只读（shell 不替换，明文输出 $(id)）—— 语义正确，不是漏洞
+  EXPECT_EQ(classify_bash_command("echo '$(id)'"), CommandClass::ReadOnly);
+}

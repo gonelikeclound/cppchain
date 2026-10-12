@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cppchain/message/message.hpp"
+#include "cppchain/tool/command_classify.hpp"
 #include "cppchain/tool/exec_guard.hpp"
 #include "cppchain/tool/probe.hpp"
 #include "cppchain/tool/tool.hpp"
@@ -320,4 +321,52 @@ TEST(ExecGuardProbeFile, directory_is_partial) {
   std::filesystem::create_directories(d);
   // 目标是目录：不能算"写完的文件" → Partial（fail-closed）
   EXPECT_EQ(probe_file(d, "hello", 5), ProbeResult::Partial);
+}
+
+// ---- wfr-㊸ ⑤：pre_approved —— 人审放行的命令，词面门禁不重复拦（未批准仍 fail-closed） ----
+
+namespace {
+// 命令类工具（形如 bash）：绑定词面分类器 —— 写/危险命令走 guard 的门禁路径
+struct CommandClassifiedTool {
+  int calls = 0;
+  ToolSpec spec;
+  CommandClassifiedTool() {
+    spec = make_tool("cmd_op", "命令类副作用工具",
+                     SchemaBuilder().prop("command", "string", "命令").build(),
+                     [this](Json const&, ToolContext&) -> Res {
+                       ++calls;
+                       return Json{{"ok", true}};
+                     },
+                     /*read_only=*/false);
+    spec.command_classify = [](Json const& args) {
+      auto c = arg<std::string>(args, "command");
+      return c ? classify_bash_command(*c) : CommandClass::Unknown;
+    };
+  }
+};
+}  // namespace
+
+TEST(ExecGuard, pre_approved_write_executes_else_blocked) {
+  CommandClassifiedTool t;
+  ToolCall const wc = ToolCall{"c1", "cmd_op", Json{{"command", "echo x > /tmp/probe"}}};  // Write
+
+  std::vector<std::string> decisions;
+  ExecutionGuard::Options go;
+  go.audit = [&decisions](AuditRecord const& rec) { decisions.push_back(rec.decision); };
+  ExecutionGuard guard{std::move(go)};
+
+  // 未批准：Write → 词面门禁拦死（注入兜底不变）
+  auto const p1 = guard.prepare(wc, &t.spec, "model", /*pre_approved=*/false);
+  EXPECT_FALSE(p1.execute);
+  EXPECT_NE(p1.report.text().find("写副作用"), std::string::npos) << p1.report.text();
+  EXPECT_EQ(guard.blocked(), 1u);
+
+  // 人审批准：Write → 放行真执行，审计记 approved_human
+  auto const p2 = guard.prepare(wc, &t.spec, "model", /*pre_approved=*/true);
+  EXPECT_TRUE(p2.execute) << "人审放行的写命令必须能执行（不再被 guard 二次拦）";
+  EXPECT_EQ(std::count(decisions.begin(), decisions.end(), "approved_human"), 1);
+
+  // 只读命令无论是否批准都执行（行为不变）
+  ToolCall const ro = ToolCall{"c2", "cmd_op", Json{{"command", "echo hi"}}};
+  EXPECT_TRUE(guard.prepare(ro, &t.spec, "model", false).execute);
 }

@@ -74,8 +74,12 @@ class ExecutionGuard {
     message::Message report = {};     // execute==false 时充当 ToolMessage（重放 / 拒跑说明）
     ProbeResult probe_res = ProbeResult::Unknown;
   };
+  // pre_approved（wfr-㊸ ⑤）：该调用已过 approve_tools 人审（approved_ids）。
+  // 人审看到的正是这个 args —— 词面门禁不再重复拦（写/危险命令放行后应真执行），
+  // 但只对"已批准"的调用豁免；未批准的写/危险仍由 guard 保持 fail-closed（注入兜底）。
   [[nodiscard]] Prepared prepare(message::ToolCall const& call, ToolSpec const* spec,
-                                 std::string_view who = "model") const;
+                                 std::string_view who = "model",
+                                 bool pre_approved = false) const;
   // 只有 Prepared.execute==true 才调。handler 直跑（异常→error 回喂），计 executions_。
   // 并行安全：不碰日志/审计。
   [[nodiscard]] message::Message run(message::ToolCall const& call, ToolSpec const* spec,
@@ -84,7 +88,8 @@ class ExecutionGuard {
   // ---- 一步 API（c_tool 单工具节点无并发）----
   [[nodiscard]] message::Message execute(message::ToolCall const& call, ToolSpec const* spec,
                                          nlohmann::json const& args,
-                                         std::string_view who = "model") const;
+                                         std::string_view who = "model",
+                                         bool pre_approved = false) const;
 
   [[nodiscard]] std::size_t replays() const { return replays_; }
   [[nodiscard]] std::size_t blocked() const { return blocked_; }  // Intent→fail-closed 次数

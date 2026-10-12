@@ -413,4 +413,14 @@ CommandClassify classify_bash_command_detail(std::string_view command) {
   return classify_script(command, /*depth=*/0);
 }
 
+char const* command_class_name(CommandClass cl) {
+  switch (cl) {
+    case CommandClass::ReadOnly: return "ReadOnly";
+    case CommandClass::Write: return "Write";
+    case CommandClass::Risky: return "Risky";
+    case CommandClass::Unknown: return "Unknown";
+  }
+  return "Unknown";
+}
+
 }  // namespace cppchain::tool

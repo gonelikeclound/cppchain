@@ -250,3 +250,26 @@ interrupt "悬挂"**，NeedHuman 工具（bash）的副作用进入「悬挂 →
 - 测试 +5（`wf/approve_tools_persist_test.cpp`，全带 MemoryCheckpointer）：同前缀+同沙箱自动放行
   （副作用计数器==1）、不以前缀开头仍悬挂、provider 不一致前缀失效、无配置等同批②、allowlist
   往返+坏行 fail-open。验收 docs/04-problems/22。
+
+## 13. 批⑤ 落地记录（2026-10-12）：提示注入健壮性
+
+批⑤（**658 全绿**，652→658）把「提示注入健壮性」从"未测"变成"已对抗"。威胁模型：注入文本驱动
+模型发起 bash 调用；验证口径 = **模型被骗 ≠ 防线被破**（L2 纯函数 / deny 硬名单 / NeedHuman 必挂
+人审都是确定性门，注入不改它们；本批补的是两个**语义衔接层**的洞）：
+
+- **洞 A（正确性）**——人审批准后被 guard 二次拦死：`approve_policy=allow` 批准 `echo x > /tmp/f`
+  （Write），`run_tools`→`ExecutionGuard::prepare` 词面门禁仍拦（fail-closed 阻塞），
+  写命令批了也执行不了。修复：`prepare(..., pre_approved)` —— approve_tools 放行的
+  call（`run_tools` 从 state results 读 `approved_ids`）豁免词面门禁（审计 `approved_human`）；
+  **未批准**的写/危险照旧 fail-closed（注入兜底不变）。单测
+  `ExecGuard.pre_approved_write_executes_else_blocked`。
+- **洞 B（注入最直白入口）**——allow 前缀`starts_with`可被串联升级：批过只读 `echo hi`，
+  `echo hi; rm -rf /x` 自动放行绕开人审。修复（**类别封顶**）：落盘记录加 `class` 字段；
+  自动放行要求 `新命令类别 ≤ 已批类别`（RO<Write<Risky≤Unknown）。`echo hi`（RO）只能自动放行
+  RO 扩展；`git add .`（Write）放行 Write 扩展、拒 Risky。**旧记录无 class → 不自动放行**（fail-closed）。
+  单测 4 条（升级拒/同档放/Write 档拒 Risky/无 class 拒）。
+- **对抗语料**：`CommandClassify.injection_evasion_never_readonly` —— 11 种藏法
+  （重定向 / `$()` 永远 / `;` 串联 / 注释隐藏 / `find -exec` / 管道进解释器 / 编码解码）全部不得
+  ReadOnly；`echo '$(id)'` 单引号字面量判只读（对照，防矫枉过正）。
+- 真机复验（修复后）：`approve_policy=allow` + 写命令 → **真执行**（修复前见 problems/23 §二A 的
+  fail-closed 证据）。验收 docs/04-problems/23。
