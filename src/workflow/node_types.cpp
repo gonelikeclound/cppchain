@@ -6,12 +6,15 @@
 
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <print>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -22,6 +25,7 @@
 #include "cppchain/message/content_block.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/message/utf8.hpp"
+#include "cppchain/tool/probe.hpp"
 #include "cppchain/tool/command_classify.hpp"  // wfr-㊸ ⑤：allow 前缀按类别封顶
 #include "cppchain/tool/exec_guard.hpp"
 #include "cppchain/tool/tool_node.hpp"
@@ -1543,6 +1547,62 @@ std::optional<Json> json_block_of(std::string const& text) {
 
 }  // namespace
 
+// 批② L2：verify 的确定性判据（probe / rule），不调 LLM。路径按 @config.workspace 解析
+// （相对 → 工作区根；与 file_read/file_write 的沙箱根一致，probe 的就是同一棵树）。
+bool verify_rule_check(Json const& v, Json const& state, std::string& why) {
+  Json const ws = resolve_parameter(Json("@config.workspace"), state);
+  std::filesystem::path const base =
+      ws.is_string() ? std::filesystem::absolute(ws.get<std::string>())
+                     : std::filesystem::current_path();
+  std::string const p = v.value("path", "");
+  if (p.empty()) { why = "verify 缺 path"; return false; }
+  std::filesystem::path const target =
+      std::filesystem::path(p).is_relative() ? base / p : std::filesystem::path(p);
+
+  std::string const kind = v.value("kind", "");
+  if (kind == "probe") {
+    // 签名可选：只有显式写了才约束（0 字节 ≠ 无约束）
+    std::optional<std::string> contains;
+    if (v.contains("contains") && v["contains"].is_string())
+      contains = v["contains"].get<std::string>();
+    std::optional<std::size_t> bytes;
+    if (v.contains("bytes") && v["bytes"].is_number_unsigned()) bytes = v["bytes"].get<std::size_t>();
+    tool::ProbeResult const r = tool::probe_file(target, contains, bytes);
+    if (r == tool::ProbeResult::Complete) { why = "文件完整 → " + target.string(); return true; }
+    char const* n = r == tool::ProbeResult::Partial ? "Partial"
+                    : r == tool::ProbeResult::Absent ? "Absent" : "Unknown";
+    why = std::string("probe=") + n + "：" + target.string();
+    return false;
+  }
+  // kind == "rule"
+  std::string const op = v.value("op", "");
+  if (op == "file_exists") {
+    bool const ok = std::filesystem::is_regular_file(target);
+    why = std::string(ok ? "存在" : "不存在") + "：" + target.string();
+    return ok;
+  }
+  if (op == "file_nonempty") {
+    std::error_code ec;
+    std::uintmax_t const sz = std::filesystem::file_size(target, ec);
+    bool const ok = !ec && sz > 0;
+    why = std::string(ok ? "非空(" + std::to_string(sz) + "B)" : "空/缺失") + "：" + target.string();
+    return ok;
+  }
+  if (op == "json_key") {
+    std::ifstream in(target);
+    if (!in) { why = "读不到 " + target.string(); return false; }
+    std::string const text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto const j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    std::string const key = v.value("key", "");
+    bool const ok = !j.is_discarded() && !key.empty() && j.contains(key);
+    why = ok ? ("JSON 含键 " + key) : ("JSON 缺键 " + key + "（解析: " +
+                                      std::string(j.is_discarded() ? "失败" : "成功") + "）");
+    return ok;
+  }
+  why = "未知 rule op: " + op;
+  return false;
+}
+
 // ---- plan：产出/校验 state.plan（default_plan 预置 或 模型生成）----
 void v_plan(NodeIR const& n, NodeType::ValidateContext const&,
             NodeType::ErrorSink const& err) {
@@ -1664,10 +1724,21 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
     Json verdict_obj;
     bool advance = true;
     if (has_verify) {
-      std::string const kind = step["verify"].value("kind", "");
-      advance = false;
-      verdict_obj = Json{{"step", id}, {"kind", kind}, {"verdict", "fail"},
-                        {"why", "verify kind '" + kind + "' 未实现（批② 规则 / 批③ LLM）"}};
+      Json const v = step["verify"];
+      std::string const kind = v.value("kind", "");
+      if (kind == "probe" || kind == "rule") {
+        // 批② L2 规则档：确定性判据（probe_file / 内置 rule），不调 LLM —— 注入安全（problems/23 纪律）
+        std::string why;
+        bool const ok = verify_rule_check(v, state, why);
+        verdict_obj = Json{{"step", id}, {"kind", kind}, {"verdict", ok ? "done" : "fail"},
+                          {"why", ok ? "规则判据通过：" + why : "规则判据失败：" + why}};
+        advance = ok;
+      } else {
+        // kind=model（批③）或未知 → 批② 显式 fail 不静默推进
+        advance = false;
+        verdict_obj = Json{{"step", id}, {"kind", kind}, {"verdict", "fail"},
+                          {"why", "verify kind '" + kind + "' 未实现（批③ LLM）"}};
+      }
     } else {
       verdict_obj = Json{{"step", id}, {"kind", "none"}, {"verdict", "done"}, {"why", "L1 无验证"}};
     }

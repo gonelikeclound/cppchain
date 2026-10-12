@@ -169,7 +169,7 @@ TEST(WfPlanL1, verify_kind_beyond_l1_fails_explicitly_and_does_not_advance) {
   // L1 环不该出现带 verify 的步骤；若出现（编辑计划误配），judge 显式 fail 且不推进 cursor
   Fixture f;
   Json steps = two_steps();
-  steps["steps"][0]["verify"] = Json{{"kind", "probe"}, {"path", "x"}};
+  steps["steps"][0]["verify"] = Json{{"kind", "model"}, {"criteria", "看似完成"}};  // L3 档（批③ 未实现）
   f.model.replies.push_back(cppchain::message::ai_message("做了"));
   f.model.replies.push_back(cppchain::message::ai_message("做了"));
   auto wf = f.give(std::move(steps));

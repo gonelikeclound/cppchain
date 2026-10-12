@@ -1,0 +1,37 @@
+{
+  "id": "pev_l2",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "plan" },
+    { "id": "plan", "kind": "plan",
+      "goal": "@config.goal",
+      "default_plan": {
+        "steps": [
+          { "id": "s1",
+            "goal": "用 file_write 写 .out/note.txt（相对工作区），内容为「任务进行中」",
+            "deps": [],
+            "verify": { "kind": "probe", "path": ".out/note.txt", "contains": "任务进行中" } },
+          { "id": "s2",
+            "goal": "用 file_read 读 .out/note.txt，把内容放进一句总结里",
+            "deps": ["s1"],
+            "verify": { "kind": "rule", "op": "file_nonempty", "path": ".out/note.txt" } }
+        ]
+      },
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 2, "next": "final", "on_max": "final",
+      "body": [
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "chat",
+          "system_prompt": "你是任务执行助手：按每一步的具体指令行事；写文件用 file_write（路径相对工作区），读文件用 file_read，查天气用 get_weather。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "act", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "next": "_continue" }
+      ] },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "整合任务的步骤结论，给出最终回答（简洁、直接、有依据）。",
+      "next": "_turn_end" }
+  ]
+}
