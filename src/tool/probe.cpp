@@ -45,4 +45,14 @@ ProbeResult probe_file(std::filesystem::path const& p,
   return ProbeResult::Complete;
 }
 
+ProbeResult probe_file_contains(std::filesystem::path const& p, std::string const& fragment) {
+  std::error_code ec;
+  if (!std::filesystem::exists(p, ec)) return ec ? ProbeResult::Unknown : ProbeResult::Absent;
+  if (std::filesystem::is_directory(p, ec)) return ProbeResult::Partial;
+  std::ifstream in(p, std::ios::binary);
+  if (!in) return ProbeResult::Unknown;
+  std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  return data.find(fragment) != std::string::npos ? ProbeResult::Complete : ProbeResult::Partial;
+}
+
 }  // namespace cppchain::tool

@@ -28,4 +28,9 @@ enum class ProbeResult {
                                      std::optional<std::string> const& expected_content,
                                      std::optional<std::size_t> expected_bytes);
 
+// 子串探针（wfr-㊹ 补）：文件存在且**包含** fragment 子串 → Complete；存在但不含 → Partial；
+// 不存在 → Absent；目录/读失败 → Partial/Unknown（fail-closed 方向）。
+[[nodiscard]] ProbeResult probe_file_contains(std::filesystem::path const& p,
+                                              std::string const& fragment);
+
 }  // namespace cppchain::tool

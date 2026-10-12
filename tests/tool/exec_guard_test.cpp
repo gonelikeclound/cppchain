@@ -315,6 +315,19 @@ TEST(ExecGuardProbeFile, missing_complete_partial_primitives) {
   EXPECT_EQ(probe_file(p, "hello", 5), ProbeResult::Partial);
 }
 
+TEST(ExecGuardProbeFile, contains_substring_semantics) {
+  TmpDir tmp("cppchain_probe_contains");
+  std::filesystem::path const p = tmp.file("note.md");
+  tmp.write(p, "一二三source=news\n");
+  EXPECT_EQ(probe_file_contains(p, "source"), ProbeResult::Complete);
+  EXPECT_EQ(probe_file_contains(p, "不存在的串"), ProbeResult::Partial);
+  EXPECT_EQ(probe_file_contains(tmp.file("nope.md"), "x"), ProbeResult::Absent);
+  // 目录 → Partial（fail-closed 方向，不当"存在且完整"）
+  std::filesystem::path const d = tmp.file("sub");
+  std::filesystem::create_directories(d);
+  EXPECT_EQ(probe_file_contains(d, "x"), ProbeResult::Partial);
+}
+
 TEST(ExecGuardProbeFile, directory_is_partial) {
   TmpDir tmp("cppchain_probe_test_dir");
   std::filesystem::path const d = tmp.file("sub");

@@ -1561,13 +1561,15 @@ bool verify_rule_check(Json const& v, Json const& state, std::string& why) {
 
   std::string const kind = v.value("kind", "");
   if (kind == "probe") {
-    // 签名可选：只有显式写了才约束（0 字节 ≠ 无约束）
-    std::optional<std::string> contains;
-    if (v.contains("contains") && v["contains"].is_string())
-      contains = v["contains"].get<std::string>();
-    std::optional<std::size_t> bytes;
-    if (v.contains("bytes") && v["bytes"].is_number_unsigned()) bytes = v["bytes"].get<std::size_t>();
-    tool::ProbeResult const r = tool::probe_file(target, contains, bytes);
+    // contains → 子串探针（补的语义）；bytes → 仅大小约束（整数签名）
+    tool::ProbeResult r = tool::ProbeResult::Unknown;
+    if (v.contains("contains") && v["contains"].is_string()) {
+      r = tool::probe_file_contains(target, v["contains"].get<std::string>());
+    } else {
+      std::optional<std::size_t> bytes;
+      if (v.contains("bytes") && v["bytes"].is_number_unsigned()) bytes = v["bytes"].get<std::size_t>();
+      r = tool::probe_file(target, std::nullopt, bytes);
+    }
     if (r == tool::ProbeResult::Complete) { why = "文件完整 → " + target.string(); return true; }
     char const* n = r == tool::ProbeResult::Partial ? "Partial"
                     : r == tool::ProbeResult::Absent ? "Absent" : "Unknown";
@@ -1668,7 +1670,20 @@ void c_plan(NodeIR const& n, NodeType::CompileContext& ctx) {
                                                                       NodeContext&) {
     Json plan = Json();  // null = 未产出
     std::string action = "adopted";
-    if (default_plan.is_object() && default_plan.contains("steps")) {
+    (void)action;
+    // @config.plan_steps（三级对照用）：显式注入步骤数组（JSON 字符串）优先于 default_plan
+    Json const cfg_steps = resolve_parameter(Json("@config.plan_steps"), state);
+    if (cfg_steps.is_string() && !cfg_steps.get<std::string>().empty()) {
+      auto const parsed = nlohmann::json::parse(cfg_steps.get<std::string>(),
+                                                nullptr, /*allow_exceptions=*/false);
+      std::string why;
+      if (!parsed.is_discarded() && parsed.is_array() && validate_plan_steps(parsed, why)) {
+        plan = normalize_plan("", parsed);
+        action = "config_steps";
+      } else {
+        action = "config_invalid:" + why;
+      }
+    } else if (default_plan.is_object() && default_plan.contains("steps")) {
       std::string goal = default_plan.value("goal", "");
       if (!goal_spec.empty()) {
         Json const g = resolve_parameter(Json(goal_spec), state);
