@@ -53,6 +53,8 @@ add_library(cppchain_tool STATIC
   tool/exec_guard.cpp
   tool/command_classify.cpp
   tool/spawn_executor.cpp
+  tool/spawn_runner.cpp
+  tool/sandbox.cpp
   tool/bash_tool.cpp
   tool/arxiv.cpp
   tool/hybrid_selector.cpp)

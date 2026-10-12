@@ -51,6 +51,7 @@ add_executable(tool_tests
   tool/exec_guard_test.cpp
   tool/command_classify_test.cpp
   tool/bash_tool_test.cpp
+  tool/sandbox_test.cpp
   tool/arxiv_test.cpp
   tool/hybrid_selector_test.cpp)
 

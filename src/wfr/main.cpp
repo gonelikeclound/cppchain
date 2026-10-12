@@ -25,6 +25,7 @@
 #include <cppchain/tool/exec_guard.hpp>
 #include <cppchain/tool/file_tools.hpp>
 #include <cppchain/tool/registry.hpp>
+#include <cppchain/tool/sandbox.hpp>  // wfr-㊸ @③：沙箱执行器选择（bash 后端）
 #include <cppchain/tool/weather.hpp>
 #include <cppchain/tool/web_search.hpp>
 #include <cppchain/workflow/compiler.hpp>
@@ -412,11 +413,20 @@ int main(int argc, char** argv) {
   registry.add(make_file_read_tool(ft_cfg));
   registry.add(make_list_dir_tool(ft_cfg));
   registry.add(make_file_write_tool(ft_cfg));
-  // wfr-㊸ @①/@②：bash 工具 —— 副作用任意（NeedHuman 人审 + 词面静态门禁）。
-  // 执行后端 = PlainSpawnExecutor（进程级隔离，非沙箱；批③ 换 SandboxManager）。
-  // spawn 必须活得比 registry 久（spec.executor 是非拥有指针）。
-  auto const bash_spawn = tool::make_plain_spawn_executor();
-  registry.add(tool::make_bash_tool(bash_spawn.get()));
+  // wfr-㊸ @①/@②/@③：bash 工具 —— 副作用任意（NeedHuman 人审 + 词面静态门禁）。
+  // 执行后端 = SandboxManager 解析的沙箱（Auto：bwrap 可用→bwrap；否则受限子进程兜底）；
+  // 无任何可用 provider → bash 以**空执行器**注册，handler 侧 fail-closed 拒跑（绝不裸奔）。
+  // sbx 必须活得比 registry 久（spec.executor 是非拥有指针）。
+  tool::SandboxConfig sbx_cfg;
+  sbx_cfg.workspace = std::filesystem::absolute(workdir);
+  tool::SandboxManager const sbx(sbx_cfg);
+  if (sbx.available()) {
+    registry.add(tool::make_bash_tool(sbx.executor()));
+    std::println("bash 执行后端: {}", sbx.describe());
+  } else {
+    registry.add(tool::make_bash_tool(nullptr));
+    std::println("⚠️ bash 不可用：{} —— bash 调用将 fail-closed 拒绝", sbx.describe());
+  }
   ComponentRegistry comps;
   std::vector<std::string> all_tools;
   for (tool::ToolSpec const& t : registry.all()) all_tools.push_back(t.name);

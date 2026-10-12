@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -37,5 +38,11 @@ class ToolExecutor {
 // 进程级隔离，**不是沙箱** —— 正式部署由批③ 的 SandboxManager provider 替换（接口不变）。
 [[nodiscard]] std::shared_ptr<ToolExecutor> make_plain_spawn_executor(
     std::size_t max_output = 1u << 20);
+
+// 批③ 的「受限子进程 provider」：chdir 到 cwd（工作区）+ setrlimit（FSIZE/NOFILE）。
+// 仍是**非真沙箱**（文件系统/网络无约束），仅兜底；由 SandboxManager 在无更强 provider 时选用，
+// describe() 会显式标注 "非真沙箱"，绝不静默冒充沙箱。
+[[nodiscard]] std::shared_ptr<ToolExecutor> make_restricted_spawn_executor(
+    std::filesystem::path const& cwd, std::size_t max_output = 1u << 20);
 
 }  // namespace cppchain::tool

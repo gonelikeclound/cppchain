@@ -122,7 +122,7 @@ bash 记录打进 `{command, cwd, exit_code, stdout(截断), decision, reviewer}
 |---|---|---|---|
 | ① ✅ | ToolSpec 契约扩展（approval/timeout_ms/executor）+ 壳感知分类器（lexer+白/黑名单，纯函数） | `tool/` + `tests/tool/*` | 首条 bash 命令过 guard；全绿数字 |
 | ② ✅ | approve_tools 接 interrupt：need_human 悬挂 + resume 放行/拒绝，真机人工审批闭环 | `node_types.cpp` + `examples/` | 「真机批/拒」闭环，审计断言 |
-| ③ | SandboxManager 抽象（bwrap provider + fail-closed 无 provider 拒绝）+ timeout/输出截断 | `src/tool/` + `tests/` | 无 provider 时拒绝执行用例 |
+| ③ ✅ | SandboxManager 抽象（bwrap provider + fail-closed 无 provider 拒绝）+ timeout/输出截断 | `src/tool/` + `tests/` | 无 provider 时拒绝执行用例 |
 | ④ | 会话级 allow 前缀持久化（范围不变量）+ git 快照回滚实践 + problems/NN 验收记录定稿 | `share/wfr/workflows/*.json` + `docs/04-problems/22` | 615→全绿，真机 A/B/C 场景 |
 
 ## 7. 衔接
@@ -196,3 +196,33 @@ interrupt "悬挂"**，NeedHuman 工具（bash）的副作用进入「悬挂 →
 - 已知边界：人为裁决目前是**批决策**（action 作用于全部 pending 调用），逐调用/编辑参数
   （`update_state` 改写）是后续项；悬挂态在 wfr 里是进程内的（跨进程续聊仍走会话日志
   replay，批④ 会话级 allow 前缀持久化时一并定夺）。
+
+## 11. 批③ 落地记录（2026-10-12）
+
+批次 ③ 已实现并全绿（639→**647**，全量构建零告警），核心 = **L4 SandboxManager + L5 限额落到执行器**：
+
+- **`tool/sandbox.{hpp,cpp}`**：`SandboxManager`（provider 选择器）—— 按配置顺序解析第一个**可用**
+  执行器，全不可用 → `available()==false`（fail-closed，调用方必须拒绝，绝不静默裸奔）。
+  - `bwrap` provider：`--unshare-all`（禁网 + 新 pid/ipc/uts）+ `--die-with-parent` + 根只读 +
+    workspace `--bind` 可写 + `/tmp` tmpfs + `--clearenv` + `--chdir workspace`。**可用性探针**：
+    二进制存在 **且能实际建 namespace**（`bwrap_usable()` 跑一次真命令）——本机是嵌套受限环境、
+    user namespace 被禁（`setting up uid map: Permission denied`）→ 探针判不可用 → 自动隐退，
+    **绝不让带沙箱标志的命令裸跑失败还装作成功**。
+  - `container` provider：预留（需 container_image + docker/podman，未实现前跳过）。
+  - `subprocess` provider：新工厂 `make_restricted_spawn_executor(cwd, max_output)` —— chdir 工作区 +
+    setrlimit（FSIZE 256MB / NOFILE 1024）+ 超时强杀 + 输出封顶；`describe()` **显式标注
+    「非真沙箱」**（不冒充），是任何宿主机都有的兜底。
+- **spawn 内核收敛**：抽出 `tool/spawn_runner.{hpp,cpp}`（fork/exec 任意 argv + 进程组超时 SIGKILL +
+  输出封顶截断），`PlainSpawnExecutor` 与 `BwrapExecutor` 共用 —— L5 的 timeout/截断对模型回传
+  在两条 provider 上同构（bash handler 把 `timed_out`/截断 note 原样回报）。
+- **wfr 装配**：bash 执行后端 = `SandboxManager`（本地无可用沙箱 → 显式打印「受限子进程（非真沙箱）」）；
+  解析不到任何 provider 时 bash 以**空执行器**注册，handler 侧 fail-closed 拒跑。
+  本机判定为「受限子进程（非真沙箱）」 —— 这正是该 provider 的预期携带场景。
+- **测试 +8**（`tool/sandbox_test.cpp`）：只给不可用 provider → fail-closed；未知名跳过；
+  auto 任何宿主机都非空；**强制 bwrap 但建不了 namespace → 拒绝不回退**（主机相关路径 GTEST_SKIP）；
+  `bwrap_argv` 纯函数断言隔离声明（unshare/ro-bind/tmpfs/clearenv/bind ws/chdir ws）；subprocess
+  运行于工作区 cwd 且诚实标注非沙箱（写入落宿主可证）；超时强杀 + 输出截断回传（L5 验收）。
+- 真机（`approve_bash_demo`）：`bash 执行后端: 受限子进程（**非真沙箱**…）` → 模型调
+  `bash echo hello-sandbox` → 审批悬挂 → 人工 approve → 执行 `exit_code: 0` + 输出 + 审计 1 行。
+- 已知边界：bwrap 在本机不可用，属环境限制（bwrap 有能力的状态机已按探针走通）；
+  container provider 未实现（预留）；seccomp 未纳入 subprocess provider（setrlimit 子集 + 诚实标注）。
