@@ -74,6 +74,10 @@ enum class NodeKind {
   RefineHistory,  // 按规则精简/裁剪历史（产 transform op 落日志）
   // ---- wfr-㊷：副作用审批（见 02-arch-design/18）----
   ApproveTools,  // 审批决策：deny 名单 + read_only 免审；denied → error ToolMessage 回喂
+  // ---- wfr-㊹：任务级 P-E-V 环（见 02-arch-design/19）----
+  Plan,   // 产出/校验 `state.plan`（default_plan 预置 或 模型生成）
+  Verify, // 每步门：phase=announce（把当前步骤目标喂给模型 + in_progress）/
+          //         phase=judge（规则/schema 确定性判据或模型裁判 → done/fail + 推进 cursor）
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -165,6 +169,14 @@ struct NodeIR {
   // （元素可为 @config.resources 这类整串引用，运行期解析成数组）。
   // read_only 免审由 registry 推断（deny 一个只读工具会在校验期被 VN17 拒绝）。
   std::vector<std::string> deny;
+
+  // Plan / Verify 节点（wfr-㊹，见 02-arch-design/19）
+  //   plan  ：default_plan 非 null → 预置固定步骤 {steps:[…]}（三个测试 workflow 用它，verify 档写死）；
+  //          否则走 model（组件名）让模型生成步骤（开放目标档）。goal 可写 @config.*（缺省 ""）。
+  //   verify：phase = announce | judge（同一节点两态复用，见 c_verify）。
+  nlohmann::json default_plan = Json(nullptr);
+  std::string goal;      // plan 节点的目标（可 @config.*）
+  std::string phase;     // verify：announce / judge
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

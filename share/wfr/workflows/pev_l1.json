@@ -1,0 +1,31 @@
+{
+  "id": "pev_l1",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "plan" },
+    { "id": "plan", "kind": "plan",
+      "goal": "@config.goal",
+      "default_plan": {
+        "steps": [
+          { "id": "s1", "goal": "先想清楚：这个任务要解决什么、输出什么样算完成（不必调工具）", "deps": [] },
+          { "id": "s2", "goal": "给出最终结论与依据，回答简短直接", "deps": ["s1"] }
+        ]
+      },
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 2, "next": "final", "on_max": "final",
+      "body": [
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "chat",
+          "system_prompt": "你是任务执行助手：按每一步的具体指令行事；能直接回答就文字作答，需要信息再调工具。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "act", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "next": "_continue" }
+      ] },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "整合任务的步骤结论，给出最终回答（简洁、直接、有依据）。",
+      "next": "_turn_end" }
+  ]
+}

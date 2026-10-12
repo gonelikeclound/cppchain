@@ -149,6 +149,7 @@ add_executable(workflow_tests
   wf/approve_tools_test.cpp
   wf/approve_tools_interrupt_test.cpp
   wf/approve_tools_persist_test.cpp
+  wf/plan_execute_l1_test.cpp
   wf/history_nodes_test.cpp
   wf/plugin_import_test.cpp
   wf/m10_runtime_test.cpp

@@ -1461,6 +1461,231 @@ void c_load_history(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ================= wfr-㊹：任务级 P-E-V 环（plan / verify，arch 19）=================
+namespace {
+
+inline char const* kPlanStateKey = "plan";
+inline char const* kPlanLogStateKey = "plan_log";
+
+// state.plan 取出来（缺省空对象）
+Json plan_from_state(Json const& state) {
+  auto const it = state.find("plan");
+  return it != state.end() && it->is_object() ? *it : Json::object();
+}
+
+// 校验步骤数组：非空对象数组、每步 {id,goal}、deps 只指向前面的 id（上升依赖 → 天然无环）。
+bool validate_plan_steps(Json const& steps, std::string& why) {
+  if (!steps.is_array() || steps.empty()) { why = "步骤必须是非空数组"; return false; }
+  std::vector<std::string> ids;
+  ids.reserve(steps.size());
+  for (Json const& s : steps) {
+    if (!s.is_object()) { why = "步骤必须是对象"; return false; }
+    if (!s.contains("id") || !s["id"].is_string() || s["id"].get<std::string>().empty()) {
+      why = "步骤缺 id（非空字符串）"; return false;
+    }
+    if (!s.contains("goal") || !s["goal"].is_string() || s["goal"].get<std::string>().empty()) {
+      why = "步骤 '" + s.value("id", "?") + "' 缺 goal（非空字符串）"; return false;
+    }
+    std::string const id = s["id"].get<std::string>();
+    if (std::find(ids.begin(), ids.end(), id) != ids.end()) { why = "步骤 id 重复: " + id; return false; }
+    ids.push_back(id);
+  }
+  for (std::size_t i = 0; i < steps.size(); ++i) {
+    if (!steps[i].contains("deps")) continue;
+    auto const& deps = steps[i]["deps"];
+    if (deps.is_null()) continue;
+    if (!deps.is_array()) { why = "步骤 '" + steps[i].value("id", "?") + "' 的 deps 必须是数组"; return false; }
+    for (auto const& d : deps) {
+      if (!d.is_string()) { why = "deps 元素必须是字符串"; return false; }
+      std::string const dn = d.get<std::string>();
+      auto const it = std::find(ids.begin(), ids.end(), dn);
+      if (it == ids.end()) { why = "步骤 " + steps[i].value("id", "?") + " 依赖不存在的步: " + dn; return false; }
+      if (static_cast<std::size_t>(it - ids.begin()) >= i) { why = "deps 必须只指向前面的步骤（无环）"; return false; }
+    }
+  }
+  why.clear();
+  return true;
+}
+
+Json normalize_plan(Json const& goal, Json const& steps) {
+  Json plan{{"goal", goal},
+            {"cursor", 0},
+            {"strategy", Json{{"on_fail", "retry"}, {"max_retry", 0}}}};
+  Json out = Json::array();
+  for (auto s : steps)
+    if (s.is_object()) {
+      if (!s.contains("status")) s["status"] = "pending";
+      out.push_back(std::move(s));
+    }
+  plan["steps"] = std::move(out);
+  return plan;
+}
+
+std::optional<Json> json_block_of(std::string const& text) {
+  auto const b = text.find('{');
+  if (b == std::string::npos) return std::nullopt;
+  int depth = 0; bool in_str = false; char esc = 0;
+  std::size_t e = b;
+  for (; e < text.size(); ++e) {
+    char const c = text[e];
+    if (in_str) { if (esc) esc = 0; else if (c == '\\') esc = 1; else if (c == '"') in_str = false; continue; }
+    if (c == '"') in_str = true;
+    else if (c == '{') ++depth;
+    else if (c == '}') { if (--depth == 0) break; }
+  }
+  if (depth != 0) return std::nullopt;
+  nlohmann::json const j = nlohmann::json::parse(text.substr(b, e - b + 1), nullptr, /*allow_exceptions=*/false);
+  if (j.is_discarded()) return std::nullopt;
+  std::optional<Json> out;
+  out.emplace(j);
+  return out;
+}
+
+}  // namespace
+
+// ---- plan：产出/校验 state.plan（default_plan 预置 或 模型生成）----
+void v_plan(NodeIR const& n, NodeType::ValidateContext const&,
+            NodeType::ErrorSink const& err) {
+  if (!n.default_plan.is_null()) {
+    if (!n.default_plan.is_object() || !n.default_plan.contains("steps")) {
+      err("VN20", "plan 节点 '" + n.id + "' 的 default_plan 必须是 {goal, steps:[…]}");
+      return;
+    }
+    std::string why;
+    if (!validate_plan_steps(n.default_plan["steps"], why))
+      err("VN20", "plan 节点 '" + n.id + "' 的 default_plan 非法：" + why);
+  } else if (n.model.empty()) {
+    err("VN20", "plan 节点 '" + n.id + "' 必须给 default_plan 或 model（模型生成）之一");
+  }
+  if (n.next.empty()) err("VN20", "plan 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_plan(NodeIR const& n, NodeType::CompileContext& ctx) {
+  model::ChatModel* m = (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
+  std::string const node_id = n.id;
+  nlohmann::json const default_plan = n.default_plan;
+  std::string const sys = n.system_prompt;
+  std::string const goal_spec = n.goal;  // 目标，可写 @config.*
+  ctx.graph.add_node(n.id, [m, default_plan, sys, goal_spec, node_id](Json const& state,
+                                                                      NodeContext&) {
+    Json plan = Json();  // null = 未产出
+    std::string action = "adopted";
+    if (default_plan.is_object() && default_plan.contains("steps")) {
+      std::string goal = default_plan.value("goal", "");
+      if (!goal_spec.empty()) {
+        Json const g = resolve_parameter(Json(goal_spec), state);
+        if (g.is_string()) goal = g.get<std::string>();
+      }
+      plan = normalize_plan(goal, default_plan["steps"]);
+    } else if (m != nullptr) {
+      std::string target = resolve_text_parameter("@config.goal", state);
+      if (target.empty()) {  // 缺省目标 = 最后一条 human 消息（wfr 的输入即目标）
+        auto const msgs = messages_from_state(state);
+        for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
+          if (it->type == message::Role::Human) { target = it->text(); break; }
+      }
+      message::Message const sys_msg = message::system_message(
+          sys.empty()
+              ? "你是任务规划器。只输出 JSON：{\"steps\":[{\"id\":\"s1\",\"goal\":\"一句可执行的步骤\","
+                "\"deps\":[],\"verify\":null}]}。goal 要具体可执行。除 JSON 外不要输出任何字。"
+              : sys);
+      message::Message const usr =
+          message::human_message(target.empty() ? "请规划一个简短任务（2~3 步）" : target);
+      auto resp = m->invoke({sys_msg, usr}, {});
+      if (resp) {
+        std::string const text = resp->text();
+        if (auto const j = json_block_of(text); j.has_value()) {
+          Json const steps = j->value("steps", Json::array());
+          std::string why;
+          if (validate_plan_steps(steps, why)) { plan = normalize_plan(target, steps); action = "model"; }
+          else action = "model_invalid:" + why;
+        } else action = "model_unparsed";
+      } else action = "model_error";
+    } else action = "no_source";
+
+    Json update = Json::object();
+    Json results = Json::object();
+    if (!plan.is_null()) update["plan"] = plan;
+    results[node_id] = Json{{"action", action},
+                            {"steps", plan.is_null() ? 0LL : static_cast<long>(plan["steps"].size())}};
+    update[kResultsKey] = std::move(results);
+    return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+// ---- verify：每步门。announce=把当前步骤喂给模型 + in_progress；judge=判 done/fail + 推进 cursor ----
+void v_verify(NodeIR const& n, NodeType::ValidateContext const&,
+              NodeType::ErrorSink const& err) {
+  if (n.phase != "announce" && n.phase != "judge")
+    err("VN20", "verify 节点 '" + n.id + "' 的 phase 必须为 announce|judge，收到 '" + n.phase + "'");
+  if (n.next.empty()) err("VN20", "verify 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const phase = n.phase;
+  ctx.graph.add_node(n.id, [node_id, phase](Json const& state, NodeContext&) {
+    Json plan = plan_from_state(state);
+    Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
+    long cursor = plan.value("cursor", 0L);
+
+    if (phase == "announce") {
+      if (cursor < 0 || cursor >= static_cast<long>(steps.size()))
+        return Command::with_update(Json{});  // 防御：无步可做；loop max=steps 已保证不会到这
+      Json step = steps[static_cast<std::size_t>(cursor)];
+      std::string const id = step.value("id", "s" + std::to_string(cursor + 1));
+      std::string const goal = step.value("goal", "");
+      std::string const vd =
+          step.contains("verify") && step["verify"].is_object()
+              ? std::string("（验证:" + step["verify"].value("kind", "?") + "）")
+              : std::string();
+      std::string const text = "📋 执行步骤 " + std::to_string(cursor + 1) + "/" +
+                               std::to_string(steps.size()) + " [" + id + "]：" + goal + vd;
+      steps[static_cast<std::size_t>(cursor)]["status"] = "in_progress";
+      plan["steps"] = std::move(steps);
+      Json update{{kPlanStateKey, plan},
+                  {kMessagesKey, Json::array({message::human_message(text)})},
+                  {kResultsKey, Json{{node_id, Json{{"phase", "announce"}, {"step", id}}}}}};
+      return Command::with_update(std::move(update));
+    }
+
+    // ---- judge ----
+    Json plan_log = state.contains(kPlanLogStateKey) && state[kPlanLogStateKey].is_array()
+                        ? state[kPlanLogStateKey] : Json::array();
+    if (cursor < 0 || cursor >= static_cast<long>(steps.size()))
+      return Command::with_update(Json{});  // 防御：无步可判（正常由 loop max 收口）
+    Json const step = steps[static_cast<std::size_t>(cursor)];
+    std::string const id = step.value("id", "?");
+
+    bool const has_verify = step.contains("verify") && step["verify"].is_object() &&
+                            step["verify"].contains("kind");
+    Json verdict_obj;
+    bool advance = true;
+    if (has_verify) {
+      std::string const kind = step["verify"].value("kind", "");
+      advance = false;
+      verdict_obj = Json{{"step", id}, {"kind", kind}, {"verdict", "fail"},
+                        {"why", "verify kind '" + kind + "' 未实现（批② 规则 / 批③ LLM）"}};
+    } else {
+      verdict_obj = Json{{"step", id}, {"kind", "none"}, {"verdict", "done"}, {"why", "L1 无验证"}};
+    }
+    steps[static_cast<std::size_t>(cursor)]["status"] = advance ? "done" : "failed";
+    if (advance) cursor += 1;
+    plan["steps"] = std::move(steps);
+    plan["cursor"] = cursor;
+    plan_log.push_back(std::move(verdict_obj));
+    Json update{{kPlanStateKey, plan}, {kPlanLogStateKey, std::move(plan_log)},
+                {kResultsKey, Json{{node_id, Json{{"phase", "judge"}, {"cursor", cursor},
+                                                   {"count", plan["steps"].size()}}}}}};
+    (void)cursor;
+    return Command::with_update(std::move(update));  // 静态 next=_continue → 回 loop 头；max=steps 收口
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 }  // namespace
 
 std::vector<NodeType> const& builtin_node_types() {
@@ -1741,6 +1966,52 @@ std::vector<NodeType> const& builtin_node_types() {
          if (text.size() > 34) text = text.substr(0, 34) + "…";
          return (text.empty() ? "echo" : text) + " → " + n.next;
        }, v_echo, c_echo, e_next, t_echo},
+
+      // ---------------- plan（wfr-㊹）：产出/校验 state.plan ----------------
+      {NodeKind::Plan, "plan",
+       [](Json const& n) { return kind_is(n, "plan"); },
+       [](NodeIR& out, Json const& node) {
+         if (!node.contains("default_plan") || node["default_plan"].is_null())
+           out.default_plan = Json(nullptr);
+         else
+           out.default_plan = node["default_plan"];
+         get_str(out, node, "goal", out.goal);       // 目标（可 @config.*）
+         get_str(out, node, "model", out.model);     // 模型生成档
+         get_str(out, node, "system_prompt", out.system_prompt);
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "plan";
+         if (!n.default_plan.is_null()) node["default_plan"] = n.default_plan;
+         if (!n.goal.empty()) node["goal"] = n.goal;
+         if (!n.model.empty()) node["model"] = n.model;
+         if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         std::string d = "plan goal=" + (n.goal.empty() ? "-" : n.goal);
+         if (!n.default_plan.is_null() && n.default_plan.contains("steps"))
+           d += " steps=" + std::to_string(n.default_plan["steps"].size());
+         else if (!n.model.empty()) d += " model=" + n.model;
+         return d + " → " + n.next;
+       }, v_plan, c_plan, e_next, t_none},
+
+      // ---------------- verify（wfr-㊹）：每步门 announce/judge ----------------
+      {NodeKind::Verify, "verify",
+       [](Json const& n) { return kind_is(n, "verify"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "phase", out.phase);
+         get_str(out, node, "model", out.model);       // judge 的 LLM 裁判（批③）
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "verify";
+         node["phase"] = n.phase;
+         if (!n.model.empty()) node["model"] = n.model;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("verify ") + n.phase + " → " + n.next; },
+       v_verify, c_verify, e_next, t_none},
   };
   return types;
 }
