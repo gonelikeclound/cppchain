@@ -16,7 +16,8 @@ set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream structured_output)
 set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo
 set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
-                         tools_frontline tools_files tools_arxiv m9_hybrid)
+                         tools_frontline tools_files tools_arxiv m9_hybrid
+                         bash_sidefx_analysis)
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
@@ -38,7 +39,7 @@ set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop con
 
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard
                             tools_frontline tools_files tools_arxiv tools_approval
-                            m9_hybrid m9_approval m9_artifact
+                            m9_hybrid m9_approval m9_artifact bash_sidefx_analysis
                             m10_streaming m10_interrupt m10_send m10_fork)
 list(APPEND EXAMPLE_TARGETS approve_interrupt)
 if(CPPCHAIN_BUILD_HTTP)
