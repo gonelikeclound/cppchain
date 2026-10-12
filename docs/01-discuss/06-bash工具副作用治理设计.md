@@ -123,7 +123,7 @@ bash 记录打进 `{command, cwd, exit_code, stdout(截断), decision, reviewer}
 | ① ✅ | ToolSpec 契约扩展（approval/timeout_ms/executor）+ 壳感知分类器（lexer+白/黑名单，纯函数） | `tool/` + `tests/tool/*` | 首条 bash 命令过 guard；全绿数字 |
 | ② ✅ | approve_tools 接 interrupt：need_human 悬挂 + resume 放行/拒绝，真机人工审批闭环 | `node_types.cpp` + `examples/` | 「真机批/拒」闭环，审计断言 |
 | ③ ✅ | SandboxManager 抽象（bwrap provider + fail-closed 无 provider 拒绝）+ timeout/输出截断 | `src/tool/` + `tests/` | 无 provider 时拒绝执行用例 |
-| ④ | 会话级 allow 前缀持久化（范围不变量）+ git 快照回滚实践 + problems/NN 验收记录定稿 | `share/wfr/workflows/*.json` + `docs/04-problems/22` | 615→全绿，真机 A/B/C 场景 |
+| ④ ✅ | 会话级 allow 前缀持久化（范围不变量）+ git 快照回滚实践 + problems/NN 验收记录定稿 | `share/wfr/workflows/*.json` + `docs/04-problems/22` | 652→全绿，真机 A/B/C 场景 |
 
 ## 7. 衔接
 
@@ -226,3 +226,27 @@ interrupt "悬挂"**，NeedHuman 工具（bash）的副作用进入「悬挂 →
   `bash echo hello-sandbox` → 审批悬挂 → 人工 approve → 执行 `exit_code: 0` + 输出 + 审计 1 行。
 - 已知边界：bwrap 在本机不可用，属环境限制（bwrap 有能力的状态机已按探针走通）；
   container provider 未实现（预留）；seccomp 未纳入 subprocess provider（setrlimit 子集 + 诚实标注）。
+
+## 12. 批④ 落地记录（2026-10-12）
+
+批次 ④ 已实现并全绿（647→**652**，全量构建零告警），核心 = **会话级 allow 前缀持久化 + 回滚实践**：
+
+- **allowlist 落盘辅助**（`workflow/wfr.hpp`）：`.wfr/sessions/<session>.allowlist.jsonl`，每行
+  `{"prefix","provider"}`；`wfr_append_allow_prefix` 追加、`wfr_load_allow_prefixes` 读回（坏行
+  fail-open 跳过）。**范围不变量三约束**：① 会话作用域（不跨会话/工作区）；② 前缀匹配
+  （`starts_with`，允许 P 即允许 `P; …`，OpenAI exec-policy prefix 同款斜面）；③ 沙箱身份绑定
+  （provider 不一致 → 前缀失效，沙箱降级后强制重新人审）。
+- **approve_tools 自动放行分支**：`@config.approved_prefixes`（数组）+ `@config.sandbox_provider`
+  （当前沙箱身份）从 state 读；NeedHuman 命令「前缀命中且沙箱身份一致」→ 直接进 approved_ids
+  不悬挂；缺配置 → 行为与批② 完全一致（全部人审）。节点依旧 state 纯函数（config 从 state 来）。
+- **wfr 装配**：开关 = `--set allow_prefixes=on`（缺省关 = 既有行为不变）；开 → 启动加载 allowlist
+  进 config、批准时把命令原文追加进 allowlist（只记 `tool=="bash"` 且带 command 的真实执行的命令）；
+  沙箱身份无论开关都注入 config。
+- **真机 A/B/C**（problems/22 §二）：A 首次批准 → 执行 + 落盘记录；B 同会话续跑同前缀 → **无审批
+  提示**直接完成（自动放行 × 批② 重放，`执行 0 · 重放 1`）；C 前缀不命中的新命令 → 悬挂 → reject
+  → 不执行 + 反馈回喂。
+- **git 快照回滚实践**（L7 仓库场景）：批准后执行前打快照（`git stash create`），跑完不对 → checkout
+  还原——边界级丢弃、不做命令反做；沙箱/容器场景 = 销毁即还原。
+- 测试 +5（`wf/approve_tools_persist_test.cpp`，全带 MemoryCheckpointer）：同前缀+同沙箱自动放行
+  （副作用计数器==1）、不以前缀开头仍悬挂、provider 不一致前缀失效、无配置等同批②、allowlist
+  往返+坏行 fail-open。验收 docs/04-problems/22。

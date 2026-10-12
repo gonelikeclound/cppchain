@@ -15,8 +15,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace cppchain::workflow {
 
@@ -63,6 +66,45 @@ namespace cppchain::workflow {
   }
   std::sort(out.begin(), out.end());
   return out;
+}
+
+// ---- wfr-㊸ @④：会话级 allow 前缀（范围不变量） ----
+//
+// 批准一条 bash 命令后，把命令**原文**作为"前缀"持久化到本会话
+// （`.wfr/sessions/<session>.allowlist.jsonl`，每行一个 JSON 记录）。
+// 语义（OpenAI exec-policy prefix 同款，明确记载的斜面）：
+//   同会话 + 同沙箱 provider 下，后续**任何以该前缀开头的命令**自动放行，不再打断人审。
+// 范围不变量（三约束，problems/22 §… 有完整讨论）：
+//   1) 文件作用域 = 本会话：不跨会话、不跨工作区（删除会话日志时应连带清掉 allowlist）；
+//   2) 匹配 = 命令字符串 starts_with(前缀) —— 允许 P 即允许 `P; …` 的串联，批准者须接受；
+//   3) 只在与「批准时记录的 sandbox provider」一致时生效 —— 沙箱降级后旧批准自动失效。
+// 坏行 fail-open：跳过不致命，只是那一条不自动放行。
+[[nodiscard]] inline std::filesystem::path wfr_allowlist_path(std::string const& workdir,
+                                                              std::string const& session) {
+  return wfr_root(workdir) / "sessions" / (session + ".allowlist.jsonl");
+}
+
+[[nodiscard]] inline std::vector<nlohmann::json> wfr_load_allow_prefixes(
+    std::string const& workdir, std::string const& session) {
+  std::vector<nlohmann::json> out;
+  std::ifstream in(wfr_allowlist_path(workdir, session));
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    auto const j =
+        nlohmann::json::parse(line, /*cb=*/nullptr, /*allow_exceptions=*/false);
+    if (!j.is_discarded() && j.is_object()) out.push_back(j);
+  }
+  return out;
+}
+
+inline void wfr_append_allow_prefix(std::string const& workdir, std::string const& session,
+                                    std::string const& prefix, std::string const& provider) {
+  std::error_code ec;
+  std::filesystem::create_directories(wfr_root(workdir) / "sessions", ec);
+  std::ofstream out(wfr_allowlist_path(workdir, session), std::ios::app);
+  if (!out) return;  // 持久化失败 → 本次不写；不终止运行（下次仍要人审，fail-open）
+  out << nlohmann::json{{"prefix", prefix}, {"provider", provider}}.dump() << '\n';
 }
 
 }  // namespace cppchain::workflow

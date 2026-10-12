@@ -543,6 +543,19 @@ int main(int argc, char** argv) {
   Json config{{"workspace", workdir}, {"session", session}};
   for (auto const& [k, v] : sets) config[k] = v;
 
+  // wfr-㊸ @④：会话级 allow 前缀（范围不变量）。开关 = `--set allow_prefixes=on`：
+  //   - 把 <session>.allowlist.jsonl 的批准记录灌进 config → approve_tools 自动放行同前缀命令
+  //   - 批准时把命令原文追加进 allowlist（下文 fire 循环 approve 分支）
+  // 关（缺省）→ 不读不写，每次 NeedHuman 依旧悬挂人审（既有行为不变）。
+  // 沙箱身份无论开关都注入：范围不变量 = 自动放行只在「同会话 + 同沙箱 provider」下生效。
+  if (sbx.available()) config["sandbox_provider"] = sbx.provider_name();
+  bool const allow_persist = sets.contains("allow_prefixes") && sets.at("allow_prefixes") == "on";
+  if (allow_persist) {
+    config["approved_prefixes"] = cppchain::workflow::wfr_load_allow_prefixes(workdir, session);
+    std::println("会话级 allow 前缀: {} 条（{}）", config["approved_prefixes"].size(),
+                 cppchain::workflow::wfr_allowlist_path(workdir, session).string());
+  }
+
   // wfr-㊸ @②：一次触发 = fire 循环直至跑完。每逢 approve_tools 悬挂（bash 等
   // NeedHuman 工具），打印待批请求、读一行人工裁决（approve / reject <理由> / abort），
   // 再 resume 续跑。不悬挂的 workflow 只走一次 fire，与既有行为一致。
@@ -583,6 +596,26 @@ int main(int argc, char** argv) {
     Json resume;
     if (t == "y" || t.starts_with("approve")) {
       resume = Json{{"action", "approve"}};
+      // wfr-㊸ @④：会话级 allow 前缀 —— 把批准的 bash 命令原文（作为前缀）追加进本会话。
+      // 只记「命令类」调用（bash 的 command 参数）；无 command 的 NeedHuman 不持久化。
+      if (allow_persist) {
+        std::size_t added = 0;
+        if (pend.payload.contains("calls") && pend.payload["calls"].is_array()) {
+          for (Json const& c : pend.payload["calls"]) {
+            if (c.value("tool", "") != "bash") continue;
+            auto const& args = c.value("args", Json::object());
+            if (!args.is_object() || !args.contains("command") || !args["command"].is_string())
+              continue;
+            std::string const cmd = args["command"].get<std::string>();
+            if (cmd.empty()) continue;
+            cppchain::workflow::wfr_append_allow_prefix(
+                workdir, session, cmd, config.value("sandbox_provider", ""));
+            ++added;
+          }
+        }
+        if (added > 0)
+          std::println("  ↳ 已把 {} 条批准命令记入本会话 allow 前缀（同前缀后续自动放行）", added);
+      }
     } else if (t == "n") {
       resume = Json{{"action", "reject"}};
     } else if (t.starts_with("reject") || t.starts_with("拒")) {

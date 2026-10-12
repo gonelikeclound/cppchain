@@ -1027,6 +1027,30 @@ void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
         Json approved_ids = Json::array();
         Json denied = Json::array();
         std::vector<message::ToolCall> pending;  // wfr-㊸ @②：NeedHuman 工具 → 待人工
+
+        // wfr-㊸ @④：会话级 allow 前缀（宿主从 <session>.allowlist.jsonl 灌进 config）。
+        // 匹配 = 命令字符串 starts_with(前缀)，且记录的 sandbox provider == 当前（范围不变量）。
+        // 缺配置（没开 allow_prefixes / 没有记录）→ approved_prefixes=null → 一律不命中（照旧人审）。
+        Json const ap_cfg = resolve_parameter(Json("@config.approved_prefixes"), state);
+        Json const sbx_cfg = resolve_parameter(Json("@config.sandbox_provider"), state);
+        std::string const sbx_now = sbx_cfg.is_string() ? sbx_cfg.get<std::string>() : "";
+        auto auto_allow = [&](message::ToolCall const& c) -> bool {
+          if (!ap_cfg.is_array() || sbx_now.empty()) return false;
+          if (!c.args.is_object() || !c.args.contains("command") ||
+              !c.args["command"].is_string())
+            return false;
+          std::string const cmd = c.args["command"].get<std::string>();
+          if (cmd.empty()) return false;
+          for (auto const& rec : ap_cfg) {
+            if (!rec.is_object()) continue;
+            if (rec.value("provider", "") != sbx_now) continue;  // 沙箱身份一致才作数
+            std::string const pfx = rec.value("prefix", "");
+            if (pfx.empty() || !cmd.starts_with(pfx)) continue;
+            return true;  // 前缀命中 → 自动放行（语义：允许 P 即允许以 P 开头的命令，见 problems/22）
+          }
+          return false;
+        };
+
         for (message::ToolCall const& c : calls) {
           tool::ToolSpec const* spec = reg ? reg->find(c.name) : nullptr;
           if (spec == nullptr) {
@@ -1042,9 +1066,12 @@ void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
             msgs_update.push_back(message::tool_message("审批拒绝：" + why, c.id, "error"));
             continue;
           }
-          if (spec->approval == tool::ToolApprovalLevel::NeedHuman)
-            pending.push_back(c);  // 需人工裁决（不会被静态策略放行/拦截）
-          else
+          if (spec->approval == tool::ToolApprovalLevel::NeedHuman) {
+            // wfr-㊸ @④：会话级 allow 前缀自动放行。范围不变量：同会话 + **同沙箱 provider**
+            // 才作数（沙箱降级后旧批准不再自动放行）。命中 → 直接放行不悬挂；否则照旧悬挂。
+            if (auto_allow(c)) approved_ids.push_back(c.id);
+            else pending.push_back(c);  // 需人工裁决（不会被静态策略放行/拦截）
+          } else
             approved_ids.push_back(c.id);
         }
 
