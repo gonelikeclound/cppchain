@@ -150,6 +150,9 @@ int main(int argc, char** argv) {
         "见 .env.example）；chat2（chat 的超集：历史渲染三档 + 思考回传/厂商参数开关，"
         "用 --set 切换 —— history_mode=full|drop_round|keep_evidence、"
         "reasoning_echo=drop|tool_calls|always、reasoning_effort=…）。\n"
+        "副作用 demo：approve_bash_demo（bash 人审悬挂/恢复；--set allow_prefixes=on 会话级"
+        "allow 前缀复用，--set approve_policy=allow|deny|deny:<理由> 可 mock 人工审批免交互）、"
+        "sidefx_approve_demo（file_write deny 硬拦）。\n"
         "<name> 查找顺序：显式路径 → <ws>/.wfr/settings.json 的 workflow_dirs → "
         "<ws>/.wfr/workflows → ~/.wfr/workflows → 发布自带。\n"
         "workspace 的 .wfr 路径本身不可被覆盖；settings 只能追加 workflow_dirs。\n"
@@ -580,51 +583,63 @@ int main(int argc, char** argv) {
     } else {
       std::println("  待批请求: {}", pend.payload.dump());
     }
-    std::print("  批准？[approve | reject <理由> | abort]：");
-    std::cout.flush();
-    std::string line;
-    if (!std::getline(std::cin, line)) {
-      std::println();
-      std::println("（stdin 结束，未获裁决 —— 本次触发止于审批点，可留待下次续审。）");
-      return 0;
-    }
-    std::string const t = cppchain::wfr::trim(line);
-    if (t.empty() || t == "abort" || t == "q" || t == "quit") {
-      std::println("（已中止 —— 本次触发止于审批点。）");
-      return 0;
-    }
+    // 裁决来源：mock（--set approve_policy=allow|deny|deny:理由，免交互自动化测试）
+    // 或人工 stdin（缺省 prompt，现状）。mock 未知值 fail-closed 拒绝。
+    std::string const policy = config.value("approve_policy", "prompt");
     Json resume;
-    if (t == "y" || t.starts_with("approve")) {
-      resume = Json{{"action", "approve"}};
-      // wfr-㊸ @④：会话级 allow 前缀 —— 把批准的 bash 命令原文（作为前缀）追加进本会话。
-      // 只记「命令类」调用（bash 的 command 参数）；无 command 的 NeedHuman 不持久化。
-      if (allow_persist) {
-        std::size_t added = 0;
-        if (pend.payload.contains("calls") && pend.payload["calls"].is_array()) {
-          for (Json const& c : pend.payload["calls"]) {
-            if (c.value("tool", "") != "bash") continue;
-            auto const& args = c.value("args", Json::object());
-            if (!args.is_object() || !args.contains("command") || !args["command"].is_string())
-              continue;
-            std::string const cmd = args["command"].get<std::string>();
-            if (cmd.empty()) continue;
-            cppchain::workflow::wfr_append_allow_prefix(
-                workdir, session, cmd, config.value("sandbox_provider", ""));
-            ++added;
-          }
-        }
-        if (added > 0)
-          std::println("  ↳ 已把 {} 条批准命令记入本会话 allow 前缀（同前缀后续自动放行）", added);
+    if (policy == "prompt") {
+      std::print("  批准？[approve | reject <理由> | abort]：");
+      std::cout.flush();
+      std::string line;
+      if (!std::getline(std::cin, line)) {
+        std::println();
+        std::println("（stdin 结束，未获裁决 —— 本次触发止于审批点，可留待下次续审。）");
+        return 0;
       }
-    } else if (t == "n") {
-      resume = Json{{"action", "reject"}};
-    } else if (t.starts_with("reject") || t.starts_with("拒")) {
-      std::string const fb =
-          cppchain::wfr::trim(t.substr(std::string("reject").size()));
-      resume = Json{{"action", "reject"}, {"feedback", fb}};
+      std::string const t = cppchain::wfr::trim(line);
+      if (t.empty() || t == "abort" || t == "q" || t == "quit") {
+        std::println("（已中止 —— 本次触发止于审批点。）");
+        return 0;
+      }
+      if (t == "y" || t.starts_with("approve")) {
+        resume = Json{{"action", "approve"}};
+      } else if (t == "n") {
+        resume = Json{{"action", "reject"}};
+      } else if (t.starts_with("reject") || t.starts_with("拒")) {
+        std::string const fb = cppchain::wfr::trim(t.substr(std::string("reject").size()));
+        resume = Json{{"action", "reject"}, {"feedback", fb}};
+      } else {
+        // 未识别输入 → 按拒绝处理（fail-closed：不执行）
+        resume = Json{{"action", "reject"}, {"feedback", t}};
+      }
     } else {
-      // 未识别输入 → 按拒绝处理（fail-closed：不执行）
-      resume = Json{{"action", "reject"}, {"feedback", t}};
+      std::string const fb = cppchain::wfr::trim(policy.substr(5));  // "deny:" 去掉前缀
+      std::println("  批准？[approve | reject <理由> | abort]： → mock 审批（approve_policy={}）", policy);
+      if (policy == "allow") resume = Json{{"action", "approve"}};
+      else if (policy == "deny") resume = Json{{"action", "reject"}};
+      else if (policy.starts_with("deny:")) resume = Json{{"action", "reject"}, {"feedback", fb}};
+      else resume = Json{{"action", "reject"}, {"feedback", "未知 approve_policy: " + policy}};
+    }
+
+    // 公共（mock 与人工一致）：批准 → 会话级 allow 前缀落盘（wfr-㊸ @④）。
+    // 只记「命令类」调用（bash 的 command 参数）；无 command 的 NeedHuman 不持久化。
+    if (resume.value("action", "") == "approve" && allow_persist) {
+      std::size_t added = 0;
+      if (pend.payload.contains("calls") && pend.payload["calls"].is_array()) {
+        for (Json const& c : pend.payload["calls"]) {
+          if (c.value("tool", "") != "bash") continue;
+          auto const& args = c.value("args", Json::object());
+          if (!args.is_object() || !args.contains("command") || !args["command"].is_string())
+            continue;
+          std::string const cmd = args["command"].get<std::string>();
+          if (cmd.empty()) continue;
+          cppchain::workflow::wfr_append_allow_prefix(
+              workdir, session, cmd, config.value("sandbox_provider", ""));
+          ++added;
+        }
+      }
+      if (added > 0)
+        std::println("  ↳ 已把 {} 条批准命令记入本会话 allow 前缀（同前缀后续自动放行）", added);
     }
     fo.resume = std::move(resume);
     fo.input_messages.clear();  // 恢复续跑：input 由引擎忽略（快照已含本轮前半段）

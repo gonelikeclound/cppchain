@@ -74,6 +74,26 @@ B 尤其说明组合价值：② 的重放（幂等）与 ④ 的自动放行同
 命令不以前缀开头 → 照旧悬挂；**provider 不一致 → 前缀失效**（沙箱降级反例）；无配置 → 与批② 行为
 完全一致（全部悬挂）；allowlist 辅助 append→load 往返 + 坏行 fail-open。
 
+### 测试用 mock 人工审批（免交互，CI/脚本友好）
+
+手工逐次敲 `approve|reject` 不便自动化，新增 wfr 选项 **`--set approve_policy=…`**（缺省 `prompt` =
+现有 stdin 交互，行为不变）：
+
+| 值 | 效果 |
+|---|---|
+| `allow` | 悬挂时**自动批准** → 继续执行（`执行 N · 审计 N`） |
+| `deny` / `deny:<理由>` | 悬挂时**自动拒绝**（可带理由）→ 不执行 + 反馈回喂（`执行 0`） |
+| `prompt`（缺省） | 逐次读 stdin，人工裁决 |
+
+真机对照（`approve_bash_demo`，session m1/m2，全程无键盘输入）：
+
+```
+approve_policy=allow   → 裁决 {"action":"approve"} → bash echo mock-allow → exit_code 0 · 输出 mock-allow · 执行1审计1
+approve_policy=deny:不需要 → 裁决 {"action":"reject","feedback":"不需要"} → 不执行 · 执行0审计0 · 模型如实报告被拒
+```
+
+批准路径与 allow 前缀共用同一落盘逻辑（mock 批准同样记入 allowlist，便于一键验自动放行）。
+
 ## 三、git 快照回滚实践（L7，仓库场景的兜底）
 
 bash 副作用不可追踪（Claude Code checkpointing 明示不追踪 bash 改的文件）→ 不指望"撤销那条命令"，
