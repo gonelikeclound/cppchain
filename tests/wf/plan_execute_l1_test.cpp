@@ -181,10 +181,10 @@ TEST(WfPlanL1, verify_kind_beyond_l1_fails_explicitly_and_does_not_advance) {
   ASSERT_TRUE(r) << r.error().message;
   Json const st = *r;
   Json const plan = st["plan"];
-  EXPECT_EQ(plan["cursor"].get<long>(), 0) << "verify kind 未实现 → 不推进";
+  EXPECT_EQ(plan["cursor"].get<long>(), 0) << "verify kind 未配置 judge → 不推进";
   EXPECT_EQ(plan["steps"][0]["status"].get<std::string>(), "failed");
   EXPECT_EQ(st["plan_log"][0]["verdict"].get<std::string>(), "fail");
-  EXPECT_NE(st["plan_log"][0]["why"].get<std::string>().find("未实现"), std::string::npos);
+  EXPECT_NE(st["plan_log"][0]["why"].get<std::string>().find("judge 模型未配置"), std::string::npos);
 }
 
 TEST(WfPlanL1, plan_node_model_generation_adopts_generated_steps) {

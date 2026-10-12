@@ -1603,6 +1603,44 @@ bool verify_rule_check(Json const& v, Json const& state, std::string& why) {
   return false;
 }
 
+// 批③ L3：模型裁判（kind=model）。固定提示词 + 输入 = 步骤目标 + 本步执行记录文本（注入面最小）；
+// 只认 reply 里的 {"pass":bool,"feedback":str}。模型错/解析失败 → fail-closed（不当作 pass）。
+bool judge_model_review(Json const& step, Json const& v, Json const& state,
+                        model::ChatModel* m, std::string const& judge_sys, std::string& why) {
+  if (m == nullptr) { why = "judge 模型未配置（verify 节点缺 model）"; return false; }
+  std::string const goal = step.value("goal", "");
+  std::string const criteria = v.value("criteria", "");
+  // 本步执行记录：取最近若干条消息的文本（announce 之后的模型回答 + 工具结果）
+  std::string ctx;
+  auto const msgs = messages_from_state(state);
+  std::size_t const take = std::min<std::size_t>(msgs.size(), 8);
+  for (std::size_t i = msgs.size() - take; i < msgs.size(); ++i) {
+    std::string const t = msgs[i].text();
+    if (t.empty()) continue;
+    char const* role = msgs[i].type == message::Role::Human ? "用户" :
+                       msgs[i].type == message::Role::Ai ? "助手" : "工具";
+    ctx.append(role).append("：").append(t).append("\n");
+  }
+  message::Message const sys = message::system_message(
+      judge_sys.empty()
+          ? "你是任务步骤验收员。依据【验收标准】判断【执行记录】是否达成【步骤目标】。"
+            "只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。"
+          : judge_sys);
+  message::Message const usr =
+      message::human_message("【步骤目标】" + goal + "\n【验收标准】" + criteria +
+                             "\n【执行记录】\n" + ctx);
+  auto resp = m->invoke({sys, usr}, {});
+  if (!resp) { why = "judge 调用失败：" + resp.error().message; return false; }
+  auto const j = json_block_of(resp->text());
+  if (!j.has_value()) { why = "judge 未返回可解析 JSON"; return false; }
+  if (!j->contains("pass")) { why = "judge 缺 pass 字段"; return false; }
+  bool const pass = j->value("pass", false);
+  why = std::string(pass ? "模型裁判通过" : "模型裁判不通过")
+        + (j->contains("feedback") && (*j)["feedback"].is_string()
+               ? std::string("：") + (*j)["feedback"].get<std::string>() : std::string());
+  return pass;
+}
+
 // ---- plan：产出/校验 state.plan（default_plan 预置 或 模型生成）----
 void v_plan(NodeIR const& n, NodeType::ValidateContext const&,
             NodeType::ErrorSink const& err) {
@@ -1686,7 +1724,11 @@ void v_verify(NodeIR const& n, NodeType::ValidateContext const&,
 void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const node_id = n.id;
   std::string const phase = n.phase;
-  ctx.graph.add_node(n.id, [node_id, phase](Json const& state, NodeContext&) {
+  // L3 裁判模型（批③）：verify 节点的 model 组件；缺省用 main（wfr 装配时指到"main"）
+  model::ChatModel* judge =
+      (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
+  std::string const judge_sys = n.system_prompt;
+  ctx.graph.add_node(n.id, [node_id, phase, judge, judge_sys](Json const& state, NodeContext&) {
     Json plan = plan_from_state(state);
     Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
     long cursor = plan.value("cursor", 0L);
@@ -1727,17 +1769,24 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
       Json const v = step["verify"];
       std::string const kind = v.value("kind", "");
       if (kind == "probe" || kind == "rule") {
-        // 批② L2 规则档：确定性判据（probe_file / 内置 rule），不调 LLM —— 注入安全（problems/23 纪律）
+        // 批②/③：kind=probe|rule → 确定性判据（不调 LLM）；kind=model → 裁判模型（批③）
         std::string why;
         bool const ok = verify_rule_check(v, state, why);
         verdict_obj = Json{{"step", id}, {"kind", kind}, {"verdict", ok ? "done" : "fail"},
                           {"why", ok ? "规则判据通过：" + why : "规则判据失败：" + why}};
         advance = ok;
+      } else if (kind == "model") {
+        // 批③ L3 LLM 档：规则先过（本步无规则）→ 裁判模型背书 Pass/Fail+feedback。
+        // 注入面按 23 纪律：judge 提示词固定、输入 = 步骤目标 + 本步执行过程的文本（不给自由发挥入口）。
+        std::string why;
+        bool const ok = judge_model_review(step, v, state, judge, judge_sys, why);
+        verdict_obj = Json{{"step", id}, {"kind", "model"}, {"verdict", ok ? "done" : "fail"},
+                          {"why", why}};
+        advance = ok;
       } else {
-        // kind=model（批③）或未知 → 批② 显式 fail 不静默推进
         advance = false;
         verdict_obj = Json{{"step", id}, {"kind", kind}, {"verdict", "fail"},
-                          {"why", "verify kind '" + kind + "' 未实现（批③ LLM）"}};
+                          {"why", "未知 verify kind: " + kind}};
       }
     } else {
       verdict_obj = Json{{"step", id}, {"kind", "none"}, {"verdict", "done"}, {"why", "L1 无验证"}};
