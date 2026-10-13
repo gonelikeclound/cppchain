@@ -1785,12 +1785,35 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
                                                     state);
     Json results = Json::object();
     if (phase == "begin") {
-      std::filesystem::path const arch = task_archive_path(state, task);
+      std::filesystem::path arch = task_archive_path(state, task);
       Json plan;
       bool created = false;
-      if (auto const loaded = read_json_file(arch); loaded.has_value() && loaded->is_object()) {
-        plan = *loaded;
+      // 批间可改：@config.task_revision=N → 从 .history/batchN.json（第 N 批结束快照）续，而非最新档案
+      std::string const rev = resolve_text_parameter("@config.task_revision", state);
+      if (!rev.empty() && rev != "null") {
+        long const n = std::max(0L, std::stol(rev));
+        std::filesystem::path const h =
+            arch.parent_path() / (arch.stem().string() + ".history") /
+            ("batch" + std::to_string(n) + ".json");
+        if (auto const old = read_json_file(h); old.has_value() && old->is_object()) {
+          arch = h;
+          plan = *old;
+        }
+      }
+      if (plan.empty()) {
+        if (auto const loaded = read_json_file(arch); loaded.has_value() && loaded->is_object()) {
+          plan = *loaded;
+        }
+      }
+      if (!plan.empty()) {
         plan["batch_no"] = plan.value("batch_no", 1L) + 1;  // 进入下一批
+        created = false;
+      } else if (auto const loaded = read_json_file(task_archive_path(state, task));
+                 loaded.has_value() && loaded->is_object()) {
+        // latest 兜底（revision 缺失历史时的回退）
+        plan = *loaded;
+        plan["batch_no"] = plan.value("batch_no", 1L) + 1;
+        created = false;
       } else {
         // 建档：以 @config.plan_steps（JSON 步骤数组字符串）播种
         Json const steps_cfg = resolve_parameter(Json("@config.plan_steps"), state);
@@ -1838,8 +1861,18 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
       if (it->type == message::Role::Ai) { last = it->text(); break; }
     Json plan2 = plan;
     plan2["last_summary"] = last;
+    // 批② 护栏：plan 无步骤（begin 缺种子等）不得覆盖档案
+    if (!(plan2.contains("steps") && plan2["steps"].is_array() && !plan2["steps"].empty())) {
+      results[node_id] = Json{{"action", "end_noop"}};
+      return Command::with_update(Json{{kResultsKey, std::move(results)}});
+    }
     plan2["batch_no"] = plan.value("batch_no", 1L);
-    write_json_file(task_archive_path(state, task), plan2);
+    std::filesystem::path const arch = task_archive_path(state, task);
+    write_json_file(arch, plan2);
+    // 历史快照（批间可改 / revision 续跑用）
+    write_json_file(arch.parent_path() / (arch.stem().string() + ".history") /
+                        ("batch" + std::to_string(plan2.value("batch_no", 1L)) + ".json"),
+                    plan2);
     results[node_id] = Json{{"action", "end"}, {"cursor", plan2.value("cursor", 0L)},
                            {"batch", plan2.value("batch_no", 1L)}};
     return Command::with_update(Json{{kResultsKey, std::move(results)}});
