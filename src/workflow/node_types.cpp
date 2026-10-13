@@ -1545,6 +1545,16 @@ std::optional<Json> json_block_of(std::string const& text) {
   return out;
 }
 
+// wfr-㊿ 长程：今天日期（YYYY-MM-DD，本地）
+std::string today_str() {
+  std::time_t const t = std::time(nullptr);
+  std::tm tm{};
+  ::localtime_r(&t, &tm);
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+  return buf;
+}
+
 }  // namespace
 
 // 批② L2：verify 的确定性判据（probe / rule），不调 LLM。路径按 @config.workspace 解析
@@ -1728,6 +1738,111 @@ void c_plan_review(NodeIR const& n, NodeType::CompileContext& ctx) {
     }
     update[kResultsKey] = std::move(results);
     return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+// ---- task（wfr-㊿ 长程）：begin 建档/还原 + end 写回档案，跨批唯一接口 ----
+void v_task(NodeIR const& n, NodeType::ValidateContext const&,
+            NodeType::ErrorSink const& err) {
+  if (n.phase != "begin" && n.phase != "end")
+    err("VN20", "task 节点 '" + n.id + "' 的 phase 必须为 begin|end");
+  if (n.next.empty()) err("VN20", "task 节点 '" + n.id + "' 缺少 next");
+}
+
+std::filesystem::path task_archive_path(Json const& state, std::string const& task) {
+  Json const ws = resolve_parameter(Json("@config.workspace"), state);
+  std::filesystem::path const base =
+      ws.is_string() ? std::filesystem::path(ws.get<std::string>())
+                     : std::filesystem::current_path();
+  return base / ".wfr" / "tasks" / (task + ".json");
+}
+
+std::optional<Json> read_json_file(std::filesystem::path const& p) {
+  std::ifstream in(p);
+  if (!in) return std::nullopt;
+  std::string const text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  auto const j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+  if (j.is_discarded()) return std::nullopt;
+  std::optional<Json> out;
+  out.emplace(j);
+  return out;
+}
+void write_json_file(std::filesystem::path const& p, Json const& j) {
+  std::error_code ec;
+  std::filesystem::create_directories(p.parent_path(), ec);
+  std::ofstream out(p, std::ios::trunc);
+  if (out) out << j.dump(2) << '\n';
+}
+
+void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const phase = n.phase;
+  std::string const task_spec = n.task;
+  ctx.graph.add_node(n.id, [node_id, phase, task_spec](Json const& state, NodeContext&) {
+    std::string const task = resolve_text_parameter(task_spec.empty() ? "@config.task" : task_spec,
+                                                    state);
+    Json results = Json::object();
+    if (phase == "begin") {
+      std::filesystem::path const arch = task_archive_path(state, task);
+      Json plan;
+      bool created = false;
+      if (auto const loaded = read_json_file(arch); loaded.has_value() && loaded->is_object()) {
+        plan = *loaded;
+        plan["batch_no"] = plan.value("batch_no", 1L) + 1;  // 进入下一批
+      } else {
+        // 建档：以 @config.plan_steps（JSON 步骤数组字符串）播种
+        Json const steps_cfg = resolve_parameter(Json("@config.plan_steps"), state);
+        Json steps;
+        if (steps_cfg.is_string() && !steps_cfg.get<std::string>().empty()) {
+          auto const par = nlohmann::json::parse(steps_cfg.get<std::string>(),
+                                                 nullptr, /*allow_exceptions=*/false);
+          std::string why;
+          if (!par.is_discarded() && par.is_array() && validate_plan_steps(par, why)) steps = par;
+        }
+        if (steps.is_array() && !steps.empty()) {
+          std::string const goal = resolve_text_parameter("@config.goal", state);
+          plan = normalize_plan(goal, steps);
+          plan["task"] = task;
+          plan["created"] = today_str();
+          plan["batch_no"] = 1;
+          created = true;
+        } else {
+          results[node_id] = Json{{"action", "missing_seed"}};
+          return Command::with_update(Json{{kResultsKey, std::move(results)}});
+        }
+      }
+      Json update;
+      update[kPlanStateKey] = plan;
+      std::string const prev = plan.value("last_summary", "");
+      std::string const add = "📅 第 " + std::to_string(plan.value("batch_no", 1L)) +
+                              " 批 @ " + today_str() + (created ? "（建档）" : "") +
+                              (prev.empty() ? "" : "\n上批摘要：" + prev);
+      update[kMessagesKey] = Json::array({message::human_message(add)});
+      if (created) write_json_file(arch, plan);
+      results[node_id] = Json{{"action", "begin"}, {"batch", plan.value("batch_no", 1L)},
+                            {"cursor", plan.value("cursor", 0L)}};
+      update[kResultsKey] = std::move(results);
+      return Command::with_update(std::move(update));
+    }
+    // ---- end：写回档案
+    Json const plan = plan_from_state(state);
+    if (plan.empty()) {
+      results[node_id] = Json{{"action", "end_noop"}};
+      return Command::with_update(Json{{kResultsKey, std::move(results)}});
+    }
+    std::string last;
+    auto const msgs = messages_from_state(state);
+    for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
+      if (it->type == message::Role::Ai) { last = it->text(); break; }
+    Json plan2 = plan;
+    plan2["last_summary"] = last;
+    plan2["batch_no"] = plan.value("batch_no", 1L);
+    write_json_file(task_archive_path(state, task), plan2);
+    results[node_id] = Json{{"action", "end"}, {"cursor", plan2.value("cursor", 0L)},
+                           {"batch", plan2.value("batch_no", 1L)}};
+    return Command::with_update(Json{{kResultsKey, std::move(results)}});
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
   ++ctx.registered;
@@ -2302,6 +2417,23 @@ std::vector<NodeType> const& builtin_node_types() {
          if (!n.confirm.empty()) d += " confirm=" + n.confirm;
          return d + " → " + n.next;
        }, v_plan_review, c_plan_review, e_next, t_none},
+      // ---------------- task（wfr-㊿ 长程）：任务档案 begin/end ----------------
+      {NodeKind::Task, "task",
+       [](Json const& nn) { return kind_is(nn, "task"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "task", out.task);
+         get_str(out, node, "phase", out.phase);
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "task";
+         if (!n.task.empty()) node["task"] = n.task;
+         node["phase"] = n.phase;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("task ") + n.phase +
+                                    (n.task.empty() ? "" : " task=" + n.task) + " → " + n.next; },
+       v_task, c_task, e_next, t_none},
   };
   return types;
 }

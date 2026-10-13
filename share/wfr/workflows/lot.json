@@ -1,0 +1,27 @@
+{
+  "id": "lot",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "begin" },
+    { "id": "begin", "kind": "task", "task": "@config.task",
+      "phase": "begin", "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 3, "next": "final", "on_max": "final",
+      "body": [
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "chat",
+          "system_prompt": "你是长程任务执行助手：按每一步指令行事，做当前这一批能完成的部分；写完记得用产物落盘（.out/ 下）。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "act", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "model": "main",
+          "next": "_continue" }
+      ] },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "汇总本批完成的情况，给一句批间摘要。",
+      "next": "end" },
+    { "id": "end", "kind": "task", "task": "@config.task",
+      "phase": "end", "next": "_turn_end" }
+  ]
+}

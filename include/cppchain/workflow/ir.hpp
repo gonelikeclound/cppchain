@@ -79,6 +79,7 @@ enum class NodeKind {
   Verify, // 每步门：phase=announce（把当前步骤目标喂给模型 + in_progress）/
           //         phase=judge（规则/schema 确定性判据或模型裁判 → done/fail + 推进 cursor）
   PlanReview, //（wfr-㊹ 批④）步骤边界任务级 HITL：interrupt 悬挂 → resume continue/rollback_to:K/abort
+  Task, //（wfr-㊿ 长程）任务档案 begin/end：跨批还原（读 .wfr/tasks/<task>.json）与写回 + 批号/日期注入
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -177,7 +178,8 @@ struct NodeIR {
   //   verify：phase = announce | judge（同一节点两态复用，见 c_verify）。
   nlohmann::json default_plan = Json(nullptr);
   std::string goal;      // plan 节点的目标（可 @config.*）
-  std::string phase;     // verify：announce / judge
+  std::string phase;     // verify：announce / judge；task：begin/end
+  std::string task;       // task（㊿）：任务名（可 @config.*）
   std::string confirm;   // plan_review（批④）："true/false"（假 = 关确认门直接过）；可 @config.*
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
