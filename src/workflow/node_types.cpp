@@ -1643,6 +1643,96 @@ bool judge_model_review(Json const& step, Json const& v, Json const& state,
   return pass;
 }
 
+// ---- plan_review（批④）：步骤边界任务级 HITL（interrupt 悬挂 → continue/rollback_to:K/abort）----
+void v_plan_review(NodeIR const& n, NodeType::ValidateContext const&,
+                   NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN20", "plan_review 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_plan_review(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const confirm_spec = n.confirm;
+  std::string const break_target = ctx.goto_resolve ? ctx.goto_resolve(kBreakName) : kBreakName;
+  ctx.graph.add_node(
+      n.id, [node_id, confirm_spec, break_target](Json const& state, NodeContext& nc) {
+    Json plan = plan_from_state(state);
+    Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
+    long const cursor = plan.value("cursor", 0L);
+    std::string const confirm_eff = confirm_spec.empty() ? resolve_text_parameter("@config.plan_confirm", state)
+                                                     : confirm_spec;
+    bool const confirm = confirm_eff != "false" && confirm_eff != "no";  // 缺省 true = 默认确认门
+    Json results = Json::object();
+    Json plan_log = state.contains(kPlanLogStateKey) && state[kPlanLogStateKey].is_array()
+                        ? state[kPlanLogStateKey] : Json::array();
+    Json update = Json::object();
+
+    if (!confirm || cursor < 0 || cursor >= static_cast<long>(steps.size())) {
+      // 关确认门 或 无下一步（全部完成）→ 直接穿过
+      results[node_id] = Json{{"action", "skip"},
+                              {"note", confirm ? "无下一步" : "确认门关闭"}};
+      update[kResultsKey] = std::move(results);
+      return Command::with_update(std::move(update));
+    }
+
+    // 悬挂 payload：进度 + 下一步（人据此裁决）
+    std::string done_summary;
+    for (Json const& s : steps) {
+      std::string const st = s.value("status", "pending");
+      if (st == "done")
+        done_summary += (s.value("id", "?") + std::string("✓ ") + s.value("goal", "") + "\n");
+    }
+    std::string const next_goal =
+        cursor >= 0 && cursor < static_cast<long>(steps.size())
+            ? steps[static_cast<std::size_t>(cursor)].value("goal", "")
+            : "(全部完成)";
+    Json const payload = Json{{"kind", "plan_review_request"},
+                              {"node", node_id},
+                              {"plan", Json{{"goal", plan.value("goal", "")},
+                                            {"cursor", cursor},
+                                            {"count", steps.size()},
+                                            {"done", done_summary},
+                                            {"next", next_goal}}}};
+    Json const decision = interrupt(payload, nc);
+    std::string const action = decision.is_object() ? decision.value("action", "") : "";
+
+    if (action == "continue" || action.empty()) {
+      results[node_id] = Json{{"action", "continue"}, {"cursor", cursor}};
+    } else if (action == "rollback_to") {
+      long const k = decision.is_object() ? decision.value("to", 0L) : 0L;
+      long const to = std::max(0L, std::min(k, static_cast<long>(steps.size())));
+      std::vector<std::string> rolled;
+      for (long i = to; i < static_cast<long>(steps.size()); ++i) {
+        std::string const st = steps[static_cast<std::size_t>(i)].value("status", "pending");
+        if (st != "pending") rolled.push_back(steps[static_cast<std::size_t>(i)].value("id", "?"));
+        steps[static_cast<std::size_t>(i)]["status"] = "pending";  // 回退 → 重新做
+      }
+      plan["cursor"] = to;
+      plan["steps"] = std::move(steps);
+      update[kPlanStateKey] = plan;
+      plan_log.push_back(Json{{"kind", "rollback"}, {"action", "rollback_to"}, {"to", to},
+                              {"rolled", rolled}, {"priority", 1}});
+      update[kPlanLogStateKey] = std::move(plan_log);
+      results[node_id] = Json{{"action", "rollback_to"}, {"to", to}, {"rolled", rolled}};
+    } else {  // abort / 未知（fail-closed 按 abort）
+      plan["aborted"] = true;
+      for (auto& s : steps)
+        if (s.is_object() && s.value("status", "pending") == "pending")
+          s["status"] = "aborted";
+      plan["steps"] = std::move(steps);
+      update[kPlanStateKey] = plan;
+      plan_log.push_back(Json{{"kind", "abort"}, {"action", "abort"}});
+      update[kPlanLogStateKey] = std::move(plan_log);
+      results[node_id] = Json{{"action", "abort"}};
+      update[kResultsKey] = std::move(results);
+      return Command{std::move(update), {break_target}, {}};  // 中止 → 跳 loop 出口
+    }
+    update[kResultsKey] = std::move(results);
+    return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 // ---- plan：产出/校验 state.plan（default_plan 预置 或 模型生成）----
 void v_plan(NodeIR const& n, NodeType::ValidateContext const&,
             NodeType::ErrorSink const& err) {
@@ -1739,18 +1829,20 @@ void v_verify(NodeIR const& n, NodeType::ValidateContext const&,
 void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const node_id = n.id;
   std::string const phase = n.phase;
+  // wfr-㊹ 批④：做完后 goto _break（引擎 goto 容器名解析已支持）
+  std::string const break_target = ctx.goto_resolve ? ctx.goto_resolve(kBreakName) : kBreakName;
   // L3 裁判模型（批③）：verify 节点的 model 组件；缺省用 main（wfr 装配时指到"main"）
   model::ChatModel* judge =
       (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
   std::string const judge_sys = n.system_prompt;
-  ctx.graph.add_node(n.id, [node_id, phase, judge, judge_sys](Json const& state, NodeContext&) {
+  ctx.graph.add_node(n.id, [node_id, phase, judge, judge_sys, break_target](Json const& state, NodeContext&) {
     Json plan = plan_from_state(state);
     Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
     long cursor = plan.value("cursor", 0L);
 
     if (phase == "announce") {
       if (cursor < 0 || cursor >= static_cast<long>(steps.size()))
-        return Command::with_update(Json{});  // 防御：无步可做；loop max=steps 已保证不会到这
+        return Command{{}, {break_target}, {}};  // 全部完成 → 跳出循环（引擎解析 _break）
       Json step = steps[static_cast<std::size_t>(cursor)];
       std::string const id = step.value("id", "s" + std::to_string(cursor + 1));
       std::string const goal = step.value("goal", "");
@@ -2147,6 +2239,24 @@ std::vector<NodeType> const& builtin_node_types() {
        },
        [](NodeIR const& n) { return std::string("verify ") + n.phase + " → " + n.next; },
        v_verify, c_verify, e_next, t_none},
+
+      // ---------------- plan_review（wfr-㊹ 批④）：步骤边界任务级 HITL ----------------
+      {NodeKind::PlanReview, "plan_review",
+       [](Json const& n) { return kind_is(n, "plan_review"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "confirm", out.confirm);      // "true"/"false"（可 @config.*）
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "plan_review";
+         if (!n.confirm.empty()) node["confirm"] = n.confirm;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         std::string d = "plan_review";
+         if (!n.confirm.empty()) d += " confirm=" + n.confirm;
+         return d + " → " + n.next;
+       }, v_plan_review, c_plan_review, e_next, t_none},
   };
   return types;
 }

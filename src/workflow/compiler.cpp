@@ -154,7 +154,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   //    在**编译期**就解析成图目标（body 之外的保留名是错误，fail-closed）。
   std::string compile_error;
   // 一份 cctx 复用（registered 要累加），只按当前作用域换 resolve。
-  NodeType::CompileContext cctx{g, &registry, opts.components, resolve, 0, {}, sink};
+  NodeType::CompileContext cctx{g, &registry, opts.components, resolve, nullptr, 0, {}, sink};
   cctx.guard = opts.tool_policy;  // wfr-㊷：副作用执行点防护（null = 不防护）
   std::function<void(std::vector<NodeIR> const&, LoopScope const*)> compile_list =
       [&](std::vector<NodeIR> const& nodes, LoopScope const* scope) {
@@ -170,6 +170,12 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
           cctx.resolve = [&resolve, scope](std::string const& t) {
             if (scope == nullptr) return resolve(t);  // 顶层：保留名由 validator 拦
             if (t == kContinueName) return scope->loop_id;  // 回边 → loop 节点头
+            if (t == kBreakName) return resolve(scope->exit_target);
+            return resolve(t);
+          };
+          cctx.goto_resolve = [&resolve, scope](std::string const& t) {  // 同上，供 goto_nodes 用
+            if (scope == nullptr) return t;
+            if (t == kContinueName) return scope->loop_id;
             if (t == kBreakName) return resolve(scope->exit_target);
             return resolve(t);
           };

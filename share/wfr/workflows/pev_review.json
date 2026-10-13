@@ -1,0 +1,30 @@
+{
+  "id": "pev_review",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "plan" },
+    { "id": "plan", "kind": "plan", "goal": "@config.goal",
+      "default_plan": {
+        "steps": [
+          { "id": "s1", "goal": "用 get_weather 查北京今天天气，把温度范围写进 .out/rev_weather.md", "deps": [] },
+          { "id": "s2", "goal": "读 .out/rev_weather.md，给一句穿衣建议", "deps": ["s1"] }
+        ]
+      },
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 6, "next": "final", "on_max": "final",
+      "body": [
+        { "id": "review", "kind": "plan_review", "next": "step" },
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "chat",
+          "system_prompt": "你是任务执行助手：按每一步的具体指令行事；查天气用 get_weather，写文件用 file_write。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "act", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "next": "_continue" }
+      ] },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "整合步骤结论给出最终回答。", "next": "_turn_end" }
+  ]
+}

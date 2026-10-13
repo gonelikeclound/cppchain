@@ -78,6 +78,7 @@ enum class NodeKind {
   Plan,   // 产出/校验 `state.plan`（default_plan 预置 或 模型生成）
   Verify, // 每步门：phase=announce（把当前步骤目标喂给模型 + in_progress）/
           //         phase=judge（规则/schema 确定性判据或模型裁判 → done/fail + 推进 cursor）
+  PlanReview, //（wfr-㊹ 批④）步骤边界任务级 HITL：interrupt 悬挂 → resume continue/rollback_to:K/abort
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -177,6 +178,7 @@ struct NodeIR {
   nlohmann::json default_plan = Json(nullptr);
   std::string goal;      // plan 节点的目标（可 @config.*）
   std::string phase;     // verify：announce / judge
+  std::string confirm;   // plan_review（批④）："true/false"（假 = 关确认门直接过）；可 @config.*
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

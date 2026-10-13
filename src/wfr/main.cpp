@@ -574,6 +574,53 @@ int main(int argc, char** argv) {
     auto const& pend = wf->graph.last_interrupt();
     if (!pend.interrupted) break;  // 跑完（或本就不需要人审）
 
+    // —— 悬挂分支：plan_review（步骤边界确认） / approve_tools（工具批） ——
+    if (pend.payload.value("kind", "") == "plan_review_request") {
+      std::println();
+      std::println("⏸ 步骤边界确认（节点 {}）：", pend.node);
+      Json const pl = pend.payload.value("plan", Json::object());
+      std::println("   目标: {}", pl.value("goal", ""));
+      std::println("   进度: {} / {}   已完成步骤摘要:\n   {}", pl.value("cursor", 0L),
+                   pl.value("count", 0L), pl.value("done", ""));
+      std::println("   下一步: {}", pl.value("next", ""));
+      std::string const policy = config.value("approve_policy", "prompt");
+      Json resume;
+      if (policy != "prompt") {
+        std::println("  下一步？[continue | rollback_to <K> | abort]： → mock 边界裁决（approve_policy={}）", policy);
+        // allow/continue → 放行；其余（deny/未知）→ abort（fail-closed，留痕）
+        resume = (policy == "allow" || policy == "continue") ? Json{{"action", "continue"}}
+                                                             : Json{{"action", "abort"}};
+      } else {
+        std::print("  下一步？[continue | rollback_to <K> | abort]：");
+        std::cout.flush();
+        std::string line;
+        if (!std::getline(std::cin, line)) {
+          std::println();
+          std::println("（stdin 结束，未获裁决 —— 本次触发止于边界确认点。）");
+          return 0;
+        }
+        std::string const t = cppchain::wfr::trim(line);
+        if (t.empty() || t == "abort" || t == "a" || t == "q" || t == "quit") {
+          std::println("（已中止 —— 本次触发止于边界确认点。）");
+          return 0;
+        }
+        if (t == "continue" || t == "c") {
+          resume = Json{{"action", "continue"}};
+        } else if (t.starts_with("rollback_to") || t == "r" || t.starts_with("r ")) {
+          long to = 0;
+          for (char ch : t)
+            if (ch >= '0' && ch <= '9') to = to * 10 + (ch - '0');
+          resume = Json{{"action", "rollback_to"}, {"to", to}};
+        } else {
+          resume = Json{{"action", "abort"}};  // 未识别 → abort（fail-closed，留痕）
+        }
+        std::println("  → 裁决 {}", resume.dump());
+      }
+      fo.resume = std::move(resume);
+      fo.input_messages.clear();  // 恢复续跑：input 由引擎忽略
+      continue;
+    }
+
     // —— 悬挂：人工审批 ——
     std::println();
     std::println("⏸ 需人工审批（节点 {}）—— 本轮执行停在审批点：", pend.node);

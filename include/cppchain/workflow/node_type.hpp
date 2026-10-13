@@ -65,6 +65,9 @@ struct NodeType {
     ComponentRegistry const* components = nullptr;
     // label / _turn_end / _fail → 图上的目标名（由 compiler 提供）
     std::function<std::string(std::string const&)> resolve;
+    // wfr-㊹：`_continue`/`_break` 等**容器保留名** → goto_nodes 可用的图目标
+    // （loop body 里解析成 节点头/循环出口；顶层原样返回）。节点编译期捕获。
+    std::function<std::string(std::string const&)> goto_resolve;
     std::size_t registered = 0;  // 成功注册的图节点数（供 registered_nodes()）
     std::string error;
     // 触发期注入的会话日志句柄（docs/12 §6.4 / §7）：节点 wrapper 捕获它，
