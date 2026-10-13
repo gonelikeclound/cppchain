@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  # 主机：单元测试 + 真实样张端到端校验（含 PDFium）
+  host-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # pdfium-render 通过 bindgen 生成绑定，需要系统 libclang
+      - name: 安装 clang / pkg-config
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev pkg-config
+
+      - name: 编译检查
+        run: cargo build
+
+      - name: 生成真实样张（python-docx / openpyxl / python-pptx / fpdf2）
+        run: |
+          python3 -m pip install --user --break-system-packages python-docx openpyxl python-pptx fpdf2
+          python3 tests/e2e/gen_samples.py
+          ls -la tests/e2e
+
+      - name: 下载 PDFium（Linux x64，pdfium-binaries chromium/8076）
+        run: |
+          curl -sL -o /tmp/pdfium-linux-x64.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8076/pdfium-linux-x64.tgz"
+          mkdir -p tests/e2e/lib && tar -xzf /tmp/pdfium-linux-x64.tgz -C tests/e2e/lib
+          ls -la tests/e2e/lib
+
+      # 默认特性含 pdf；样张缺失时 e2e 测试自动跳过，不影响本步骤
+      - name: 单元测试 + 端到端校验
+        run: cargo test
+
+  # Android：交叉编译 arm64-v8a so（无 pdf 快速形态，验证 JNI 产物可产出）
+  android-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: 安装 cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: 交叉编译 arm64-v8a（--no-default-features 降级形态）
+        run: cargo ndk -t arm64-v8a -o ./target/android build --release --no-default-features
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+
+      - name: 上传 so 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: librust_doc_engine-arm64-v8a
+          path: target/android/arm64-v8a/librust_doc_engine.so

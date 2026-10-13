@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# office —— 外部 office/PDF 解析器（rust_doc_engine demo CLI），零编译进业务程序。
+# 用法: office <file.docx|.pdf|.xlsx|.pptx>  → stdout 输出结构化 JSON（含 text/表格）
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export RUST_DOC_ENGINE_PDFIUM_LIB="$DIR/tests/e2e/lib/libpdfium.so"
+exec "$DIR/target/release/examples/demo" "$@"

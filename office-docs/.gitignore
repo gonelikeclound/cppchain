@@ -1,0 +1,15 @@
+# Rust
+/target/
+# 构建日志
+*.log
+# 端到端样张（由 tests/e2e/gen_samples.py 生成；pdfium 动态库体积大不纳入版本库）
+tests/e2e/lib/
+tests/e2e/_*.pdf
+# Android demo 构建产物
+android/DocParserDemo/.gradle/
+android/DocParserDemo/app/build/
+android/DocParserDemo/local.properties
+# 编辑器/系统
+.DS_Store
+.idea/
+.vscode/

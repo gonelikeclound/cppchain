@@ -7,11 +7,11 @@
       "goal": "@config.goal",
       "model": "main",
       "next": "loop" },
-    { "id": "loop", "kind": "loop", "max": 8, "next": "final", "on_max": "final",
+    { "id": "loop", "kind": "loop", "max": 24, "next": "final", "on_max": "final",
       "body": [
         { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
         { "id": "think",  "kind": "model", "model": "main", "tools": "chat_bash",
-          "system_prompt": "你是任务执行助手：按每一步的具体指令行事。可写 python 脚本（用 file_write 落到工作区）再用 bash 执行（python3 script.py），可用 openpyxl 处理 xlsx；读文件用 file_read，查信息用 web_search。",
+          "system_prompt": "你是任务执行助手：按每一步具体指令行事。解析 PDF/DOCX/XLSX/PPTX 一律用外部命令 `/home/dongjunjie/work/cppchain/office-docs/bin/office <绝对路径>`（输出 JSON 含提取文本），**优先写成 python 脚本用 subprocess 批量调 office 一次处理全部文件**（别逐文件来回调工具）；千万别试图 pip 装解析库。python 脚本用 file_write 落盘再 bash 执行（python3 script.py），xlsx 用 openpyxl。",
           "next": "route" },
         { "id": "route", "kind": "route", "on": "last_ai_outcome",
           "cases": { "tool_calls": "approve", "text": "judge", "invalid_tool_calls": "_fail" },
