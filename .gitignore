@@ -38,3 +38,5 @@ compile_commands.json
 
 # 本地工具链缓存(若克隆到别的环境)
 /opt_cache/
+# A2：submit_result 偶发把 verdict 写进程 CWD 的 .out（防误入版本库）
+/.out/
