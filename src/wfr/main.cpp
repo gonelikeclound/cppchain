@@ -449,6 +449,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> names;
     for (auto& t : ts) { names.push_back(t.name); registry.add(std::move(t)); }
     names.push_back("get_weather");
+    names.insert(names.end(), {"file_read", "file_write", "list_dir"});  // A2：D1 L2 用 file 落盘判据
     comps.toolsets["trip"] = std::move(names);
   }
 
