@@ -1,0 +1,25 @@
+{
+  "id": "pev_trip",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "plan" },
+    { "id": "plan", "kind": "plan",
+      "goal": "@config.goal", "model": "main",
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 6, "next": "final", "on_max": "final",
+      "body": [
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "trip",
+          "system_prompt": "你是出行规划助手：用 get_all_cities / get_all_{hotels,restaurants,attractions}_by_city / get_weather_by_city_date 查询；规划三天行程，最后用 submit_result 提交最终行程 JSON 并核对返回的 verdict/issues。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "act", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "model": "main",
+          "next": "_continue" }
+      ] },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "给出最终行程与校验结论。", "next": "_turn_end" }
+  ]
+}

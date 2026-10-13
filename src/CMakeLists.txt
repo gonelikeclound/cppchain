@@ -56,6 +56,7 @@ add_library(cppchain_tool STATIC
   tool/spawn_runner.cpp
   tool/sandbox.cpp
   tool/bash_tool.cpp
+  tool/trip_db.cpp
   tool/arxiv.cpp
   tool/hybrid_selector.cpp)
 

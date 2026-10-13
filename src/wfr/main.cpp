@@ -26,7 +26,8 @@
 #include <cppchain/tool/exec_guard.hpp>
 #include <cppchain/tool/file_tools.hpp>
 #include <cppchain/tool/registry.hpp>
-#include <cppchain/tool/sandbox.hpp>  // wfr-㊸ @③：沙箱执行器选择（bash 后端）
+#include <cppchain/tool/sandbox.hpp>
+#include <cppchain/tool/trip_db.hpp>  // B2-B 出行规划 DB 面  // wfr-㊸ @③：沙箱执行器选择（bash 后端）
 #include <cppchain/tool/weather.hpp>
 #include <cppchain/tool/web_search.hpp>
 #include <cppchain/workflow/compiler.hpp>
@@ -442,6 +443,14 @@ int main(int argc, char** argv) {
   // 独立 toolset，不污染既有 chat 的既有行为（approve_bash_demo 等用它）。
   comps.toolsets["chat_bash"] = {"get_weather", "web_search", "file_read",
                                  "list_dir",    "file_write", "bash"};
+  // B2-B 出行规划工具面：只读业务 DB 查询 + submit_result（自动验证器写 .out/trip_verdict.json）
+  {
+    auto ts = tool::make_trip_tools();
+    std::vector<std::string> names;
+    for (auto& t : ts) { names.push_back(t.name); registry.add(std::move(t)); }
+    names.push_back("get_weather");
+    comps.toolsets["trip"] = std::move(names);
+  }
 
   std::optional<model::openai::OpenAIChatModel> model;
   if (model_needed_key) {
