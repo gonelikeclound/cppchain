@@ -1808,7 +1808,15 @@ void c_plan(NodeIR const& n, NodeType::CompileContext& ctx) {
 
     Json update = Json::object();
     Json results = Json::object();
-    if (!plan.is_null()) update["plan"] = plan;
+    if (!plan.is_null()) {
+      // A1：@config.plan_strategy（JSON 字符串）覆盖计划策略（on_fail / max_auto_rollback）
+      Json const cfg = resolve_parameter(Json("@config.plan_strategy"), state);
+      if (cfg.is_string() && !cfg.get<std::string>().empty()) {
+        auto const ps = nlohmann::json::parse(cfg.get<std::string>(), nullptr, /*allow_exceptions=*/false);
+        if (!ps.is_discarded() && ps.is_object()) plan["strategy"] = ps;
+      }
+      update["plan"] = plan;
+    }
     results[node_id] = Json{{"action", action},
                             {"steps", plan.is_null() ? 0LL : static_cast<long>(plan["steps"].size())}};
     update[kResultsKey] = std::move(results);
@@ -1898,7 +1906,44 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
     } else {
       verdict_obj = Json{{"step", id}, {"kind", "none"}, {"verdict", "done"}, {"why", "L1 无验证"}};
     }
-    steps[static_cast<std::size_t>(cursor)]["status"] = advance ? "done" : "failed";
+    // A1（收尾）：strategy.on_fail == rollback_deps 且未达上限 → 失败时**自动**回退到依赖步重做。
+    bool auto_rolled = false;
+    if (!advance) {
+      Json const strategy = plan.contains("strategy") && plan["strategy"].is_object()
+                                ? plan["strategy"] : Json::object();
+      long const cap = strategy.value("max_auto_rollback", 1L);
+      long const used = plan.value("auto_rollbacks", 0L);
+      if (strategy.value("on_fail", "retry") == "rollback_deps" && used < cap) {
+        long target = 0;
+        auto const& deps = step.contains("deps") && step["deps"].is_array() ? step["deps"]
+                                                                             : Json::array();
+        long min_idx = -1;
+        if (deps.is_array()) {
+          for (std::size_t i = 0; i < steps.size(); ++i)
+            if (steps[i].is_object() && steps[i].contains("id"))
+              for (auto const& d : deps)
+                if (d.is_string() && steps[i]["id"].get<std::string>() == d.get<std::string>())
+                  if (min_idx < 0 || static_cast<long>(i) < min_idx) min_idx = static_cast<long>(i);
+        }
+        if (min_idx >= 0) target = min_idx;
+        if (0 <= target && target <= cursor) {
+          std::vector<std::string> rolled;
+          for (long i = target; i <= cursor; ++i) {
+            std::string const st = steps[static_cast<std::size_t>(i)].value("status", "pending");
+            if (st != "pending") rolled.push_back(steps[static_cast<std::size_t>(i)].value("id", "?"));
+            steps[static_cast<std::size_t>(i)]["status"] = "pending";  // 从依赖步重做
+          }
+          cursor = target;
+          plan["auto_rollbacks"] = used + 1;
+          plan_log.push_back(Json{{"kind", "rollback"}, {"action", "auto_rollback_deps"},
+                                  {"to", target}, {"reason", verdict_obj.value("why", "")},
+                                  {"rolled", rolled}});
+          auto_rolled = true;
+        }
+      }
+    }
+    if (!auto_rolled)
+      steps[static_cast<std::size_t>(cursor)]["status"] = advance ? "done" : "failed";
     if (advance) cursor += 1;
     plan["steps"] = std::move(steps);
     plan["cursor"] = cursor;
