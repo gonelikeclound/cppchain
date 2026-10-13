@@ -1,0 +1,28 @@
+{
+  "id": "pev_py",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "plan" },
+    { "id": "plan", "kind": "plan",
+      "goal": "@config.goal",
+      "model": "main",
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 8, "next": "final", "on_max": "final",
+      "body": [
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "chat_bash",
+          "system_prompt": "你是任务执行助手：按每一步的具体指令行事。可写 python 脚本（用 file_write 落到工作区）再用 bash 执行（python3 script.py），可用 openpyxl 处理 xlsx；读文件用 file_read，查信息用 web_search。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "approve", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "approve", "kind": "approve_tools", "deny": [], "next": "act" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "model": "main",
+          "next": "_continue" }
+      ] },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "整合步骤结论给出最终回答（简洁、有依据）。",
+      "next": "_turn_end" }
+  ]
+}
