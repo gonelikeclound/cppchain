@@ -1856,9 +1856,14 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
       Json update;
       update[kPlanStateKey] = plan;
       std::string const prev = plan.value("last_summary", "");
+      std::string const day = [&] {
+        std::string const d = resolve_text_parameter("@config.task_date", state);
+        return (d.empty() || d == "null") ? today_str() : d;
+      }();
       std::string const add = "📅 第 " + std::to_string(plan.value("batch_no", 1L)) +
-                              " 批 @ " + today_str() + (created ? "（建档）" : "") +
-                              (prev.empty() ? "" : "\n上批摘要：" + prev);
+                              " 批 @ " + day + (created ? "（建档）" : "") +
+                              (prev.empty() ? "" : "\n上批摘要：" + prev) +
+                              (prev.empty() && plan.value("batch_no", 1L) > 1 ? "\n（本批为次日续跑）" : "");
       update[kMessagesKey] = Json::array({message::human_message(add)});
       if (created) write_json_file(arch, plan);
       results[node_id] = Json{{"action", "begin"}, {"batch", plan.value("batch_no", 1L)},

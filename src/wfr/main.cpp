@@ -53,6 +53,7 @@
 #include <memory>
 #include <print>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cppchain;
@@ -361,11 +362,20 @@ int main(int argc, char** argv) {
       std::error_code ec; auto const e = std::filesystem::read_symlink("/proc/self/exe", ec);
       return ec ? std::string("wfr") : e.string();
     }();
-    std::filesystem::path const cj = std::filesystem::path(workdir) / ".wfr" / "cron.json";
-    Json jobs = Json::array();
-    if (std::ifstream in(cj); in) { try { in >> jobs; jobs = jobs.value("jobs", Json::array()); } catch (...) {} }
-    long const now = static_cast<long>(std::time(nullptr));
-    bool fired = false;
+    long sleep_secs = 10;
+    long max_rounds = 0;  // 0 = 常驻
+    for (int i = 2; i + 1 < argc; ++i) {
+      std::string const a = argv[i];
+      if (a == "--sleep-secs" && i + 2 < argc) sleep_secs = std::stol(argv[++i]);
+      if (a == "--max-rounds" && i + 2 < argc) max_rounds = std::stol(argv[++i]);
+    }
+    long rounds = 0;
+    for (;;) {
+      std::filesystem::path const cj = std::filesystem::path(workdir) / ".wfr" / "cron.json";
+      Json jobs = Json::array();
+      if (std::ifstream in(cj); in) { try { in >> jobs; jobs = jobs.value("jobs", Json::array()); } catch (...) {} }
+      long const now = static_cast<long>(std::time(nullptr));
+      bool fired = false;
     for (auto& job : jobs) {
       if (!job.is_object()) continue;
       std::string const T = job.value("task", "");
@@ -389,7 +399,11 @@ int main(int argc, char** argv) {
       std::error_code ec; std::filesystem::create_directories(cj.parent_path(), ec);
       if (std::ofstream out(cj); out) out << Json{{"jobs", jobs}}.dump(2);
     }
-    return once || !fired ? 0 : 0;  // --once：跑完一轮即收；daemon 模式我们只演示 once（循环留给宿主/cron）
+      ++rounds;
+      std::println("cron 轮次 {} 完成（sleep {}s）", rounds, sleep_secs);
+      if (once || (max_rounds > 0 && rounds >= max_rounds)) return 0;
+      std::this_thread::sleep_for(std::chrono::seconds(sleep_secs));
+    }
   }
 
   // ---- 定位 workflow（settings.workflow_dirs → ws → 全局 → 发布自带）----
