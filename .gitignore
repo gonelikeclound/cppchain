@@ -41,3 +41,4 @@ compile_commands.json
 # A2：submit_result 偶发把 verdict 写进程 CWD 的 .out（防误入版本库）
 /.out/
 office-docs/.out/
+life.jsonl
