@@ -1,0 +1,13 @@
+ws	task	cursor	batch	steps	product_xlsx	out_files	audit	last_summary	verdicts_last
+ws_cron	cron1	4	2	4	False	0	False	**批2第四步**（s4）已执行。
+
+📌 批间摘要：第2批（cron 定时批）承	[('s4', 'none', 'done')]
+ws_lot	null	6	2	6	False	3	False	追加操作与覆盖写重复了，需要读出来核对并去重。
+
+<｜｜DSML｜｜ calls	[('s4', 'none', 'done'), ('s5', 'none', 'done'), ('s6', 'none', 'done')]
+ws_lot2	lt1	6	2	6	False	2	False	<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="	[('s4', 'none', 'done'), ('s5', 'none', 'done'), ('s6', 'none', 'done')]
+ws_lota1	a1	5	2	5	True	7	False	解析结果已明确：`contract_038.pdf` 和 `contract_0	[('s4', 'none', 'done'), ('s5', 'none', 'done')]
+ws_md	md	3	2	3	False	2	True	<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="	[('audit_prev', 'model', 'fail'), ('audit_prev', 'model', 'fail'), ('audit_prev', 'model', 'done')]
+ws_rc	rc	3	2	3	False	2	True	📋 执行步骤 3/3 [audit_prev] 完成：复查结论已落盘至 `.ou	[('audit_prev', 'model', 'fail'), ('audit_prev', 'model', 'done')]
