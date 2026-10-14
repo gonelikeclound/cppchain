@@ -27,6 +27,7 @@
 #include <cppchain/tool/file_tools.hpp>
 #include <cppchain/tool/registry.hpp>
 #include <cppchain/tool/sandbox.hpp>
+#include <cppchain/tool/spawn_runner.hpp>  // wfr-㊿ cron：重进本进程跑批
 #include <cppchain/tool/trip_db.hpp>  // B2-B 出行规划 DB 面  // wfr-㊸ @③：沙箱执行器选择（bash 后端）
 #include <cppchain/tool/weather.hpp>
 #include <cppchain/tool/web_search.hpp>
@@ -349,6 +350,46 @@ int main(int argc, char** argv) {
       }
     }
     return 0;
+  }
+
+  // 批③：轻量常驻调度（wfr-㊿）—— 读 .wfr/cron.json 任务表，到期重进本进程跑一个 lot 批；--once = 跑一轮即收。
+  if (cmd == "cron") {
+    bool once = false;
+    for (int i = 2; i + 1 < argc; ++i)
+      if (std::string(argv[i]) == "--once") once = true;
+    auto self = [&]() -> std::string {
+      std::error_code ec; auto const e = std::filesystem::read_symlink("/proc/self/exe", ec);
+      return ec ? std::string("wfr") : e.string();
+    }();
+    std::filesystem::path const cj = std::filesystem::path(workdir) / ".wfr" / "cron.json";
+    Json jobs = Json::array();
+    if (std::ifstream in(cj); in) { try { in >> jobs; jobs = jobs.value("jobs", Json::array()); } catch (...) {} }
+    long const now = static_cast<long>(std::time(nullptr));
+    bool fired = false;
+    for (auto& job : jobs) {
+      if (!job.is_object()) continue;
+      std::string const T = job.value("task", "");
+      if (T.empty()) continue;
+      long const every = job.value("every_minutes", 0L);
+      long const last = job.value("last_run", 0L);
+      if (every <= 0 || now - last < every * 60) continue;
+      std::string const S = job.value("session", T);
+      std::string const G = job.value("goal", "");
+      std::println("⏱ cron ➜ 触发批次 task={}（距上次 {}s ≥ {}min）", T, now - last, every);
+      std::vector<std::string> av = {self, "lot", "--workdir", workdir, "--session", S,
+                                     "--set", "task=" + T, "--set", "approve_policy=allow"};
+      if (!G.empty()) { av.push_back("--set"); av.push_back("goal=" + G); }
+      av.push_back("cron 定时批");
+      cppchain::tool::detail::run_argv(av, std::nullopt, cppchain::tool::detail::SpawnLimits{},
+                                        std::chrono::minutes(30), 1u << 20);
+      job["last_run"] = now;
+      fired = true;
+    }
+    if (fired) {
+      std::error_code ec; std::filesystem::create_directories(cj.parent_path(), ec);
+      if (std::ofstream out(cj); out) out << Json{{"jobs", jobs}}.dump(2);
+    }
+    return once || !fired ? 0 : 0;  // --once：跑完一轮即收；daemon 模式我们只演示 once（循环留给宿主/cron）
   }
 
   // ---- 定位 workflow（settings.workflow_dirs → ws → 全局 → 发布自带）----
