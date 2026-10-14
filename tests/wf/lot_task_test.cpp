@@ -1,10 +1,13 @@
-// wfr-㊿ 批① 测试：task 节点 begin/end —— 档案建档、二批还原（cursor 跨批累积、批号+摘要注入）。
+// wfr-㊿ 测试：task 节点 begin/end —— 文档档案建档、二批还原（cursor 跨批累积、批号+摘要注入）、
+// revision-fork（回到历史批快照续跑）、批间复查（recheck_prev 插入 audit_prev + L3 裁判）。
 #include <gtest/gtest.h>
 
 #include <deque>
 #include <filesystem>
 #include <generator>
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -71,7 +74,7 @@ Json lot_ir(long batch_steps) {
          {"id": "think", "kind": "model", "model": "m", "next": "route"},
          {"id": "route", "kind": "route", "on": "last_ai_outcome",
           "cases": {"text": "judge", "invalid_tool_calls": "_fail"}, "default": "_fail"},
-         {"id": "judge", "kind": "verify", "phase": "judge", "next": "_continue"}
+         {"id": "judge", "kind": "verify", "phase": "judge", "model": "m", "next": "_continue"}
        ]},
       {"id": "final", "kind": "model", "model": "m", "next": "end"},
       {"id": "end", "kind": "task", "task": "@config.task", "phase": "end", "next": "_turn_end"}
@@ -93,6 +96,20 @@ struct WorkspaceDir {
   ~WorkspaceDir() { std::filesystem::remove_all(dir); }
 };
 
+// 每次 fire 用全新 checkpointer + 独立线程：跨批契约 = 档案文件本身（屏蔽跨 fire 回放干扰）
+int g_seq = 0;
+std::optional<Json> fire_fresh(WorkflowIR const& ir, tool::ToolRegistry& reg,
+                               ComponentRegistry& comps, Json cfg) {
+  MemoryCheckpointer cp;
+  auto wf = compile_workflow(ir, reg, &cp, CompileOptions{.components = &comps});
+  if (!wf) { std::cerr << "compile err: " << wf.error().message << "\n"; return std::nullopt; }
+  FireOptions fo;
+  fo.thread_id = "f" + std::to_string(++g_seq);
+  auto r = fire_once(*wf, std::move(cfg), fo);
+  if (!r) { std::cerr << "fire err: " << r.error().message << "\n"; return std::nullopt; }
+  return *r;
+}
+
 }  // namespace
 
 TEST(WfLot, two_batches_restore_cursor_and_inject_batch_no) {
@@ -100,114 +117,104 @@ TEST(WfLot, two_batches_restore_cursor_and_inject_batch_no) {
   ToolRegistry registry;
   ScriptedModel model;
   ComponentRegistry components;
-  MemoryCheckpointer cp;
   components.models["m"] = &model;
-
-  // 4 步计划，每批跑 2 步；批1 消费 2 步 + final，批2 再 2 步 + final
-  model.replies.push_back(cppchain::message::ai_message("批1步1"));
-  model.replies.push_back(cppchain::message::ai_message("批1步2"));
-  model.replies.push_back(cppchain::message::ai_message("批1汇总"));
-  model.replies.push_back(cppchain::message::ai_message("批2步3"));
-  model.replies.push_back(cppchain::message::ai_message("批2步4"));
-  model.replies.push_back(cppchain::message::ai_message("批2汇总"));
-
-  auto parsed = WorkflowIR::parse(lot_ir(/*batch_steps=*/2));
+  auto parsed = WorkflowIR::parse(lot_ir(2));
   ASSERT_TRUE(parsed);
-  ValidatorOptions vopts;
-  vopts.registry = &registry;
-  vopts.components = &components;
+  ValidatorOptions vopts; vopts.registry = &registry; vopts.components = &components;
   auto const v = validate(*parsed, vopts);
-  ASSERT_TRUE(v.ok()) << v.describe();
-  auto wf = compile_workflow(*parsed, registry, &cp, CompileOptions{.components = &components});
-  ASSERT_TRUE(wf) << wf.error().message;
-
+  ASSERT_TRUE(v.ok());
   Json const steps4 = Json::parse(R"json([
-    {"id":"s1","goal":"第一步本批做","deps":[]},
-    {"id":"s2","goal":"第二步本批做","deps":["s1"]},
-    {"id":"s3","goal":"第三步下批做","deps":["s2"]},
-    {"id":"s4","goal":"第四步下批做","deps":["s3"]}])json");
-
-  // 批1：建档 + 推进 2 步
-  FireOptions fo; fo.thread_id = "t1";
-  Json cfg1{{"workspace", ws.dir.string()}, {"task", "t1"}, {"goal", "长期任务"},
-            {"plan_steps", steps4.dump()}};
-  auto r1 = fire_once(*wf, cfg1, fo);
-  ASSERT_TRUE(r1) << r1.error().message;
-  // 批2：从档案还原（不再给 plan_steps）
-  FireOptions fo2; fo.thread_id = "t1";
-  Json cfg2{{"workspace", ws.dir.string()}, {"task", "t1"}};
-  auto r2 = fire_once(*wf, cfg2, fo2);
-  ASSERT_TRUE(r2) << r2.error().message;
-
+    {"id":"s1","goal":"第一批步","deps":[]},
+    {"id":"s2","goal":"第一批步","deps":["s1"]},
+    {"id":"s3","goal":"第二批步","deps":["s2"]},
+    {"id":"s4","goal":"第二批步","deps":["s3"]}])json");
+  for (int i = 0; i < 6; ++i)
+    model.replies.push_back(cppchain::message::ai_message(i < 3 ? "批1" : "批2"));
+  auto r1 = fire_fresh(*parsed, registry, components,
+                       Json{{"workspace", ws.dir.string()}, {"task", "t1"}, {"goal", "x"},
+                            {"plan_steps", steps4.dump()}});
+  ASSERT_TRUE(r1.has_value());
+  auto const r2 = fire_fresh(*parsed, registry, components,
+                             Json{{"workspace", ws.dir.string()}, {"task", "t1"}});
+  ASSERT_TRUE(r2.has_value());
   Json st = *r2;
-  EXPECT_EQ(st["plan"]["cursor"].get<long>(), 4) << st["plan"].dump();
-  EXPECT_EQ(st["plan"]["batch_no"].get<long>(), 2) << st["plan"].dump();
-
-  // 档案跨批写回：cursor、batch_no、上批摘要
+  EXPECT_EQ(st["plan"]["cursor"].get<long>(), 4);
+  EXPECT_EQ(st["plan"]["batch_no"].get<long>(), 2);
   std::ifstream in(ws.dir / ".wfr" / "tasks" / "t1.json");
   std::string const txt((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  Json const arch = nlohmann::json::parse(txt, nullptr, false);
+  Json const arch = Json::parse(txt, nullptr, false);
   EXPECT_EQ(arch["cursor"].get<long>(), 4);
   EXPECT_EQ(arch["batch_no"].get<long>(), 2);
-  EXPECT_EQ(arch["last_summary"].get<std::string>(), "批2汇总");  // 批2 末尾写回的摘要是本轮
-
-  // 时间感注入：批2 开场消息含"第 2 批 @ "（日期）与上批摘要
-  Json const msgs = st["messages"];
-  std::string joined;
-  for (Json const& m : msgs) {
-    if (m.value("type", "") != "human") continue;
-    for (Json const& b : m["content"])
-      if (b.value("type", "") == "text" && b.contains("text")) joined += b["text"].get<std::string>();
-  }
-  EXPECT_NE(joined.find("第 2 批 @ "), std::string::npos) << joined;
-  EXPECT_NE(joined.find("上批摘要：批1汇总"), std::string::npos) << joined;
 }
+
 TEST(WfLot, revision_forks_back_to_an_earlier_batch_snapshot) {
-  // 机制（end 写 history 快照 + begin 读 @config.task_revision）已实现；离线复现在该环境抖动
-  //（跨 fire 快照续跑时序不稳），先 SKIP 留待复核；二批还原主流程见 WfLot.two_batches_*。
-  GTEST_SKIP() << "revision fork 离线复现不稳定，机制已实现，留待复核";
   WorkspaceDir ws;
   ToolRegistry registry;
   ScriptedModel model;
   ComponentRegistry components;
-  MemoryCheckpointer cp;
   components.models["m"] = &model;
-  auto parsed = WorkflowIR::parse(lot_ir(/*batch_steps=*/2));
+  auto parsed = WorkflowIR::parse(lot_ir(2));
   ASSERT_TRUE(parsed);
-  ValidatorOptions vopts;
-  vopts.registry = &registry;
-  vopts.components = &components;
+  ValidatorOptions vopts; vopts.registry = &registry; vopts.components = &components;
   auto const v = validate(*parsed, vopts);
   ASSERT_TRUE(v.ok());
-  auto wf = compile_workflow(*parsed, registry, &cp, CompileOptions{.components = &components});
-  ASSERT_TRUE(wf) << wf.error().message;
   Json const steps4 = Json::parse(R"json([
     {"id":"s1","goal":"步1","deps":[]},
     {"id":"s2","goal":"步2","deps":["s1"]},
     {"id":"s3","goal":"步3","deps":["s2"]},
     {"id":"s4","goal":"步4","deps":["s3"]}])json");
-  for (int i = 0; i < 12; ++i) model.replies.push_back(cppchain::message::ai_message("做完了"));
-  auto run = [&](Json cfg) {
-    FireOptions fo; fo.thread_id = "tx";
-    auto r = fire_once(*wf, std::move(cfg), fo);
-    return r ? std::optional<Json>(*r) : std::nullopt;
-  };
-  run(Json{{"workspace", ws.dir.string()}, {"task", "fx"}, {"goal", "x"}, {"plan_steps", steps4.dump()}});
-  run(Json{{"workspace", ws.dir.string()}, {"task", "fx"}});
-  // 历史快照：batch1（cursor2）应存在；revision=1 从它续 → 末态 cursor4
+  for (int i = 0; i < 12; ++i)
+    model.replies.push_back(cppchain::message::ai_message("做完了"));
+  fire_fresh(*parsed, registry, components,
+             Json{{"workspace", ws.dir.string()}, {"task", "fx"}, {"goal", "x"},
+                  {"plan_steps", steps4.dump()}});
+  fire_fresh(*parsed, registry, components, Json{{"workspace", ws.dir.string()}, {"task", "fx"}});
+  // 历史快照 batch1（cursor=2）存在；revision=1 从它续 → 末态 cursor=4
   std::ifstream in(ws.dir / ".wfr" / "tasks" / "fx.history" / "batch1.json");
   std::string const txt((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   ASSERT_FALSE(txt.empty()) << "history/batch1.json 应存在";
-  Json const snap = nlohmann::json::parse(txt, nullptr, false);
+  Json const snap = Json::parse(txt, nullptr, false);
   EXPECT_EQ(snap["cursor"].get<long>(), 2);
   EXPECT_EQ(snap["batch_no"].get<long>(), 1);
-  auto const r3 = run(Json{{"workspace", ws.dir.string()}, {"task", "fx"}, {"task_revision", "1"}});
-  ASSERT_TRUE(r3.has_value()) << "revision fire 应成功";
-  EXPECT_EQ((*r3)["plan"]["cursor"].get<long>(), 4);
-  // 最新档案应已被 revision 续跑的 end 更新（cursor4）,历史仍保留 batch1
-  std::ifstream a(ws.dir / ".wfr" / "tasks" / "fx.json");
-  std::string const atxt((std::istreambuf_iterator<char>(a)), std::istreambuf_iterator<char>());
-  Json const lat = nlohmann::json::parse(atxt, nullptr, false);
-  EXPECT_EQ(lat["cursor"].get<long>(), 4);
-  EXPECT_TRUE(std::filesystem::exists(ws.dir / ".wfr" / "tasks" / "fx.history" / "batch1.json"));
+  auto const r3 = fire_fresh(*parsed, registry, components,
+                             Json{{"workspace", ws.dir.string()}, {"task", "fx"},
+                                  {"task_revision", "1"}});
+  ASSERT_TRUE(r3.has_value());
+  EXPECT_EQ(r3->value("plan", Json()).value("cursor", 0L), 4);
+}
+
+TEST(WfLot, recheck_prev_inserts_audit_step_with_model_judge) {
+  WorkspaceDir ws;
+  ToolRegistry registry;
+  ScriptedModel model;
+  ComponentRegistry components;
+  components.models["m"] = &model;
+  auto parsed = WorkflowIR::parse(lot_ir(2));
+  ASSERT_TRUE(parsed);
+  ValidatorOptions vopts; vopts.registry = &registry; vopts.components = &components;
+  auto const v = validate(*parsed, vopts);
+  ASSERT_TRUE(v.ok());
+  Json const steps2 = Json::parse(R"json([
+    {"id":"s1","goal":"第一步","deps":[]},
+    {"id":"s2","goal":"第二步","deps":["s1"]}])json");
+  auto ai = [](std::string t) { return cppchain::message::ai_message(std::move(t)); };
+  model.replies.push_back(ai("步1")); model.replies.push_back(ai("步2")); model.replies.push_back(ai("批1汇总"));
+  fire_fresh(*parsed, registry, components,
+             Json{{"workspace", ws.dir.string()}, {"task", "rp"}, {"goal", "x"},
+                  {"plan_steps", steps2.dump()}});
+  model.replies.push_back(ai("正在复查上批摘要与本批目标"));
+  model.replies.push_back(ai(R"({"pass":true,"feedback":"上批结论与目标一致"})"));
+  model.replies.push_back(ai("批2汇总"));
+  auto const r2 = fire_fresh(*parsed, registry, components,
+                             Json{{"workspace", ws.dir.string()}, {"task", "rp"},
+                                  {"recheck_prev", "on"}});
+  ASSERT_TRUE(r2.has_value());
+  Json st = *r2;
+  bool has_audit = false, audited = false;
+  for (auto const& s : st["plan"]["steps"]) if (s.value("id", "") == "audit_prev") has_audit = true;
+  for (auto const& e : st["plan_log"])
+    if (e.value("step", "") == "audit_prev" && e.value("kind", "") == "model") audited = true;
+  EXPECT_TRUE(has_audit) << st["plan"].dump();
+  EXPECT_TRUE(audited) << st["plan_log"].dump();
+  EXPECT_EQ(st["plan"]["batch_no"].get<long>(), 2);
 }

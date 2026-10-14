@@ -1836,6 +1836,23 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
           return Command::with_update(Json{{kResultsKey, std::move(results)}});
         }
       }
+      // A2：批间复查 —— restores 且 @config.recheck_prev=on、当前不是首批、且有上批摘要时，
+      // 在游标处插入「复查上批摘要」判据步（L3 模型裁判；不推进 cursor，随批内第一步执行）
+      std::string const rp = resolve_text_parameter("@config.recheck_prev", state);
+      std::string const prev2 = plan.value("last_summary", "");
+      if (!created && (rp == "on" || rp == "true" || rp == "1") &&
+          plan.value("batch_no", 1L) >= 2 && !prev2.empty() && plan.contains("steps") &&
+          plan["steps"].is_array()) {
+        auto& steps = plan["steps"];
+        long const pos = std::min<long>(plan.value("cursor", 0L),
+                                        static_cast<long>(steps.size()));
+        Json audit = Json{{"id", "audit_prev"},
+                          {"goal", "复查上批摘要与本批目标/已知事实的一致性；若涉及时变事实请指出变化"},
+                          {"deps", Json::array()},
+                          {"verify", Json{{"kind", "model"},
+                                          {"criteria", "上批摘要：" + prev2}}}};
+        steps.insert(steps.begin() + pos, std::move(audit));
+      }
       Json update;
       update[kPlanStateKey] = plan;
       std::string const prev = plan.value("last_summary", "");

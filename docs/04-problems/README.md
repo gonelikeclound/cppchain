@@ -36,6 +36,7 @@
 | [20](20-副作用全景分析.md) | **副作用全景分析（wfr 审批专题开篇）**：能力盘点 + 双通道差异（Agent 循环有纵深 / Workflow 图裸奔）+ 遗留开口 + 五专题血缘 | 🟢 全景落盘，待设计 |
 | [21](21-副作用防护落地与验收记录.md) | **副作用防护落地与验收（wfr-㊷ 收官）**：ExecutionGuard/probe ②挂执行点③wfr 装配④approve_tools 节点；真机三场景（写/防重放/拒写）；615 全绿 | 🟢 全线收官 |
 | [22](22-沙箱选择器与会话级allow前缀验收.md) | **wfr-㊸ ③④ 收官**：SandboxManager（bwrap provider / 受限子进程兜底 / fail-closed）+ 会话级 allow 前缀（范围不变量）+ git 快照回滚实践；真机 A/B/C；652 全绿 | 🟢 全线收官 |
+| [28](28-长程任务专题验收.md) | **wfr-㊿ 长程任务汇总验收**：任务档案+批还原（批①）+ revision-fork（历史快照续跑，SKIP 转正）+ 批间 L3 复查（audit_prev）；678/678 | 🟢 批①② 落地 |
 | [27](27-长程任务批1验收.md) | **wfr-㊿ 批①（长程）**：任务档案 `task` begin/end + 批还原 + lot 两批真机（cursor 6·batch 2·跨批 week.txt 累积）；676 全绿 | 🟢 批① 落地 |
 | [26](26-B2批对照验收.md) | **B2 批对照（办公文件流/干扰注入）**：A2 好案例三级都真过（带重试）+ A1/A3 难案例 L1 盲 done vs L2/L3 重试耗竭 fail；V1 注入裁判抓"未产出"；B2-B 出行 DB 面待建 | 🟢 A/C 已对照 · B 待工具面 |
 | [25](25-复杂任务批4中断与回退验收.md) | **wfr-㊹ 批④（收官）**：`plan_review` 步骤边界中断（continue/rollback_to:K/abort）+ 引擎 goto 容器名解析 + aborted 标记与审计；674 全绿 + 真机 | 🟢 收官 |
