@@ -76,3 +76,4 @@
 | 27 | [27-长程任务批1验收.md](27-长程任务批1验收.md) | **验收**（wfr-㊿ ①）：`task` begin/end 任务档案 + `lot` 批工作流 + 批还原 cursor/batch_no | 🟢 676 全绿 + 真机 |
 | 28 | [28-长程任务专题验收.md](28-长程任务专题验收.md) | **验收**（wfr-㊿ 收官）：批① 档案 + 批② revision-fork 与批间 L3 复查（recheck_prev）+ 批③ 轻量 cron + 自进化导出 + C1 分批真实案例 | 🟢 678 全绿 + 真机 |
 | 29 | [29-多Agent角色化mch验收.md](29-多Agent角色化mch验收.md) | **验收**（wfr-㊾ 批①）：`mch` 三角色 workflow（Planner/Executor/独立 Reviewer 批级终审）——verify 加 `review` 相位 + `role` 审计；同任务 pev_l3×2 vs mch×2 对照（产物落盘差异 + 角色身份串落 plan_log） | 🟢 681 全绿 + 真机 4 轮 |
+| 30 | [30-Send并行波与冲突护栏验收.md](30-Send并行波与冲突护栏验收.md) | **验收**（wfr-㊾ 批②）：`max_parallel>1` 时同一批 Send 在 worker 线程并发执行（波=屏障，join 后按声明序归约与串行 state 逐键相等）；冲突护栏——同键并发写 overwrite 通道即报 `ConcurrentWriteConflict`（fail-closed）；波成员 interrupt 明确拒绝。12 单测 + demo m10_send_parallel | 🟢 693 全绿（离线） |

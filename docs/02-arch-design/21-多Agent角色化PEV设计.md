@@ -46,6 +46,28 @@ mch = Planner(plan) → 步骤环（串行 Executor ×N，每步可带 verify）
 | ② | 并行 Executor（M10 `Send` 按 deps 派发互不依赖步骤）+ 冲突护栏 | examples + 单测 |
 | ③ | 交接式（A→B handoff 交接件契约）接入 | problems/NN 验收 |
 
+### 批② 设计定局（2026-10-15 落地）
+
+**波（wave）语义**：一个 Command 的一批 sends（size>1）在 `max_parallel>1` 时并发执行。
+- 检测点放主循环顶部：队列顶部**连续的一段 Send 包**（size>1）成波——生产者节点先走完整原串行收尾
+  （apply/事件/快照），再并行执行波；串行默认（=1）一字不改。`is_restart`（中断重跑包）不参与成波。
+- 波 = 屏障：全体 worker join 后才继续；join 后**按 send 声明序**逐键归约回主 state —— 键独立时
+  与串行逐包归约的最终 state **逐键相等**（确定性契约，会话日志重放不分叉）。
+- 结构事件（`node_start`/`node_end`）由主线程按声明序发射；节点 delta 在 worker 内经共享
+  `emit_mu`（mutex）锁内分配 seq + 投递（`SessionLog` 本就并发安全）。
+
+**冲突护栏（fail-closed）**：wave 内 ≥2 成员写**同一键**且该键为默认 overwrite（无自定义 reducer）
+→ `GraphError::Kind::ConcurrentWriteConflict`（消息点名键 + 两节点）。累积类 reducer
+（messages/results 等）同键合法，按声明序折叠。语义：逼出「并行步骤各写各的键/文件」——这正是
+mch 并行 Executor 的正确形态（每个 Executor 独立落盘），而不是猜测哪个写者该赢。
+
+**明确拒绝（不默默降级）**：并行波成员调 `interrupt` → `InterruptUnavailable`（fail-closed，消息提示
+设 max_parallel=1 或移出波）。波内多步不可分割，中断需要「剩余包+重跑包」快照而波中其它成员仍在
+跑 —— 语义不成立，诚实报错而非默默串行化。
+
+**max_parallel 接线**：`graph::CompileOptions` 与 `workflow::CompileOptions` 各加一字段（默认 1），
+workflow 编译时透传给 graph（`compiler.cpp`）。宿主决定并行度，IR 语法不改。
+
 > **预留原语 · proxyNode（隔离委托，先记下不实现）**：一个节点指定**要代理的 workflow 路径**，
 > 并指定**运行方式**（如：隔离会话 = 独立上下文跑、只回传产物；独立线程 = 并发执行）——
 > 这是"M8 子代理配置化"与"隔离委托"的将来载体。**本期不做**（import 只覆盖"角色复用"这一档；
@@ -59,4 +81,6 @@ mch = Planner(plan) → 步骤环（串行 Executor ×N，每步可带 verify）
 ## 待办锚点
 - 关联：设计档 15 · PEV(arch19/11) · M8(arch09) · 五框架(08)。
 - **✅ 批① 已落地（2026-10-15）**：`mch` workflow + verify `review` 相位 + `role` 审计 + 真机 4 轮对照，见 problems/29。
-- 下一步：**批②**（Send 并行 Executor 按 deps 派发互不依赖步骤 + 冲突护栏）→ 批③（交接式）。
+- **✅ 批② 已落地（2026-10-15）**：Send 并行波 + 冲突护栏 + `max_parallel` 接线（见上 §四批②设计定局），
+  单测 12 例 + demo `m10_send_parallel`，见 problems/30。真机并行 Executor 对照押后批③。
+- 下一步：**批③**（交接式 A→B handoff 交接件契约）——把并行 Executor 接进 mch workflow 真机对照。

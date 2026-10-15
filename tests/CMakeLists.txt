@@ -84,11 +84,13 @@ add_executable(graph_tests
   graph/streaming_test.cpp
   graph/interrupt_test.cpp
   graph/send_test.cpp
+  graph/send_parallel_test.cpp
   graph/time_travel_test.cpp)
 
 target_link_libraries(graph_tests PRIVATE
   cppchain_graph_agent
-  GTest::gtest_main)
+  GTest::gtest_main
+  Threads::Threads)
 
 target_compile_options(graph_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(graph_tests)

@@ -212,8 +212,8 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
 
   g.set_entry_point(entry);
 
-  // 5) 编译（cp 可空）。配好 max_steps 兜底。
-  auto compiled = g.compile(cp, graph::CompileOptions{opts.max_steps});
+  // 5) 编译（cp 可空）。配好 max_steps / max_parallel 兜底。
+  auto compiled = g.compile(cp, graph::CompileOptions{opts.max_steps, opts.max_parallel});
   if (!compiled)
     return std::unexpected(WorkflowError{WorkflowError::Kind::Compile, compiled.error().message});
 

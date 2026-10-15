@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -121,7 +123,10 @@ struct NodeContext {
   std::optional<Json> pending_resume;              // interrupt 恢复重跑时注入的值
 
   // 节点自报事件（模型 delta 等）；sink 空 或 mode 不含 Deltas 时静默。
+  // 线程安全：并行波 worker 内调用时经 emit_mu 互斥（seq 分配 + sink 投递在锁内）。
   void emit(std::string_view type, Json payload);
+
+  std::mutex* emit_mu = nullptr;  // 并行波 worker 注入事件发射互斥；串行路径可为空
 };
 
 using NodeFn = std::function<Command(Json const& state, NodeContext& ctx)>;
@@ -137,7 +142,8 @@ inline Json interrupt(Json const& payload, NodeContext& ctx) {
 
 struct GraphError {
   enum class Kind { InvalidGraph, UnknownNode, RecursionLimit, NodeError,
-                    InterruptUnavailable, ResumeNotInterrupted, CheckpointNotFound };
+                    InterruptUnavailable, ResumeNotInterrupted, CheckpointNotFound,
+                    ConcurrentWriteConflict };
   Kind kind = Kind::InvalidGraph;
   std::string message;
 
@@ -153,12 +159,16 @@ inline std::string_view graph_error_kind(GraphError::Kind k) {
     case GraphError::Kind::InterruptUnavailable: return "interrupt_unavailable";
     case GraphError::Kind::ResumeNotInterrupted: return "resume_not_interrupted";
     case GraphError::Kind::CheckpointNotFound: return "checkpoint_not_found";
+    case GraphError::Kind::ConcurrentWriteConflict: return "concurrent_write_conflict";
   }
   return "unknown";
 }
 
 struct CompileOptions {
   std::size_t max_steps = 100;  // super-step 上限（防无限循环）
+  // 并行波（wfr-㊾ 批②）：一个 Command 的 sends（size>1）在 worker 线程上并发执行。
+  // 1 = 串行（既有语义，逐包 FIFO）；>1 = 波内成员并行，join 后按 send 声明序归约回主 state。
+  std::size_t max_parallel = 1;
 };
 
 class CompiledGraph;
@@ -203,7 +213,8 @@ class CompiledGraph {
         conditional_edges_(std::move(conditional_edges)),
         entry_(std::move(entry)),
         cp_(cp),
-        opts_(opts) {}
+        opts_(opts),
+        emit_mu_(std::make_shared<std::mutex>()) {}  // shared_ptr：保持 CompiledGraph 可拷贝可移动
 
   // thread_id 非空且已有快照 → **从最新快照恢复**（input 被忽略）。
   // opts.sink 注入 → 逐包吐事件；opts.resume → 对上次 interrupt 的答复（P2）
@@ -237,6 +248,7 @@ class CompiledGraph {
   EventSink sink_;           // 仅本次 invoke 有效（invoke 开头设置、结束清空）
   EventMode mode_ = EventMode::Off;
   std::uint64_t last_seq_ = 0;
+  std::shared_ptr<std::mutex> emit_mu_;  // 事件发射互斥：并发波 worker 的 delta 直发与主线程事件共用
 };
 
 }  // namespace cppchain::graph

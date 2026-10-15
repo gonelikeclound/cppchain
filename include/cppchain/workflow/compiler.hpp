@@ -47,6 +47,9 @@ struct WorkflowError {
 
 struct CompileOptions {
   std::size_t max_steps = 200;  // 循环由 goto.max 界定，max_steps 兜底防病态 IR
+  // wfr-㊾ 批②：Send 并行波（1 = 串行/既有，>1 = 一批 sends 并发执行）。透传给
+  // graph::CompileOptions::max_parallel —— 由 host 决定（默认串行）。
+  std::size_t max_parallel = 1;
 
   // 宿主将要传给 fire_once 的 config 键（B2）。语义同 ValidatorOptions::config_keys：
   // nullopt = 不检查；声明后，IR 里引用未声明的 @config.<键> 会在**编译期**被 VR4 拒绝，

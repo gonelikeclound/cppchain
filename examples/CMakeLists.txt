@@ -1,6 +1,7 @@
 # examples/ —— M1 用法 demo 与后续问题验证载体
 # 每个 demo 一个可执行目标；support/ 为 demo 共享的展示助手。
 # 索引与 langchain 参照见 examples/README.md
+find_package(Threads REQUIRED)  # 并行波 demo（m10_send_parallel）用 std::thread
 set(EXAMPLE_TARGETS
   messages_basic          # 消息类型族
   messages_serialize      # JSON round-trip + 落盘/回读
@@ -21,7 +22,7 @@ set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
 # 需要 graph 库的 demo
-set(GRAPH_EXAMPLE_TARGETS graph_basics m10_streaming m10_interrupt m10_send m10_fork)
+set(GRAPH_EXAMPLE_TARGETS graph_basics m10_streaming m10_interrupt m10_send m10_send_parallel m10_fork)
 # wfr-㊸ @②：workflow 级人工审批 HITL（interrupt 悬挂/恢复）demo —— 只需 workflow 本体
 set(HITL_EXAMPLE_TARGETS approve_interrupt)
 # 主动智能 workflow 生成端到端验收（真机 LLM）+ wfr 已在 src/wfr（正式 CLI，非 examples）
@@ -40,7 +41,7 @@ set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop con
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard
                             tools_frontline tools_files tools_arxiv tools_approval
                             m9_hybrid m9_approval m9_artifact bash_sidefx_analysis
-                            m10_streaming m10_interrupt m10_send m10_fork)
+                            m10_streaming m10_interrupt m10_send m10_send_parallel m10_fork)
 list(APPEND EXAMPLE_TARGETS approve_interrupt)
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
@@ -82,7 +83,7 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   elseif(t IN_LIST TOOL_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_tool)
   elseif(t IN_LIST GRAPH_EXAMPLE_TARGETS)
-    target_link_libraries(${t} PRIVATE cppchain_graph)
+    target_link_libraries(${t} PRIVATE cppchain_graph Threads::Threads)
   elseif(t IN_LIST STATE_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_state)
   elseif(t IN_LIST HITL_EXAMPLE_TARGETS)

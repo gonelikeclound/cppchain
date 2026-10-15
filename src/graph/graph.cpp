@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <deque>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace cppchain::graph {
@@ -80,19 +82,29 @@ std::expected<std::vector<std::string>, GraphError> CompiledGraph::next_nodes(
   return std::vector<std::string>{};  // 无出边 → 结束
 }
 
-// 引擎事件投递：分配 seq + 一律经 sink_（本次 invoke 注入）——为空即静默
+// 引擎事件投递：分配 seq + 一律经 sink_（本次 invoke 注入）——为空即静默。
+// 线程安全：并行波 worker 的节点自报事件（NodeContext::emit）也走这里的锁，
+// 保证 seq 单调且 sink 不被并发撕裂。
 void CompiledGraph::emit(StreamEvent ev) {
+  std::lock_guard<std::mutex> lk(*emit_mu_);
   ev.seq = ++last_seq_;
   if (sink_) sink_(ev);
 }
 
 // 节点自报流式事件（模型 delta 等）。sink 空 / mode 无 Deltas / 无序列 → 静默。
+// 调用线程：普通路径为主线程；并行波 worker 内也安全（emit_mu 互斥 + seq 锁内分配）。
 void NodeContext::emit(std::string_view type, Json payload) {
   if (!sink || !(*sink) || (mode & EventMode::Deltas) == EventMode::Off || !seq) return;
   StreamEvent ev{.type = std::string(type), .node = node_name, .node_kind = "",
                  .step = step, .payload = std::move(payload), .ok = true, .status = "ok"};
-  ev.seq = ++(*seq);  // 与引擎事件共用同一单调序列
-  (*sink)(ev);
+  if (emit_mu) {
+    std::lock_guard<std::mutex> lk(*emit_mu);
+    ev.seq = ++(*seq);  // 与引擎事件共用同一单调序列
+    (*sink)(ev);
+  } else {
+    ev.seq = ++(*seq);
+    (*sink)(ev);
+  }
 }
 
 std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
@@ -190,6 +202,183 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
       finish();
       return std::unexpected(GraphError{GraphError::Kind::RecursionLimit,
                                         "exceeded max_steps=" + std::to_string(opts_.max_steps)});
+    }
+
+    // ⊕ 并行波（wfr-㊾ 批②）：max_parallel>1 时，队列顶部**连续的一段 Send 包**（size>1）
+    //   作为一个不可分割的波在 worker 线程上并发执行。串行默认（=1）不触发，逐包 FIFO
+    //   （既有行为一字不改）。波 = 屏障：join 后才继续；join 后**按声明序**逐键归约回主
+    //   state（键独立则与串行最终一致）；冲突护栏拦截同键并发写默认键；波落一个快照；
+    //   成员自身的路由产物按成员序追加入队。is_restart（中断重跑包）不参与成波。
+    if (opts_.max_parallel > 1) {
+      std::size_t w = 0;
+      for (auto const& p : current)
+        if (p.state.has_value() && !p.is_restart) ++w;
+        else break;
+      if (w > 1) {
+        std::vector<state::Packet> members(current.begin(), current.begin() + w);
+        current.erase(current.begin(), current.begin() + w);
+
+        for (auto const& m : members)
+          if (nodes_.find(m.node) == nodes_.end()) {
+            finish();
+            return std::unexpected(GraphError{GraphError::Kind::UnknownNode,
+                                              "send target unknown node: " + m.node});
+          }
+        // 波内成员各计一步：本波会超界 → 此时节点自身收尾已完成、快照已落（可恢复），
+        // 与串行「跑完该步后下一圈才报」对等。
+        if (last_steps_ + w > opts_.max_steps) {
+          finish();
+          return std::unexpected(GraphError{GraphError::Kind::RecursionLimit,
+                                            "exceeded max_steps=" +
+                                                std::to_string(opts_.max_steps) +
+                                                " (parallel wave)"});
+        }
+
+        std::size_t const base = last_steps_;
+        std::vector<Json> updates(w, Json::object());
+        std::vector<std::vector<state::Packet>> produced(w);
+        std::vector<std::optional<std::string>> err_kind(w, std::nullopt);
+        std::vector<std::string> err_msg(w);
+
+        // 按序发射 node_start：主线程先行（结构事件顺序确定 → 会话日志重放不分叉）
+        for (std::size_t k = 0; k < w; ++k)
+          emit(StreamEvent{.type = "node_start", .node = members[k].node, .node_kind = "",
+                           .step = static_cast<int>(base + k), .payload = Json::object(),
+                           .ok = true, .status = "ok"});
+
+        {
+          std::vector<std::thread> threads;
+          threads.reserve(w);
+          for (std::size_t k = 0; k < w; ++k) {
+            threads.emplace_back([this, k, &members, base, thread_id, &state, &updates,
+                                  &produced, &err_kind, &err_msg] {
+              NodeContext wctx;
+              wctx.node_name = members[k].node;
+              wctx.thread_id = thread_id;
+              wctx.step = static_cast<int>(base + k);
+              wctx.sink = &sink_;
+              wctx.mode = mode_;
+              wctx.seq = &last_seq_;
+              wctx.emit_mu = emit_mu_.get();  // delta 直发：seq 分配 + sink 投递在锁内
+              // resume 不注入并行波成员（波内 interrupt 被拒，见下）
+              Command mc;
+              try {
+                mc = nodes_.at(members[k].node)(
+                    members[k].state.has_value() ? *members[k].state : state, wctx);
+              } catch (InterruptSignal const&) {
+                // 并行波内成员 interrupt：无法在波中途落「剩余包+重跑包」快照（其它成员仍在
+                // 跑、波不可分割）→ fail-closed 明确拒绝，不默默串行化。
+                err_kind[k] = "interrupt_unavailable";
+                err_msg[k] = "并行波成员 " + members[k].node +
+                             " 调用了 interrupt（Send 并行不支持）——请设 max_parallel=1"
+                             " 或把该步骤移出并行波";
+                return;
+              } catch (std::exception const& e) {
+                err_kind[k] = "node_error";
+                err_msg[k] = "node '" + members[k].node + "' threw: " + e.what();
+                return;
+              } catch (...) {
+                err_kind[k] = "node_error";
+                err_msg[k] = "node '" + members[k].node + "' threw: non-std exception";
+                return;
+              }
+              updates[k] = std::move(mc.update);
+              // 成员自身的路由（goto > sends > 静态/条件边），语义与串行路径一致；
+              // next_nodes 读主 state —— 波期间主线程不写 state，并发只读安全。
+              if (!mc.goto_nodes.empty()) {
+                for (auto const& n : mc.goto_nodes)
+                  if (n != std::string(kEnd)) produced[k].emplace_back(n);
+              } else if (!mc.sends.empty()) {
+                for (auto const& ss : mc.sends) {
+                  if (nodes_.find(ss.node) == nodes_.end()) {
+                    err_kind[k] = "unknown_node";
+                    err_msg[k] = "send target unknown node: " + ss.node;
+                    return;
+                  }
+                  produced[k].emplace_back(ss.node, std::optional<Json>{ss.state});
+                }
+              } else {
+                auto next = next_nodes(members[k].node, mc, state);
+                if (!next) {
+                  err_kind[k] = "invalid_graph";
+                  err_msg[k] = next.error().message;
+                  return;
+                }
+                for (auto const& n : *next)
+                  if (n != std::string(kEnd)) produced[k].emplace_back(n);
+              }
+            });
+          }
+          for (auto& t : threads) t.join();
+        }
+
+        // 按序报首个成员错误（确定性）：interrupt_unavailable / unknown_node / node_error / …
+        for (std::size_t k = 0; k < w; ++k) {
+          if (!err_kind[k]) continue;
+          GraphError::Kind kind = GraphError::Kind::NodeError;
+          if (*err_kind[k] == "interrupt_unavailable") kind = GraphError::Kind::InterruptUnavailable;
+          if (*err_kind[k] == "unknown_node") kind = GraphError::Kind::UnknownNode;
+          if (*err_kind[k] == "invalid_graph") kind = GraphError::Kind::InvalidGraph;
+          finish();
+          return std::unexpected(GraphError{kind, err_msg[k]});
+        }
+
+        // 冲突护栏：波内 ≥2 个成员写同一键、且该键为默认 overwrite（无自定义 reducer）
+        // → ConcurrentWriteConflict，fail-closed（不默默后写覆盖前写）。累积类 reducer
+        // （messages/results 等）按声明序折叠合法。逼出正确用法：并行步骤各写各的键/文件。
+        {
+          std::unordered_map<std::string, std::size_t> first_writer;  // key → 首个写者 index
+          std::vector<std::string> conflicts;
+          for (std::size_t k = 0; k < w; ++k) {
+            for (auto& [key, val] : updates[k].items()) {
+              (void)val;
+              auto it = first_writer.find(key);
+              if (it == first_writer.end()) {
+                first_writer.emplace(key, k);
+              } else if (!schema_.has_reducer(key)) {
+                conflicts.push_back("'" + key + "' written by nodes '" +
+                                    members[it->second].node + "' & '" + members[k].node + "'");
+              }
+            }
+          }
+          if (!conflicts.empty()) {
+            std::string msg = "并行波写冲突（默认 overwrite 键被多个成员并发写）: ";
+            for (std::size_t c = 0; c < conflicts.size(); ++c) {
+              if (c) msg += "; ";
+              msg += conflicts[c];
+            }
+            msg += " —— 请给并行步骤分配独立输出键或用累积类 reducer";
+            finish();
+            return std::unexpected(GraphError{GraphError::Kind::ConcurrentWriteConflict,
+                                              std::move(msg)});
+          }
+        }
+
+        // 按声明序归约（与串行逐包归约同型）+ 按序发射 node_end
+        for (std::size_t k = 0; k < w; ++k) {
+          state = schema_.apply(state, updates[k]);
+          emit(StreamEvent{.type = "node_end", .node = members[k].node, .node_kind = "",
+                           .step = static_cast<int>(base + k), .payload = updates[k], .ok = true,
+                           .status = "ok"});
+        }
+        if ((mode_ & EventMode::Snapshot) != EventMode::Off)
+          emit(StreamEvent{.type = "values", .node = "", .node_kind = "",
+                           .step = static_cast<int>(base), .payload = state, .ok = true,
+                           .status = "ok"});
+
+        // 各成员产物按成员序追加入队（后续继续 FIFO / 再成波）
+        for (std::size_t k = 0; k < w; ++k)
+          for (auto& p : produced[k]) current.push_back(std::move(p));
+
+        // 波不可分割：join 后落**一个** wave 快照（恢复语义 = 回到波起点边界继续）
+        if (cp_ != nullptr && !thread_id.empty()) {
+          Json meta = {{"step", base}, {"node", "wave"}};
+          last_checkpoint_ = cp_->put(thread_id, "", parent, state, to_packets(current), meta);
+          parent = last_checkpoint_;
+        }
+        last_steps_ += w;
+        continue;
+      }
     }
 
     state::Packet pkt = current.front();
