@@ -1,5 +1,6 @@
 {
   "id": "mch",
+  "description": "mch = 内部代号（无正式缩写展开；按内容读作 Multi-agent CHain，多 Agent 角色化链）。Planner 策划 → Executor 步骤环 → 独立 Reviewer 批级终审 → final 解说；角色身份 = 节点级 system_prompt + 输入裁剪（Reviewer 只看步骤+plan_log 判定+验收标准，不读执行对话）。",
   "nodes": [
     { "id": "recall", "kind": "load_history",
       "path": "@config.workspace", "session": "@config.session", "next": "plan" },

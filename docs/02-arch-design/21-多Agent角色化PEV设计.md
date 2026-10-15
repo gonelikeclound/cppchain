@@ -20,6 +20,11 @@
 
 ## 二、你要的“角色化”落地形态（mch workflow）
 
+> **命名注**：`mch` 是内部代号（无正式缩写展开），按内容读作 **Multi-agent CHain**——多 Agent
+> 角色化链：四个角色（Planner / Executor / Reviewer / final）串成一条流水线；「角色独立」= 身份
+> system_prompt + 输入裁剪，不依赖引擎新原语。共享定义见 `share/wfr/workflows/mch.json`
+> （首行 `description` 自带此说明，作为遇名即得的自描述）。
+
 ```
 mch = Planner(plan) → 步骤环（串行 Executor ×N，每步可带 verify）→ Reviewer 独立终审 → final(解说)
 ```
