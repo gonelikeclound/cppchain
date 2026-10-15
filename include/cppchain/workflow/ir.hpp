@@ -175,12 +175,16 @@ struct NodeIR {
   // Plan / Verify 节点（wfr-㊹，见 02-arch-design/19）
   //   plan  ：default_plan 非 null → 预置固定步骤 {steps:[…]}（三个测试 workflow 用它，verify 档写死）；
   //          否则走 model（组件名）让模型生成步骤（开放目标档）。goal 可写 @config.*（缺省 ""）。
-  //   verify：phase = announce | judge（同一节点两态复用，见 c_verify）。
+  //   verify：phase = announce | judge | review（同一节点多态复用，见 c_verify）。
+  //           judge  = 步内判据（done/fail + 推进 cursor）；review = 批级独立终审
+  //           （wfr-㊾）：只喂计划 + 各步判定 + 判据，不喂执行思考（输入隔离的 Reviewer）。
   nlohmann::json default_plan = Json(nullptr);
   std::string goal;      // plan 节点的目标（可 @config.*）
-  std::string phase;     // verify：announce / judge；task：begin/end
+  std::string phase;     // verify：announce / judge / review；task：begin/end
   std::string task;       // task（㊿）：任务名（可 @config.*）
   std::string confirm;   // plan_review（批④）："true/false"（假 = 关确认门直接过）；可 @config.*
+  std::string role;      // verify（wfr-㊾）：审计角色名（如 "executor"/"reviewer"），plan_log 落行时带
+  std::string criteria;  // verify phase=review（wfr-㊾）：批级判据（可 @config.*，缺省空 = 用 plan.goal）
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

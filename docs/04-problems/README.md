@@ -70,3 +70,9 @@
 | 21 | [21-副作用防护落地与验收记录.md](21-副作用防护落地与验收记录.md) | **落地 + 验收**（wfr-㊷ 收官）：四批实现（guard/probe → 挂执行点 → wfr 装配 → approve_tools）+ 615 全绿 + 真机三场景（写 / 防重放 / 拒写）| 🟢 全线收官 |
 | 22 | [22-沙箱选择器与会话级allow前缀验收.md](22-沙箱选择器与会话级allow前缀验收.md) | **验收**（wfr-㊸ ③④）：SandboxManager（bwrap/受限子进程/fail-closed）+ 会话级 allow 前缀（范围不变量）+ git 快照回滚实践；652 全绿 + 真机 A/B/C | 🟢 全线收官 |
 | 23 | [23-提示注入健壮性.md](23-提示注入健壮性.md) | **验收**（wfr-㊸ ⑤）：验证「模型被骗 ≠ 防线被破」——修两个语义衔接洞（人审批准被 guard 二次拦 → pre_approved 豁免；allow 前缀被串联升级 → 类别封顶）+ 对抗语料；658 全绿 | 🟢 已对抗 |
+| 24 | [24-复杂任务三级验证对照验收.md](24-复杂任务三级验证对照验收.md) | **验收**（wfr-㊹）：C1–C7 × {l1,l2,l3} × 2 = 42+ 轮真机对照——L1 盲跑 / L2 产物门 / L3 语义门三板差异规律；probe_file_contains 子串探针 | 🟢 669 全绿 + 真机 42+ 轮 |
+| 25 | [25-复杂任务批4中断与回退验收.md](25-复杂任务批4中断与回退验收.md) | **验收**（wfr-㊹ ④）：`plan_review` 节点（interrupt 悬挂→continue/rollback_to K/abort）+ 引擎 goto 容器名解析 + 两级回退 + `pev_review` | 🟢 674 全绿 + 真机 |
+| 26 | [26-B2批对照验收.md](26-B2批对照验收.md) | **验收**（B2 批）：办公三案三级对照 + 注入（误导/判据变更）+ 出行 DB 工具面 `pev_trip` + `office-docs` 外部 Rust 引擎 + 裁剪版 A1 三级闭环 | 🟢 674 全绿 + 真机 |
+| 27 | [27-长程任务批1验收.md](27-长程任务批1验收.md) | **验收**（wfr-㊿ ①）：`task` begin/end 任务档案 + `lot` 批工作流 + 批还原 cursor/batch_no | 🟢 676 全绿 + 真机 |
+| 28 | [28-长程任务专题验收.md](28-长程任务专题验收.md) | **验收**（wfr-㊿ 收官）：批① 档案 + 批② revision-fork 与批间 L3 复查（recheck_prev）+ 批③ 轻量 cron + 自进化导出 + C1 分批真实案例 | 🟢 678 全绿 + 真机 |
+| 29 | [29-多Agent角色化mch验收.md](29-多Agent角色化mch验收.md) | **验收**（wfr-㊾ 批①）：`mch` 三角色 workflow（Planner/Executor/独立 Reviewer 批级终审）——verify 加 `review` 相位 + `role` 审计；同任务 pev_l3×2 vs mch×2 对照（产物落盘差异 + 角色身份串落 plan_log） | 🟢 681 全绿 + 真机 4 轮 |

@@ -1,8 +1,11 @@
-# 15 · 多 Agent 协调设计档（🟡 待启动 · 先立方向）
+# 15 · 多 Agent 协调设计档（✅ 选 A 启动 · wfr-㊾ 批① 已落地）
 
-> **定位**：05 未来专题 #4 的设计稿（建档级，未实现）。前两道已开：#2 复杂任务（PEV，arch19/11）、
+> **定位**：05 未来专题 #4 的设计稿。前两道已开：#2 复杂任务（PEV，arch19/11）、
 > #3 长程（wfr-㊿，arch20/14）。本稿：**把"单 Agent 的长任务"升级成"多 Agent 任务级角色编排"**——
 > 在已有的 M8 子代理隔离 + PEV 的 plan/judge/final 角色雏形上，定义协调原语与第一问。
+> **进度**：2026-10-15 **选 A（角色化 PEV）起步，批① 已落地** —— `mch` 三角色 workflow
+> （Planner / Executor / 独立 Reviewer 批级终审）+ 角色身份入 plan_log + 真机对照，见
+> [arch 21](../02-arch-design/21-多Agent角色化PEV设计.md) 与 [problems/29](../04-problems/29-多Agent角色化mch验收.md)。
 
 ## 一、动机（为什么现在值得做）
 1. **PEV/长程暴露的单 Agent 墙**：同一模型既当执行者又当裁判（`judge` 是"自己审自己"）；长程里 Agent 前面
@@ -45,6 +48,5 @@
 - 与 #5 自进化的接点：多 Agent 的交接件/裁判记录也是自进化可吃的运行数据（`export_task_life` 可扩展按角色导出）。
 
 ## 待办锚点
-- 关联：05 #4 · M8（arch09/problems09）· PEV（11/19）· 长程（14/20/28）。
-- 启动第一步（可商）：先做**角色化 PEV（A）**——把 `judge` 拆成独立 Reviewer role + 一个 Executor+Planner 分工的
-  `mch_*`/demo 跑通，用最小改动验证"多角色让验证更可信"。要不要我沿 A 往下落 arch + demo？
+- 关联：05 #4 · M8（arch09/problems09）· PEV（11/19）· 长程（14/20/28）· **wfr-㊾ 批①（arch 21 / problems/29，✅ 已落地）**。
+- 下一步：批②（Send 并行 Executor + 冲突护栏，arch 21 §四批②）。

@@ -1653,6 +1653,51 @@ bool judge_model_review(Json const& step, Json const& v, Json const& state,
   return pass;
 }
 
+// ---- judge_batch_review（wfr-㊾）：批级独立终审（Reviewer 角色）----
+// 与 judge_model_review 的区别 = **输入隔离**：只喂 整批计划 + 每一步的判定（plan_log），
+// 不把执行思考/全局会话带进去 —— 架构 21 §一：Reviewer 独立审查者，不盲从执行者自述。
+bool judge_batch_review(Json const& plan, Json const& plan_log, std::string const& criteria,
+                        model::ChatModel* m, std::string const& rev_sys, std::string& why) {
+  if (m == nullptr) { why = "review 模型未配置（verify review 节点缺 model）"; return false; }
+  // 整批计划摘要：目标 + 每步（id/goal/status + plan_log 里该步的判定 verdict）
+  std::string plan_text;
+  std::string const goal = plan.value("goal", "");
+  if (!goal.empty()) plan_text += "【任务目标】" + goal + "\n";
+  plan_text += "【步骤与判定】\n";
+  if (plan.contains("steps") && plan["steps"].is_array()) {
+    std::size_t i = 0;
+    for (Json const& s : plan["steps"]) {
+      ++i;
+      std::string line = "  " + std::to_string(i) + ". [" + s.value("id", "?") + "] " +
+                         s.value("goal", "") + " —— 状态:" + s.value("status", "pending");
+      // 从 plan_log 补上该步的判定（executor 自查 judge 的结果），供 Reviewer 复核
+      if (plan_log.is_array())
+        for (Json const& e : plan_log)
+          if (e.is_object() && e.value("step", "") == s.value("id", "") && e.contains("verdict"))
+            line += "（步内判定 " + e["verdict"].get<std::string>() + e.value("why", "") + ")";
+      plan_text += line + "\n";
+    }
+  }
+  message::Message const sys = message::system_message(
+      rev_sys.empty()
+          ? "你是独立审查员。依据【验收标准】对【任务目标】的各步骤判定做独立复核。"
+            "你只看步骤目标与步内判定，不偏信执行者的口头自述。"
+            "只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。"
+          : rev_sys);
+  message::Message const usr =
+      message::human_message("【验收标准】" + criteria + "\n" + plan_text);
+  auto resp = m->invoke({sys, usr}, {});
+  if (!resp) { why = "review 调用失败：" + resp.error().message; return false; }
+  auto const j = json_block_of(resp->text());
+  if (!j.has_value()) { why = "review 未返回可解析 JSON"; return false; }
+  if (!j->contains("pass")) { why = "review 缺 pass 字段"; return false; }
+  bool const pass = j->value("pass", false);
+  why = std::string(pass ? "批级终审通过" : "批级终审不通过")
+        + (j->contains("feedback") && (*j)["feedback"].is_string()
+               ? std::string("：") + (*j)["feedback"].get<std::string>() : std::string());
+  return pass;
+}
+
 // ---- plan_review（批④）：步骤边界任务级 HITL（interrupt 悬挂 → continue/rollback_to:K/abort）----
 void v_plan_review(NodeIR const& n, NodeType::ValidateContext const&,
                    NodeType::ErrorSink const& err) {
@@ -1996,11 +2041,12 @@ void c_plan(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
-// ---- verify：每步门。announce=把当前步骤喂给模型 + in_progress；judge=判 done/fail + 推进 cursor ----
+// ---- verify：每步门。announce=把当前步骤喂给模型 + in_progress；judge=判 done/fail + 推进 cursor；
+//      review（wfr-㊾）=批级独立终审：读整份 plan + plan_log 判定，不读执行思考（输入隔离）----
 void v_verify(NodeIR const& n, NodeType::ValidateContext const&,
               NodeType::ErrorSink const& err) {
-  if (n.phase != "announce" && n.phase != "judge")
-    err("VN20", "verify 节点 '" + n.id + "' 的 phase 必须为 announce|judge，收到 '" + n.phase + "'");
+  if (n.phase != "announce" && n.phase != "judge" && n.phase != "review")
+    err("VN20", "verify 节点 '" + n.id + "' 的 phase 必须为 announce|judge|review，收到 '" + n.phase + "'");
   if (n.next.empty()) err("VN20", "verify 节点 '" + n.id + "' 缺少 next");
 }
 
@@ -2013,7 +2059,10 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
   model::ChatModel* judge =
       (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
   std::string const judge_sys = n.system_prompt;
-  ctx.graph.add_node(n.id, [node_id, phase, judge, judge_sys, break_target](Json const& state, NodeContext&) {
+  std::string const judge_role = n.role;
+  std::string const batch_criteria = n.criteria;  // review 相位的批级判据（可 @config.*）
+  ctx.graph.add_node(n.id, [node_id, phase, judge, judge_sys, judge_role, batch_criteria,
+                            break_target](Json const& state, NodeContext&) {
     Json plan = plan_from_state(state);
     Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
     long cursor = plan.value("cursor", 0L);
@@ -2038,9 +2087,32 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
       return Command::with_update(std::move(update));
     }
 
-    // ---- judge ----
     Json plan_log = state.contains(kPlanLogStateKey) && state[kPlanLogStateKey].is_array()
                         ? state[kPlanLogStateKey] : Json::array();
+
+    // ---- review（wfr-㊾）：批级独立终审（Reviewer 角色）----
+    // 不做 cursor 推进、不改步骤状态；只读整批计划 + plan_log，产出批级 verdict 落 plan_log。
+    if (phase == "review") {
+      std::string criteria = batch_criteria;
+      if (criteria.empty()) criteria = plan.value("goal", "");
+      else {
+        std::string const eff = resolve_text_parameter(batch_criteria, state);
+        if (!eff.empty()) criteria = eff;
+      }
+      std::string why;
+      bool const ok = judge_batch_review(plan, plan_log, criteria, judge, judge_sys, why);
+      Json verdict_obj = Json{{"step", "*"}, {"kind", "review"},
+                              {"verdict", ok ? "done" : "fail"}, {"why", why}};
+      if (!judge_role.empty()) verdict_obj["role"] = judge_role;
+      plan_log.push_back(std::move(verdict_obj));
+      // review 不改 cursor/steps，批级判定只落 plan_log（facts）；results 里透出 verdict 供宿主/调试台读
+      Json update{{kPlanLogStateKey, std::move(plan_log)},
+                  {kResultsKey, Json{{node_id, Json{{"phase", "review"},
+                                                    {"verdict", ok ? "done" : "fail"}}}}}};
+      return Command::with_update(std::move(update));
+    }
+
+    // ---- judge ----
     if (cursor < 0 || cursor >= static_cast<long>(steps.size()))
       return Command::with_update(Json{});  // 防御：无步可判（正常由 loop max 收口）
     Json const step = steps[static_cast<std::size_t>(cursor)];
@@ -2076,6 +2148,8 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
     } else {
       verdict_obj = Json{{"step", id}, {"kind", "none"}, {"verdict", "done"}, {"why", "L1 无验证"}};
     }
+    // wfr-㊾：judge 落行的"谁判的"（审计角色），非空才写（既有 workflow 不带 role，不破坏）
+    if (!judge_role.empty()) verdict_obj["role"] = judge_role;
     // A1（收尾）：strategy.on_fail == rollback_deps 且未达上限 → 失败时**自动**回退到依赖步重做。
     bool auto_rolled = false;
     if (!advance) {
@@ -2438,21 +2512,31 @@ std::vector<NodeType> const& builtin_node_types() {
          return d + " → " + n.next;
        }, v_plan, c_plan, e_next, t_none},
 
-      // ---------------- verify（wfr-㊹）：每步门 announce/judge ----------------
+      // ---------------- verify（wfr-㊹）：每步门 announce/judge；批级终审 review（wfr-㊾） ----------------
       {NodeKind::Verify, "verify",
        [](Json const& n) { return kind_is(n, "verify"); },
        [](NodeIR& out, Json const& node) {
          get_str(out, node, "phase", out.phase);
-         get_str(out, node, "model", out.model);       // judge 的 LLM 裁判（批③）
+         get_str(out, node, "model", out.model);       // judge/review 的 LLM 裁判（批③ / wfr-㊾）
+         get_str(out, node, "system_prompt", out.system_prompt);  // reviewer 独立身份（wfr-㊾）
+         get_str(out, node, "role", out.role);         // 审计角色名（wfr-㊾）
+         get_str(out, node, "criteria", out.criteria); // 批级终审判据 review（wfr-㊾）
          get_str(out, node, "next", out.next);
        },
        [](Json& node, NodeIR const& n) {
          node["kind"] = "verify";
          node["phase"] = n.phase;
          if (!n.model.empty()) node["model"] = n.model;
+         if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+         if (!n.role.empty()) node["role"] = n.role;
+         if (!n.criteria.empty()) node["criteria"] = n.criteria;
          node["next"] = n.next;
        },
-       [](NodeIR const& n) { return std::string("verify ") + n.phase + " → " + n.next; },
+       [](NodeIR const& n) {
+         std::string d = "verify " + n.phase;
+         if (!n.role.empty()) d += " role=" + n.role;
+         return d + " → " + n.next;
+       },
        v_verify, c_verify, e_next, t_none},
 
       // ---------------- plan_review（wfr-㊹ 批④）：步骤边界任务级 HITL ----------------

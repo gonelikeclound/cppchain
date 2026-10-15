@@ -58,4 +58,5 @@ mch = Planner(plan) → 步骤环（串行 Executor ×N，每步可带 verify）
 
 ## 待办锚点
 - 关联：设计档 15 · PEV(arch19/11) · M8(arch09) · 五框架(08)。
-- 启动：批① 出 `mch` workflow + 单测 + 真机对照（单 vs 多角色同一任务）。
+- **✅ 批① 已落地（2026-10-15）**：`mch` workflow + verify `review` 相位 + `role` 审计 + 真机 4 轮对照，见 problems/29。
+- 下一步：**批②**（Send 并行 Executor 按 deps 派发互不依赖步骤 + 冲突护栏）→ 批③（交接式）。

@@ -1,0 +1,42 @@
+{
+  "id": "mch",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "plan" },
+    { "id": "plan", "kind": "plan",
+      "goal": "@config.goal",
+      "system_prompt": "你是【策划者 Planner】：只做任务规划，把目标拆成可执行步骤（每步一句可执行指令 + 落盘要求），不执行任务。",
+      "default_plan": {
+        "goal": "@config.goal",
+        "steps": [
+          { "id": "s1", "goal": "用 get_weather 查北京今天天气，把温度范围写进 .out/mch_weather.md", "deps": [] },
+          { "id": "s2", "goal": "读 .out/mch_weather.md，给一句穿衣建议", "deps": ["s1"] }
+        ]
+      },
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 6, "next": "review", "on_max": "review",
+      "body": [
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "chat_bash",
+          "system_prompt": "你是【执行者 Executor】：只管做当前这一步骤的具体动作，把产物落盘到 .out/ 下（file_write），不评判自己做得对不对。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "approve", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "approve", "kind": "approve_tools", "deny": [], "next": "act" },
+        { "id": "act",   "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "model": "main",
+          "role": "executor",
+          "system_prompt": "你是【步骤自查员】：检查当前这一步是否完成（该读的读了、该落的盘落了、有依据），如实反馈。只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。",
+          "next": "_continue" }
+      ] },
+    { "id": "review", "kind": "verify", "phase": "review", "model": "main",
+      "role": "reviewer",
+      "criteria": "@config.mch_criteria",
+      "system_prompt": "你是【独立审查员 Reviewer】：只依据【步骤与判定】和【验收标准】独立判断整批是否通过，不信任执行者的口头自述，不看执行过程对话。只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。",
+      "next": "final" },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "你是【解说者】：整合策划、执行、审查各角色的产出，给最终回答（简洁、有依据）。",
+      "next": "_turn_end" }
+  ]
+}
