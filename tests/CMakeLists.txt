@@ -156,6 +156,7 @@ add_executable(workflow_tests
   wf/plan_execute_l3_test.cpp
   wf/plan_review_test.cpp
   wf/mch_test.cpp
+  wf/parallel_mch_test.cpp
   wf/lot_task_test.cpp
   wf/history_nodes_test.cpp
   wf/plugin_import_test.cpp

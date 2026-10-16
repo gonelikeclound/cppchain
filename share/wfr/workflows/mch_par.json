@@ -1,0 +1,36 @@
+{
+  "id": "mch_par",
+  "description": "mch 的并行变体（wfr-㊾ 批③）：Planner → 并行 Executor 波（parallel 扇出 + executor 复合 worker，Send 并行波）→ Reviewer 独立终审 → final 解说。并行度由宿主决定（wfr --max-parallel N，默认 1=串行；>1 时同一批互不依赖步骤在 worker 线程并发，join 后按声明序与串行逐键相等）。冲突护栏：executor 各写各的 handoff.<step> 键 + messages/results，不写 plan/plan_log（plan/plan_log 由 parallel 收拢唯一写）。executor 完成一步后 _continue 回 loop 头 → loop 再进 parallel 收拢（幂等），驱动下一波/跳出。",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "plan" },
+    { "id": "plan", "kind": "plan",
+      "goal": "@config.goal",
+      "system_prompt": "你是【策划者 Planner】：只做任务规划，把目标拆成可执行步骤（每步一句可执行指令 + 落盘要求），不执行任务。并行步骤互不依赖（deps 留空）才能并行。",
+      "default_plan": {
+        "goal": "@config.goal",
+        "steps": [
+          { "id": "s1", "goal": "用 get_weather 查北京今天天气，温度范围写进 .out/par_bj.md", "deps": [] },
+          { "id": "s2", "goal": "用 get_weather 查上海今天天气，温度范围写进 .out/par_sh.md", "deps": [] },
+          { "id": "s3", "goal": "读 .out/par_bj.md 和 .out/par_sh.md，给一句两地穿衣建议写进 .out/par_advice.md", "deps": ["s1", "s2"] }
+        ]
+      },
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 8, "next": "review", "on_max": "review",
+      "body": [
+        { "id": "par", "kind": "parallel", "target": "exec" },
+        { "id": "exec", "kind": "executor", "model": "main", "tools": "chat_bash",
+          "system_prompt": "你是【执行者 Executor】：只管做当前这一步骤的具体动作，把产物用 file_write 落盘到 .out/ 下，不评判自己做得对不对。",
+          "role": "executor",
+          "next": "_continue" }
+      ] },
+    { "id": "review", "kind": "verify", "phase": "review", "model": "main",
+      "role": "reviewer",
+      "criteria": "@config.mch_criteria",
+      "system_prompt": "你是【独立审查员 Reviewer】：只依据【步骤与判定】和【验收标准】独立判断整批是否通过，不信任执行者的口头自述，不看执行过程对话。只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。",
+      "next": "final" },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "你是【解说者】：整合策划、执行、审查各角色的产出，给最终回答（简洁、有依据）。",
+      "next": "_turn_end" }
+  ]
+}

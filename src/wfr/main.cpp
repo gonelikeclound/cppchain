@@ -138,18 +138,23 @@ bool has_model_node(Json const& ir_json) {
 int main(int argc, char** argv) {
   std::string workdir = ".", session = "default", name_or_path, input;
   bool reset = false, allow_import = false;
+  std::size_t max_parallel = 1;  // wfr-㊾ 批③：Send 并行波宽度（编译期选项）
   std::map<std::string, std::string> sets;
 
   auto usage = [] {
     std::println(
         "用法:\n"
         "  wfr <name-or-path> [--workdir DIR] [--session NAME] [--set key=value]... "
-        "[--reset] [--allow-import] <query>...\n"
+        "[--max-parallel N] [--reset] [--allow-import] <query>...\n"
         "  wfr list [--workdir DIR]\n"
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
         "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏、或在左栏填日志 URL，即可看日志。\n"
         "  wfr -h | --help\n"
+        "--max-parallel N（wfr-㊾ 批③）：Send 并行波宽度（编译期选项，默认 1=串行）。\n"
+        "        >1 时 `parallel`/`executor` 编排的同一批 sends 在 worker 线程并发执行（波=屏障，\n"
+        "        join 后按声明序归约），与串行最终 state 逐键相等；仅 mch_par 这类含 parallel 的\n"
+        "        workflow 有意义。\n"
         "内置（发布自带 share/wfr/workflows）：chat（最简单聊天，多轮续聊；需 LLM key，"
         "见 .env.example）；chat2（chat 的超集：历史渲染三档 + 思考回传/厂商参数开关，"
         "用 --set 切换 —— history_mode=full|drop_round|keep_evidence、"
@@ -304,7 +309,15 @@ int main(int argc, char** argv) {
       sets[kv.substr(0, eq)] = eq == std::string::npos ? std::string{} : kv.substr(eq + 1);
     } else if (a == "--reset") reset = true;
     else if (a == "--allow-import") allow_import = true;
-    else if (a == "--help" || a == "-h") {
+    else if (a == "--max-parallel" && i + 1 < argc) {
+      // 编译期并行度（不写 IR；host 决定）。非法值 → 报错（fail-closed，不用 0 当串行掩盖）。
+      try { max_parallel = std::stoul(argv[++i]); }
+      catch (std::exception const&) {
+        std::println("--max-parallel 需要正整数，收到 '{}'", argv[i]);
+        return 2;
+      }
+      if (max_parallel == 0) { std::println("--max-parallel 需要 ≥1（1=串行，默认）"); return 2; }
+    } else if (a == "--help" || a == "-h") {
       usage();
       return 0;
     } else
@@ -565,6 +578,7 @@ int main(int argc, char** argv) {
   CompileOptions opts;
   opts.components = &comps;
   opts.tool_policy = &guard;  // wfr-㊷：挂进 c_tool / c_run_tools 两个执行点
+  opts.max_parallel = max_parallel;  // wfr-㊾ 批③：Send 并行波宽度（>1 时 parallel/executor 生效）
   // 不做 config_keys 白名单（生成器侧防护；wfr 跑手写/内置 workflow 由 --set 提供键）
   // wfr-㊸ @②：人审悬挂（interrupt）需要 checkpointer + thread_id。用**进程内**
   // MemoryCheckpointer：悬挂↔恢复只发生在同一次 wfr 调用内；跨进程续聊仍走会话

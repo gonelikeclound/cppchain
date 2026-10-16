@@ -31,6 +31,8 @@ inline constexpr char kMessagesKey[] = "messages";  // M12：对话通道（add_
 inline constexpr char kResultsKey[] = "results";
 inline constexpr char kLastExecKey[] = "_last_exec";
 inline constexpr char kLoopCountsKey[] = "loop_counts";
+// wfr-㊾ 批③：交接件 state 键（per-step 子键合并，见 compiler.cpp 的 schema / node_types.cpp c_executor）
+inline constexpr char kHandoffStateKey[] = "handoff";
 
 enum class RefKind { LastResult, NamedResult, Config };
 

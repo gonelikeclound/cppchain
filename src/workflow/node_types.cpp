@@ -592,6 +592,15 @@ std::vector<NodeType::Edge> e_expr(NodeIR const& n) {
   return {edge_to(n.then, "then"), edge_to(n.else_, "else")};
 }
 std::vector<NodeType::Edge> e_next(NodeIR const& n) { return {edge_to(n.next, "next")}; }
+// wfr-㊾ 批③：executor 与 e_next 同语义（静态边 next 回 parallel）；parallel 出边 =
+// target（Send 目标，VG1 校验其存在）+ _break（全 done 跳循环出口，VG10 在 loop 内合法）。
+std::vector<NodeType::Edge> e_executor(NodeIR const& n) { return {edge_to(n.next, "next")}; }
+std::vector<NodeType::Edge> e_parallel(NodeIR const& n) {
+  std::vector<NodeType::Edge> out;
+  if (!n.target.empty()) out.push_back(edge_to(n.target, "target"));
+  out.push_back(edge_to(kBreakName, "next"));
+  return out;
+}
 std::vector<NodeType::Edge> e_route(NodeIR const& n) {
   std::vector<NodeType::Edge> out;
   for (auto const& [k, v] : n.cases) out.push_back(edge_to(v, "cases." + k));
@@ -2202,6 +2211,446 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ================= wfr-㊾ 批③：parallel + executor（Send 并行波 的 workflow 表达，arch 21 §四批③）=================
+// 三个缺口（批② 收口）：
+//   · workflow 层此前没有任何节点能产 Command.sends —— wave 只在 graph 层被 native 节点触发。
+//   · 波成员 = 单节点 fn 的一次调用，现有 model/run_tools/verify 拆开的子链放不进波（子链在
+//     join 后串行）。复合 worker 必须"一次调用"里完成 模型→工具→自查。
+//   · 弧线限制：plan_log 无 reducer（compiler.cpp 只给 results/loop_counts/messages 配了），
+//     wave 内多个 Executor 写 plan_log → ConcurrentWriteConflict。所以 Executor **不写
+//     plan/plan_log**，各写 handoff.<step_id>（merge_slots）+ messages + results；`parallel`
+//     收拢时**唯一串行单写者**折叠进 plan/plan_log（避免给 plan_log 加 append reducer 破坏
+//     plan_review/verify 的整数组写回 → 每行双份）。
+// 确定性契约：wave join 后按声明序归约；parallel 串行收拢 → max_parallel=1 vs >1 最终 state 逐键相等。
+
+// 与 judge_model_review（L1620）同款 JSON 契约（{"pass":bool,"feedback":str}，fail-closed），但
+// 输入**全显式**（goal/criteria/step_text 由 parallel 塞进 Send partial）——wave 成员只见局部
+// state，`judge_model_review` 读 messages_from_state 会拿到空/错上下文，不能复用。
+bool judge_step_self(std::string const& goal, std::string const& criteria,
+                     std::string const& step_text, model::ChatModel* m,
+                     std::string const& judge_sys, std::string& why) {
+  if (m == nullptr) { why = "executor 自查模型未配置（executor 节点缺 model）"; return false; }
+  message::Message const sys = message::system_message(
+      judge_sys.empty()
+          ? "你是任务步骤验收员。依据【验收标准】判断【执行记录】是否达成【步骤目标】。"
+            "只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。"
+          : judge_sys);
+  message::Message const usr =
+      message::human_message("【步骤目标】" + goal + "\n【验收标准】" + criteria +
+                             "\n【执行记录】\n" + step_text);
+  auto resp = m->invoke({sys, usr}, {});
+  if (!resp) { why = "executor 自查调用失败：" + resp.error().message; return false; }
+  auto const j = json_block_of(resp->text());
+  if (!j.has_value()) { why = "executor 自查未返回可解析 JSON"; return false; }
+  if (!j->contains("pass")) { why = "executor 自查缺 pass 字段"; return false; }
+  bool const pass = j->value("pass", false);
+  why = std::string(pass ? "executor 自查通过" : "executor 自查不通过")
+        + (j->contains("feedback") && (*j)["feedback"].is_string()
+               ? std::string("：") + (*j)["feedback"].get<std::string>() : std::string());
+  return pass;
+}
+
+// 本步 AI 消息（含其 tool_calls 的 args）里 file_write 的目标路径 → 交接件 artifacts。
+// 只认 name=="file_write" 且 args.path 是字符串（mch 并行 Executor 的正确落盘形态：产物即交接者）。
+std::vector<std::string> artifacts_from_ai(message::Message const& ai) {
+  std::vector<std::string> out;
+  for (message::ToolCall const& tc : ai.tool_calls)
+    if (tc.name == "file_write" && tc.args.is_object())
+      if (auto const it = tc.args.find("path"); it != tc.args.end() && it->is_string())
+        out.push_back(it->get<std::string>());
+  return out;
+}
+
+// ---- executor（复合 worker）：一次节点调用完成 模型→工具→自查，只写自属键 ----
+void v_executor(NodeIR const& n, NodeType::ValidateContext const& ctx,
+                NodeType::ErrorSink const& err) {
+  if (n.model.empty()) err("VN22", "executor 节点 '" + n.id + "' 缺少 model（组件名）");
+  else if (ctx.components != nullptr && ctx.components->model(n.model) == nullptr)
+    err("VN22", "executor 节点 '" + n.id + "' 引用的模型组件 '" + n.model + "' 不在注册表里");
+  if (n.next.empty()) err("VN22", "executor 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_executor(NodeIR const& n, NodeType::CompileContext& ctx) {
+  model::ChatModel* m =
+      (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
+  if (m == nullptr) {
+    ctx.error = "executor 节点 '" + n.id + "' 引用的组件 '" + n.model + "' 不可用";
+    return;
+  }
+  Json tools_json = Json::array();
+  if (!n.toolset.empty() && ctx.components != nullptr)
+    if (auto const* ts = ctx.components->toolset(n.toolset); ts != nullptr)
+      for (std::string const& tname : *ts)
+        if (auto const* sp = ctx.registry->find(tname); sp != nullptr)
+          tools_json.push_back(sp->to_openai());
+
+  // 并行 LLM 调用的串行化：模型组件是编译期共享指针，curl multi 句柄非线程安全。
+  // 诚实的取舍：LLM 调用步间串行（模型收拢是单写者），文件/工具步骤仍并行（波内并发）。
+  // wfr-㊸ 并行 admin 的 ExecutionGuard.audit 也要互斥（main.cpp 的 audit lambda 无锁改 tmp）。
+  std::shared_ptr<std::mutex> model_mu = std::make_shared<std::mutex>();
+  tool::ExecutionGuard const* guard = ctx.guard;
+  tool::ToolRegistry const* reg = ctx.registry;
+  std::string const sys = n.system_prompt;
+  std::string const role = n.role;
+  auto sink_p = ctx.sink;  // NodeLog（docs/12 §6.4）
+
+  ctx.graph.add_node(
+      n.id, [m, tools_json, sys, role, guard, reg, model_mu, sink_p, node_id = n.id](
+                Json const& state, NodeContext&) {
+    // Send 局部输入：parallel 扇出时塞的 {step_id, goal, criteria, dep_artifacts, status}
+    std::string const step_id = state.value("step_id", "");
+    std::string const step_goal = state.value("goal", "");
+    std::string const criteria = state.value("criteria", "");
+    std::vector<std::string> dep_artifacts;
+    if (state.contains("dep_artifacts") && state["dep_artifacts"].is_array())
+      for (auto const& a : state["dep_artifacts"])
+        if (a.is_string()) dep_artifacts.push_back(a.get<std::string>());
+
+    // 组上下文：本步目标 + 上一步产物路径（dep_artifacts）→ 模型可 file_read 它们续做。
+    // **不读全局 messages**（wave 成员只见 Send partial；读全局 = 空上下文静默错）。
+    std::vector<message::Message> msgs;
+    if (!sys.empty()) msgs.push_back(message::system_message(sys));
+    std::string brief = "【当前步骤】" + step_goal;
+    if (!dep_artifacts.empty()) {
+      brief += "\n【上一步产物，可先 file_read】";
+      for (std::string const& a : dep_artifacts) brief += "\n  - " + a;
+    }
+    msgs.push_back(message::human_message(brief));
+
+    // 复合 worker = 单节点内的**多轮 agent loop**（模型 → 工具 → 再模型，≤max_rounds）。
+    // 对比串行 path 的 model→route→approve→act→judge：executor 把一轮"调用+执行"压缩进
+    // 单节点（wave 成员=单节点 fn 一次调用）。多轮让"取数 → 落盘"这类两步工作流能在一次
+    // executor 调用内完成（否则第一轮只回计划、不动手，产物不落盘——上一版真机暴露的坑）。
+    // 诚实的取舍：LLM 调用在 wave 内 **mutex 串行**（curl multi 句柄非线程安全），不同步的
+    // 工具/文件步骤仍并行（波内并发）；多轮同为一个 step 服务，步间仍是并行的。
+    model::CallOptions co;
+    co.tools = tools_json;
+    co.reasoning_echo = model::ReasoningEcho::Drop;  // 并行可回传可关；默认 drop（对齐 wave 语义）
+    int const max_rounds = 4;                        // 单 step 内模型往返上限（防病态循环）
+    std::vector<message::Message> updates;
+    std::string step_text;
+    std::vector<std::string> all_artifacts;      // 所有轮次 AI 的 file_write 产物路径（交接件引用）
+    tool::ToolNode tn(reg);
+
+    for (int round = 0; round < max_rounds; ++round) {
+      std::unique_lock<std::mutex> lk(*model_mu);  // curl multi 非线程安全 → 串行化模型调用
+      auto rr = m->invoke(msgs, co);
+      lk.unlock();
+      if (!rr) throw tool::ToolException("executor 节点 '" + node_id + "' 模型调用失败：" +
+                                         rr.error().message);
+      // 回传会话（add_messages）：AI 消息 + 后续工具消息
+      updates.push_back(*rr);
+      for (std::string const& a : artifacts_from_ai(*rr)) all_artifacts.push_back(a);
+      // 本轮 AI 也追加进模型上下文（否则下一轮只看到 tool 结果、缺自己的 AI 消息 → 断链）
+      msgs.push_back(*rr);
+      std::string const ai_text = rr->text();
+      if (!ai_text.empty()) {
+        if (!step_text.empty()) step_text += "\n";
+        step_text += ai_text;
+      }
+      for (auto const& blk : rr->content)
+        if (auto const* rb = std::get_if<message::ReasoningBlock>(&blk)) {
+          if (!step_text.empty()) step_text += "\n";
+          step_text += rb->reasoning;
+        }
+
+      if (rr->tool_calls.empty()) break;  // 模型给出最终答复（不再调工具）→ 本轮完成
+
+      // 执行本轮的 tool_calls（guard 防护，同 c_run_tools 的 prepare/run）
+      std::vector<message::Message> tool_msgs;
+      if (guard == nullptr) {
+        tool_msgs = tn.run(*rr);
+      } else {
+        std::size_t const width = std::max<std::size_t>(1, tn.options().max_parallel);
+        std::size_t const N = rr->tool_calls.size();
+        struct P { tool::ExecutionGuard::Prepared prep; tool::ToolSpec const* spec = nullptr; };
+        std::vector<P> plans(N);
+        for (std::size_t i = 0; i < N; ++i) {
+          plans[i].spec = reg ? reg->find(rr->tool_calls[i].name) : nullptr;
+          plans[i].prep = guard->prepare(rr->tool_calls[i], plans[i].spec, "model", false);
+        }
+        tool_msgs.resize(N);
+        for (std::size_t base = 0; base < N; base += width) {
+          std::size_t const end = std::min(base + width, N);
+          std::vector<std::future<message::Message>> batch;
+          batch.reserve(end - base);
+          for (std::size_t i = base; i < end; ++i)
+            batch.push_back(std::async(std::launch::async, [&, i] {
+              if (!plans[i].prep.execute) return plans[i].prep.report;
+              return guard->run(rr->tool_calls[i], plans[i].spec, rr->tool_calls[i].args);
+            }));
+          for (std::size_t i = base; i < end; ++i) tool_msgs[i] = batch[i - base].get();
+        }
+      }
+      for (message::Message& tm : tool_msgs) {
+        for (auto& blk : tm.content)
+          if (auto* tb = std::get_if<message::TextBlock>(&blk)) message::sanitize_utf8(tb->text);
+        // 工具往返结果先**副本**追加给下一轮模型的上下文（msgs），再 move 进 updates：
+        // 同一对象 move 进 updates 后 `tm` 已空，直接 push 会给下一轮空 Tool 消息。
+        msgs.push_back(tm);
+        updates.push_back(std::move(tm));
+        // 执行记录文本 = 工具结果（回喂给自查裁判 / 评审）
+        std::string const t = msgs.back().text();
+        if (!t.empty()) {
+          if (!step_text.empty()) step_text += "\n[工具] ";
+          else step_text = "[工具] ";
+          step_text += t;
+        }
+      }
+    }  // for round：模型→工具迭代（多轮 agent loop 到此结束）
+
+    // 自查三档（与 verify judge 相位同构，但输入在 Send partial 里）：
+    //   1) verify.kind ∈ {probe, rule} → 确定性判据（文件存在/内容，独立于执行者自述）；
+    //   2) verify.kind == model / criteria 非空 → 模型裁判（锁内调用共享模型）；
+    //   3) 无 verify → L1 无验证（直接 done——诚实标注，Reviewer 可据 plan_log 判据缺失拒绝）。
+    // workspace 由 parallel 塞下来（wave 成员无 config），probe 判据据此定位文件。
+    Json const verify_obj =
+        state.contains("verify") && state["verify"].is_object() ? state["verify"] : Json::object();
+    std::string const vkind = verify_obj.value("kind", "");
+    Json frame;
+    if (vkind == "probe" || vkind == "rule") {
+      // 构造一个带 @config.workspace 的迷你 state 供 verify_rule_check 解析
+      Json mini = Json::object();
+      std::string const ws = state.value("workspace", "");
+      if (!ws.empty()) mini["config"] = Json{{"workspace", ws}};
+      std::string why;
+      bool const ok = verify_rule_check(verify_obj, mini, why);
+      frame = Json{{"step", step_id}, {"goal", step_goal}, {"kind", vkind},
+                   {"verdict", ok ? "done" : "fail"}, {"why", ok ? ("判据通过：" + why) : ("判据失败：" + why)}};
+    } else if (!criteria.empty() || vkind == "model") {
+      // 自查裁判也碰共享模型 → 同一把锁（curl multi 句柄非线程安全）
+      std::lock_guard<std::mutex> jk(*model_mu);
+      std::string why;
+      bool const ok = judge_step_self(step_goal, criteria.empty() ? vkind : criteria,
+                                      step_text, m, "", why);
+      frame = Json{{"step", step_id}, {"goal", step_goal}, {"kind", "model"},
+                   {"verdict", ok ? "done" : "fail"}, {"why", why}};
+    } else {
+      frame = Json{{"step", step_id}, {"goal", step_goal}, {"kind", "none"},
+                   {"verdict", "done"}, {"why", "L1 无验证（并行 Executor 无判据步）"}};
+    }
+    if (!role.empty()) frame["role"] = role;
+    frame["artifacts"] = Json::array();  // 交接件产物引用（真机 .out/* 落盘断言的依据）
+    for (std::string const& a : all_artifacts) frame["artifacts"].push_back(a);
+    if (sink_p) sink_p->log_node(node_id, "info", "executor '" + node_id + "' 完成一步（并行）",
+                                 Json{{"step", step_id}, {"verdict", frame["verdict"]},
+                                      {"artifacts", all_artifacts.size()}});
+
+    // 更新：本步对话（add_messages）+ handoff.<step_id>（merge_slots）+ results[exec_<step>]
+    Json update{{kMessagesKey, std::move(updates)}};
+    update[kHandoffStateKey] = Json{{step_id, std::move(frame)}};
+    Json results = Json::object();
+    results["exec_" + step_id] = Json{{"step", step_id}, {"verdict", frame["verdict"]}};
+    update[kResultsKey] = std::move(results);
+    return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+// ---- parallel（扇出+收拢编排节点）----
+// 语义：loop body 里 `parallel(target: executor) → executor(next: parallel)` 双节点环。
+// parallel 每次进入 = 收拢（把 handoff 中已完成的步折进 plan/plan_log）+ 分派（把 deps 满足且
+// 未派发的步骤以 Send 扇出）。不注册静态边（同 c_loop），路由全靠 Command（sends / goto / 空）。
+void v_parallel(NodeIR const& n, NodeType::ValidateContext const&,
+                NodeType::ErrorSink const& err) {
+  if (n.target.empty()) err("VN22", "parallel 节点 '" + n.id + "' 缺少 target（Executor 节点 id）");
+}
+
+void c_parallel(NodeIR const& n, NodeType::CompileContext& ctx) {
+  // 与 switch 语义一致：parallel 是容器角色，_break 解析到循环出口（同 c_verify / c_plan_review）。
+  std::string const break_target = ctx.goto_resolve ? ctx.goto_resolve(kBreakName) : kBreakName;
+  std::string const target = n.target;
+  std::string const node_id = n.id;
+  ctx.graph.add_node(
+      n.id, [node_id, target, break_target](Json const& state, NodeContext&) {
+    Json plan = plan_from_state(state);
+    bool const has_plan = plan.contains("steps") && plan["steps"].is_array();
+    Json plan_log = state.contains(kPlanLogStateKey) && state[kPlanLogStateKey].is_array()
+                        ? state[kPlanLogStateKey] : Json::array();
+    Json handoff = state.contains(kHandoffStateKey) && state[kHandoffStateKey].is_object()
+                       ? state[kHandoffStateKey] : Json::object();
+    Json dispatched = plan.contains("par_dispatched") && plan["par_dispatched"].is_array()
+                          ? plan["par_dispatched"] : Json::array();
+    std::unordered_set<std::string> dispatched_set;
+    for (Json const& d : dispatched)
+      if (d.is_string()) dispatched_set.insert(d.get<std::string>());
+
+    // 分支 0：无计划 → 硬错（fail-closed，不静默；parallel 依赖上游 plan/begin 产出）
+    if (!has_plan)
+      throw tool::ToolException("parallel '" + node_id +
+                                "' 收拢：state.plan 缺失（上游 plan/begin 未产出）");
+
+    auto steps = plan["steps"];
+    long const start_cursor = std::max<long>(0L, plan.value("cursor", 0L));
+
+    // ⓐ 收拢：把 handoff 中"已派发、且已返回"的步折进 plan/plan_log（幂等）。
+    // 只折"plan_log 里尚无该步 verdict"的（重复进入的 go(parallel) 折叠 0 → 自灭）。
+    bool folded_any = false;
+    for (Json& s : steps) {
+      if (!s.is_object()) continue;
+      std::string const sid = s.value("id", "");
+      if (sid.empty() || !handoff.contains(sid)) continue;
+      auto const& h = handoff[sid];
+      if (!h.is_object()) continue;
+      bool already = false;
+      for (Json const& e : plan_log)
+        if (e.is_object() && e.value("step", "") == sid && e.contains("verdict")) {
+          already = true; break;
+        }
+      if (already) continue;  // 幂等：这批早就折过
+      std::string const vd = h.value("verdict", "fail");
+      s["status"] = (vd == "done") ? "done" : "failed";
+      Json row = Json{{"step", sid}, {"kind", h.value("kind", "none")},
+                      {"verdict", vd}, {"why", h.value("why", "")}};
+      if (h.contains("role") && h["role"].is_string()) row["role"] = h["role"];
+      if (h.contains("artifacts") && h["artifacts"].is_array()) row["artifacts"] = h["artifacts"];
+      if (h.contains("goal") && h["goal"].is_string()) row["goal"] = h["goal"];
+      plan_log.push_back(std::move(row));
+      dispatched_set.erase(sid);
+      folded_any = true;
+    }
+    if (folded_any) {
+      // cursor 前移：跳过连续 done 步
+      long nc = start_cursor;
+      while (nc < static_cast<long>(steps.size()) &&
+             steps[static_cast<std::size_t>(nc)].value("status", "pending") == "done")
+        ++nc;
+      plan["cursor"] = nc;
+      plan["steps"] = std::move(steps);
+      // 更新 par_dispatched（去掉已收拢的 id）
+      Json nd = Json::array();
+      for (std::string const& s : dispatched_set) nd.push_back(s);
+      plan["par_dispatched"] = std::move(nd);
+    }
+
+    // ⓑ 全部完成 → 恰好一次 goto _break（跳出循环）。重复进入的全 done 靠 par_done marker 自灭，
+    // 否则 N 个 executor 的 forward 会产生 N 个 go(parallel)，每个都 goto break → review 跑 N 次。
+    bool all_done = true;
+    for (Json const& s : plan["steps"])
+      if (s.is_object() && s.value("status", "pending") != "done") { all_done = false; break; }
+    bool const already_done = plan.value("par_done", false);
+    if (all_done && !already_done) {
+      plan["par_done"] = true;
+      // 交接件落盘（wfr-㊾ 批③）：全批结束时的 A→B 交接件（真机对照/审计的磁盘断言）。
+      // best-effort：@config.workspace 可解析且手账非空才写；幂等（par_done 恰好一次进入）。
+      Json const ws = resolve_parameter(Json("@config.workspace"), state);
+      std::string const task = resolve_text_parameter("@config.task", state);
+      if (ws.is_string() && !plan_log.empty()) {
+        Json done = Json::array();
+        for (Json const& e : plan_log)
+          if (e.is_object() && e.contains("step") && e["step"].is_string() &&
+              e.value("step", "") != "*" && e.contains("verdict"))
+            done.push_back(e);
+        Json handoff_file{{"from", "executor"},
+                          {"to", "reviewer"},
+                          {"goal", plan.value("goal", "")},
+                          {"done", std::move(done)}};
+        std::filesystem::path const base = std::filesystem::path(ws.get<std::string>());
+        std::filesystem::path const hf =
+            base / ".wfr" / "handoffs" /
+            ((task.empty() || task == "null" ? std::string("session") : task) + ".json");
+        write_json_file(hf, handoff_file);
+      }
+      Json update{{kPlanStateKey, plan}, {kPlanLogStateKey, std::move(plan_log)},
+                  {kResultsKey, Json{{node_id, Json{{"phase", "gather"},
+                                                    {"verdict", "done"}, {"cursor", plan["cursor"]}}}}}};
+      return Command{update, {break_target}, {}};  // goto _break（覆盖静态/条件边）
+    }
+    if (already_done)
+      return Command::with_update(Json{});  // 已结束过 → 自灭（无出边）
+
+    // ⓒ 死锁：还有 pending、无 deps 满足且**未派发**的步 → 硬错（不静默终止，防"永不推进"）。
+    // 已派发的（dispatched_set 里有）不算死锁——它们在跑，等收拢时会推进。
+    bool has_pending = false, any_dispatchable = false, any_dispatched = false;
+    for (Json const& s : plan["steps"]) {
+      if (!s.is_object() || s.value("status", "pending") != "pending") continue;
+      has_pending = true;
+      std::string const sid = s.value("id", "");
+      if (dispatched_set.count(sid)) { any_dispatched = true; continue; }
+      bool deps_ok = true;
+      Json const ds = s.contains("deps") && s["deps"].is_array() ? s["deps"] : Json::array();
+      for (Json const& d : ds) {
+        if (!d.is_string()) continue;
+        bool found = false;
+        for (Json const& p : plan["steps"])
+          if (p.is_object() && p.value("id", "") == d.get<std::string>() &&
+              p.value("status", "") == "done") { found = true; break; }
+        if (!found) { deps_ok = false; break; }
+      }
+      if (deps_ok) any_dispatchable = true;
+    }
+    if (has_pending && !any_dispatchable && !any_dispatched) {
+      // pending 但全死锁 → 硬错（NodeError，fail-closed）——deps 环或依赖步 failed 而无法推进
+      throw tool::ToolException("parallel '" + node_id +
+                                "' 收拢死锁：存在 pending 步骤但无 deps 满足且未派发（deps 环或依赖失败）");
+    }
+
+    // ⓓ 分派：把 deps 满足、status pending、未派发的步以 Send 扇出
+    std::vector<graph::Send> sends;
+    for (Json const& s : plan["steps"]) {
+      if (!s.is_object()) continue;
+      std::string const sid = s.value("id", "");
+      if (sid.empty() || dispatched_set.count(sid)) continue;
+      if (s.value("status", "pending") != "pending") continue;
+      bool deps_ok = true;
+      Json const ds = s.contains("deps") && s["deps"].is_array() ? s["deps"] : Json::array();
+      for (Json const& d : ds) {
+        if (!d.is_string()) continue;
+        bool found = false;
+        for (Json const& p : plan["steps"])
+          if (p.is_object() && p.value("id", "") == d.get<std::string>() &&
+              p.value("status", "") == "done") { found = true; break; }
+        if (!found) { deps_ok = false; break; }
+      }
+      if (!deps_ok) continue;
+      // Send partial：Executor 的局部输入（不读全局）。criteria / workspace / verify 都在
+      // **主 state** 预解析/携带（wave 成员局部 state 没有 config，@config.* 在那里解析会静默成空）。
+      std::string criteria;
+      Json verify_obj = Json::object();
+      if (s.contains("verify") && s["verify"].is_object()) {
+        verify_obj = s["verify"];
+        criteria = resolve_text_parameter(s["verify"].value("criteria", ""), state);
+      }
+      Json const ws = resolve_parameter(Json("@config.workspace"), state);
+      Json pst = Json{{"step_id", sid}, {"goal", s.value("goal", "")},
+                      {"criteria", std::move(criteria)},
+                      {"verify", std::move(verify_obj)}};
+      if (ws.is_string()) pst["workspace"] = ws;
+      Json deps_arts = Json::array();
+      for (Json const& d : ds) {
+        if (!d.is_string()) continue;
+        if (handoff.contains(d.get<std::string>()) &&
+            handoff[d.get<std::string>()].is_object())
+          for (auto const& a : handoff[d.get<std::string>()].value("artifacts", Json::array()))
+            if (a.is_string()) deps_arts.push_back(a);
+      }
+      pst["dep_artifacts"] = std::move(deps_arts);
+      sends.push_back(graph::Send{target, std::move(pst)});
+      dispatched_set.insert(sid);
+    }
+    if (!sends.empty()) {
+      Json nd = Json::array();
+      for (std::string const& s : dispatched_set) nd.push_back(s);
+      plan["par_dispatched"] = std::move(nd);
+      Json update{{kPlanStateKey, std::move(plan)},
+                  {kResultsKey, Json{{node_id, Json{{"phase", "dispatch"},
+                                                    {"count", sends.size()}}}}}};
+      return Command{update, {}, std::move(sends)};
+    }
+
+    // ⓔ 无折叠、无分派、未全 done（等待已在跑的成员回来）→ 空 Command 自灭（无出边）
+    Json update;
+    if (folded_any) {
+      update[kPlanStateKey] = plan;
+      update[kPlanLogStateKey] = std::move(plan_log);
+    }
+    return Command::with_update(std::move(update));
+  });
+  ++ctx.registered;
+  // 不注册静态边：路由全靠 Command（sends / goto _break / 空自灭）。同 c_loop 的手法。
+}
+
 }  // namespace
 
 std::vector<NodeType> const& builtin_node_types() {
@@ -2573,6 +3022,43 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) { return std::string("task ") + n.phase +
                                     (n.task.empty() ? "" : " task=" + n.task) + " → " + n.next; },
        v_task, c_task, e_next, t_none},
+      // ---------------- executor（wfr-㊾ 批③）：复合 worker，parallel 的 Send 目标 ----------------
+      {NodeKind::Executor, "executor",
+       [](Json const& n) { return kind_is(n, "executor"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "model", out.model);
+         get_str(out, node, "tools", out.toolset);
+         get_str(out, node, "system_prompt", out.system_prompt);
+         get_str(out, node, "role", out.role);
+         get_str(out, node, "next", out.next);
+         if (node.contains("params") && !node["params"].is_null()) out.model_params = node["params"];
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "executor";
+         node["model"] = n.model;
+         if (!n.toolset.empty()) node["tools"] = n.toolset;
+         if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+         if (!n.role.empty()) node["role"] = n.role;
+         if (!n.model_params.empty()) node["params"] = n.model_params;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         return "executor " + n.model + (n.role.empty() ? "" : " role=" + n.role) +
+                (n.toolset.empty() ? "" : " tools=" + n.toolset) + " → " + n.next;
+       }, v_executor, c_executor, e_executor, t_model},
+      // ---------------- parallel（wfr-㊾ 批③）：扇出+收拢编排 ----------------
+      {NodeKind::Parallel, "parallel",
+       [](Json const& n) { return kind_is(n, "parallel"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "target", out.target);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "parallel";
+         if (!n.target.empty()) node["target"] = n.target;
+       },
+       [](NodeIR const& n) {
+         return "parallel → " + (n.target.empty() ? "(缺 target)" : n.target) + " (Send 并行波)";
+       }, v_parallel, c_parallel, e_parallel, t_none},
   };
   return types;
 }

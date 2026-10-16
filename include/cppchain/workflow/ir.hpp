@@ -80,6 +80,10 @@ enum class NodeKind {
           //         phase=judge（规则/schema 确定性判据或模型裁判 → done/fail + 推进 cursor）
   PlanReview, //（wfr-㊹ 批④）步骤边界任务级 HITL：interrupt 悬挂 → resume continue/rollback_to:K/abort
   Task, //（wfr-㊿ 长程）任务档案 begin/end：跨批还原（读 .wfr/tasks/<task>.json）与写回 + 批号/日期注入
+  // ---- wfr-㊾ 批③：并行 Executor 与接收器（Send 波的 workflow 表达，见 02-arch-design/21 §四批③）----
+  Executor, // 复合 worker：一次节点调用完成「模型 → 工具 → 自查」，是 `parallel` 扇出的 Send 目标
+  Parallel, // 扇出+收拢编排：按 plan 步骤的 deps 把互不依赖的步以 Send 派给 Executor；join 后
+            // 幂等收拢（唯一写 plan/plan_log 者），全 done → _break。宿主决定 max_parallel（IR 不写）
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -185,6 +189,8 @@ struct NodeIR {
   std::string confirm;   // plan_review（批④）："true/false"（假 = 关确认门直接过）；可 @config.*
   std::string role;      // verify（wfr-㊾）：审计角色名（如 "executor"/"reviewer"），plan_log 落行时带
   std::string criteria;  // verify phase=review（wfr-㊾）：批级判据（可 @config.*，缺省空 = 用 plan.goal）
+  // wfr-㊾ 批③：parallel 节点扇出 Send 的目标节点 id（= Executor 节点），见 c_parallel
+  std::string target;
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };
