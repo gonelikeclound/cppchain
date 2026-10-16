@@ -87,5 +87,10 @@ workflow 编译时透传给 graph（`compiler.cpp`）。宿主决定并行度，
 - 关联：设计档 15 · PEV(arch19/11) · M8(arch09) · 五框架(08)。
 - **✅ 批① 已落地（2026-10-15）**：`mch` workflow + verify `review` 相位 + `role` 审计 + 真机 4 轮对照，见 problems/29。
 - **✅ 批② 已落地（2026-10-15）**：Send 并行波 + 冲突护栏 + `max_parallel` 接线（见上 §四批②设计定局），
-  单测 12 例 + demo `m10_send_parallel`，见 problems/30。真机并行 Executor 对照押后批③。
-- 下一步：**批③**（交接式 A→B handoff 交接件契约）——把并行 Executor 接进 mch workflow 真机对照。
+  单测 12 例 + demo `m10_send_parallel`，见 problems/30。
+- **✅ 批③ 已落地（2026-10-16）**：交接式 A→B handoff 交接件契约 + 并行 Executor 真机对照。
+  `executor` 复合 worker（多轮 agent loop + 自查三档）+ `parallel` 扇出/幂等收拢 + `handoff` state 键
+  （merge_slots）+ `.wfr/handoffs/` 落盘 + `--max-parallel N` CLI；`mch_par` workflow；9 例单测 +
+  真机串行对照（4 轮含两次 reviewer fail 诚实拦截）；702 全绿，见 problems/31。遗留：proxyNode
+  隔离委托仍押后；executor 模型调用在波内串行（curl multi 约束）；交接件落盘 best-effort。
+- wfr-㊾ 批①~③ 全收官。
