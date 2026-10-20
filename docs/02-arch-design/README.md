@@ -30,3 +30,4 @@
 | 20 | [20-长程任务任务档案与批还原设计.md](20-长程任务任务档案与批还原设计.md) | **wfr-㊿ · 长程任务（定架构·待实现）**：任务=.wfr/tasks/<task>.json 档案（goal+steps+批进度+批摘要）；`task` begin/end 节点做批还原与写回；时间感注入 `{batch_no,date}`；批内复用 PEV 环；分期 ① 档案+lot ② 批间可改 ③ 调度押后 | ✅ ① ② ③ 已实现（批① 档案+lot、批② revision-fork+复查、批③ cron；真机 C1 分批案例见 problems/28） |
 | 19 | [19-复杂任务规划执行验证环设计.md](19-复杂任务规划执行验证环设计.md) | **wfr-㊹**（定架构·待实现）：任务级 P-E-V 环（计划=一等公民的 state 数据 / verify 节点 probe 判据 / 步骤边界 interrupt / 两级回退不做命令反做）+ 新节点 plan·verify·plan_review | ✅ ①–④ 全部实现（L1/L2/L3 + 批④ 中断回退；见 problems/24/25；674 全绿） |
 | 22 | [22-长程任务实现全景.md](22-长程任务实现全景.md) | **wfr-㊿ · 实现全景（代码实证）**：档案/会话分工、数据形态、一条批运行时路径、跨批机制五件、调度、自进化接点、与 PEV/mch 位置、批③ 交接件衔接 | ✅ 已建档（2026-10-16） |
+| 23 | [23-治理全链workflow设计.md](23-治理全链workflow设计.md) | **wfr-㊹ 治理（problems/33）**：governed 单 workflow 完整实现治理思想——UNVERIFIED 双档 / _timeout / _cancelled / effect_class+自检，终态四档穷尽 | ✅ 已实现（720 全绿，problems/33） |
