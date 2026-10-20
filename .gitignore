@@ -42,3 +42,6 @@ compile_commands.json
 /.out/
 office-docs/.out/
 life.jsonl
+
+# C++ Agent 演讲专题（talk-cxx-agent/ 单独目录，讨论/修改历史供查阅，不进 commit）
+talk-cxx-agent/

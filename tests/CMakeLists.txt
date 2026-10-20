@@ -203,3 +203,15 @@ if(NODE_EXECUTABLE)
 else()
   message(STATUS "未找到 node —— 跳过 debug_derive_js（页面 JS 的推导测试不跑）")
 endif()
+
+# ---- CGI WebUI 纯逻辑测试（wfr-🈟 增强）：header-only cgi_lib，无需链 CGI 可执行 ----
+add_executable(webui_tests
+  webui/cgi_lib_test.cpp)
+
+target_include_directories(webui_tests PRIVATE ${PROJECT_SOURCE_DIR}/cgi-bin)
+target_link_libraries(webui_tests PRIVATE
+  cppchain_message
+  GTest::gtest_main)
+
+target_compile_options(webui_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(webui_tests)

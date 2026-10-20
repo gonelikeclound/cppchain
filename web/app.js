@@ -1,13 +1,14 @@
-/* wfr CGI · 前端逻辑（原生 JS，调 CGI action；同步阻塞，无流式） */
+/* wfr CGI · 前端逻辑（原生 JS，调 CGI action；NDJSON 流式对话 + 二级树 + 双 tab） */
 "use strict";
 
 // CGI 入口：本地用 http.server --cgi 时的映射。/cgi-bin/ → web 根下 cgi-bin（symlink 到 ../cgi-bin）
 const CGI = "cgi-bin/wfr_cgi";
 
 const state = {
-  workspaces: [],   // [{name,dir}]
-  ws: null,         // 当前工作区名
-  session: null,    // 当前会话名
+  tree: [],          // [{name, dir, sessions:[{name, pending?}], expanded}]
+  ws: null,          // 选中 workspace 名
+  session: null,     // 选中 session 全名（wfname.sessionid）
+  tab: "chat",       // "chat" | "debug"
 };
 
 const $ = (id) => document.getElementById(id);
@@ -22,6 +23,14 @@ async function raw(action, params) {
   const resp = await fetch(qs({ action, ...params }));
   const text = await resp.text();
   try { return JSON.parse(text); } catch { throw new Error("CGI 返回非 JSON: " + text.slice(0, 200)); }
+}
+
+function currentWs() {
+  return state.tree.find(t => t.name === state.ws) || null;
+}
+function currentSession() {
+  const w = currentWs();
+  return w ? w.sessions.find(s => s.name === state.session) : null;
 }
 
 // ---- 轻量 Markdown 渲染（本地实现，零依赖；先 escape 再转标记防注入）----
@@ -175,89 +184,243 @@ function renderHistory(history) {
   }
 }
 
-// ---- 工作区 ----
-async function loadWorkspaces() {
+// ---- 二级树（workspace → session）----
+async function loadTree() {
   const r = await raw("workspaces");
-  state.workspaces = r.workspaces || [];
-  const sel = $("ws-select");
-  sel.textContent = "";
-  for (const w of state.workspaces) {
-    const o = document.createElement("option");
-    o.value = w.name; o.textContent = w.name;
-    sel.appendChild(o);
+  const wss = r.workspaces || [];
+  // 保留现有 expanded 状态
+  const expandedPrev = {};
+  for (const t of state.tree) expandedPrev[t.name] = t.expanded;
+  state.tree = [];
+  for (const w of wss) {
+    const sessions = [];
+    try {
+      const sr = await raw("sessions", { ws: w.dir });
+      for (const s of (sr.sessions || []))
+        sessions.push({ name: s.name, pending: false });
+    } catch (e) { /* 目录扫描失败：保留空 sessions */ }
+    state.tree.push({ name: w.name, dir: w.dir, sessions, expanded: expandedPrev[w.name] !== undefined ? expandedPrev[w.name] : true });
   }
-  if (state.workspaces.length && !state.ws) selectWorkspace(state.workspaces[0].name);
+  if (state.ws && !state.tree.find(t => t.name === state.ws)) { state.ws = null; state.session = null; }
+  if (!state.ws && state.tree.length) { state.ws = state.tree[0].name; state.session = null; }
+  renderTree();
+  // 若无选中会话，自动选第一个真实会话（同时设所属 workspace）
+  const w = currentWs();
+  if (w && w.sessions.length && !state.session) selectSession(w.sessions[0].name, w.name);
 }
 
-async function selectWorkspace(name) {
+function renderTree() {
+  const box = $("tree");
+  box.textContent = "";
+  if (!state.tree.length) { box.innerHTML = '<div class="empty-hint">暂无工作区，点【＋工作区】</div>'; return; }
+  for (const t of state.tree) {
+    const wsRow = document.createElement("div");
+    wsRow.className = "ws-row" + (state.ws === t.name ? " active" : "");
+    const arrow = document.createElement("span");
+    arrow.className = "arrow"; arrow.textContent = t.expanded ? "▾" : "▸";
+    wsRow.appendChild(arrow);
+    const label = document.createElement("span");
+    label.className = "ws-label"; label.textContent = t.name;
+    wsRow.appendChild(label);
+    const count = document.createElement("span");
+    count.className = "ws-count"; count.textContent = t.sessions.length;
+    wsRow.appendChild(count);
+    wsRow.addEventListener("click", () => toggleWs(t.name));
+    box.appendChild(wsRow);
+
+    if (t.expanded) {
+      if (!t.sessions.length)
+        box.appendChild(elDiv("empty-hint", "无会话"));
+      for (const s of t.sessions) {
+        const sRow = document.createElement("div");
+        sRow.className = "session-row" + (state.ws === t.name && state.session === s.name ? " active" : "");
+        // 遗留无名会话（无点）置灰不可选
+        const legacy = !s.name.includes(".");
+        sRow.classList.toggle("legacy", legacy);
+        const dot = document.createElement("span");
+        dot.className = "dot"; dot.textContent = s.pending ? "⏳" : (legacy ? "•" : "●");
+        sRow.appendChild(dot);
+        const sLabel = document.createElement("span");
+        sLabel.className = "s-label";
+        sLabel.textContent = s.pending ? (s.name + " (未发送)") : s.name;
+        sRow.appendChild(sLabel);
+        // 所有 session 行都可点击选中（看历史）；legacy 仅样式置灰、debug 端拒绝
+        sRow.addEventListener("click", () => selectSession(s.name, t.name));
+        if (legacy) sRow.title = "遗留会话（未绑定 workflow，可查看历史但不能调试）";
+        const del = document.createElement("button");
+        del.className = "x"; del.textContent = "✕";
+        del.addEventListener("click", (e) => { e.stopPropagation(); archiveSession(s.name); });
+        sRow.appendChild(del);
+        box.appendChild(sRow);
+      }
+    }
+  }
+}
+
+function elDiv(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  return d;
+}
+
+function toggleWs(name) {
+  const t = state.tree.find(x => x.name === name);
+  if (!t) return;
+  t.expanded = !t.expanded;
   state.ws = name;
   state.session = null;
   $("title-ws").textContent = name;
-  await loadSessions();
-  if (state.workspaces.find(w => w.name === name)?.dir) {
-    // 自动进最近会话（若有）
-    const rows = state.sessions || [];
-    if (rows.length) selectSession(rows[rows.length - 1].name);
-    else { await ensureSession(); loadSessions(); }
-  }
+  renderTree();
+  if (t.sessions.length) selectSession(t.sessions[0].name, name);
+  else setTab("chat");
 }
 
 // ---- 会话 ----
-async function loadSessions() {
-  const w = state.workspaces.find(x => x.name === state.ws);
-  if (!w) return;
-  const r = await raw("sessions", { ws: w.dir });
-  state.sessions = r.sessions || [];
-  const ul = $("session-list");
-  ul.textContent = "";
-  if (!state.sessions.length) ul.innerHTML = '<div class="empty-hint">暂无会话，点【＋新会话】</div>';
-  for (const s of state.sessions) {
-    const li = document.createElement("li");
-    li.textContent = s.name || "(默认)";
-    li.addEventListener("click", () => selectSession(s.name));
-    if (state.session === s.name) li.classList.add("active");
-    const del = document.createElement("button");
-    del.className = "x"; del.textContent = "✕";
-    del.addEventListener("click", (e) => { e.stopPropagation(); archiveSession(s.name); });
-    li.appendChild(del);
-    ul.appendChild(li);
+// 选中会话：必须同时设所属 workspace（否则 currentWs() 可能指向别的工作区）
+async function selectSession(name, wsName) {
+  if (wsName) {
+    const t = state.tree.find(x => x.name === wsName);
+    if (t) t.expanded = true;
+    state.ws = wsName;
+    $("title-ws").textContent = wsName;
   }
-}
-
-async function selectSession(name) {
-  state.session = name;
-  $("title-s").textContent = name || "(默认)";
-  const w = state.workspaces.find(x => x.name === state.ws);
-  Array.from(document.querySelectorAll("#session-list li")).forEach(li => li.classList.toggle("active", li.textContent === name));
-  if (w) {
-    const r = await raw("history", { ws: w.dir, s: name });
-    renderHistory(r.messages || []);
-  }
-}
-
-async function newSession() {
-  const w = state.workspaces.find(x => x.name === state.ws);
-  if (!w) return;
-  const name = "s" + Math.floor(Date.now() / 1000);
   state.session = name;
   $("title-s").textContent = name;
-  $("messages").textContent = "";
-  await loadSessions();
-  // 会话在第一条消息发出时才真正建（wfr 首次写 session 日志）；这里只是占位
-}
-
-async function ensureSession() {
-  if (state.session) return;
-  const name = "s" + Math.floor(Date.now() / 1000);
-  state.session = name;
-  $("title-s").textContent = name;
+  const w = currentWs();
+  if (!w) return;
+  // 清 debug 缓存（会话变了下次重载）
+  $("dbg-frame").dataset.sid = "";
+  const r = await raw("history", { ws: w.dir, s: name });
+  renderHistory(r.messages || []);
+  renderTree();  // 高亮当前行
 }
 
 function archiveSession(name) {
-  // 简易归档：仅从列表移除（日志不动）
-  state.sessions = (state.sessions || []).filter(s => s.name !== name);
-  if (state.session === name) { state.session = null; $("messages").textContent = ""; $("title-s").textContent = "—"; }
-  loadSessions();
+  const w = currentWs();
+  if (w) w.sessions = w.sessions.filter(s => s.name !== name);
+  if (state.session === name) { state.session = null; $("title-s").textContent = "—"; $("messages").textContent = ""; }
+  renderTree();
+}
+
+// ---- 新建 workspace（modal）----
+function openWsModal() {
+  $("ws-name").value = "";
+  $("ws-dir").value = "";
+  $("ws-modal").classList.remove("hidden");
+  $("ws-name").focus();
+}
+async function submitWs() {
+  const name = $("ws-name").value.trim();
+  const dir = $("ws-dir").value.trim();
+  $("ws-modal").classList.add("hidden");
+  try {
+    const r = await raw("workspace_create", { name, dir });
+    if (r.error) throw new Error(r.error);
+    await loadTree();
+    // 展开并选中新建 ws
+    const t = state.tree.find(x => x.name === name);
+    if (t) { t.expanded = true; state.ws = name; renderTree(); }
+  } catch (e) {
+    $("messages").innerHTML = '<div class="error-line">建工作区失败: ' + e.message + '</div>';
+  }
+}
+
+// ---- 新建会话（modal：选 workflow）----
+async function openSsModal() {
+  const w = currentWs();
+  if (!w) { alert("请先选中工作区"); return; }
+  const sel = $("ss-wf");
+  sel.textContent = "";
+  try {
+    const r = await raw("workflows", { ws: w.dir });
+    const wfs = r.workflows || [];
+    if (!wfs.length) { alert("该工作区没有可绑定的 workflow"); return; }
+    for (const wf of wfs) {
+      const o = document.createElement("option");
+      o.value = wf.name;
+      o.textContent = wf.name + "（" + wf.source + "）";
+      sel.appendChild(o);
+    }
+    $("ss-modal").classList.remove("hidden");
+  } catch (e) {
+    alert("拉取 workflow 失败: " + e.message);
+  }
+}
+async function submitSs() {
+  const w = currentWs();
+  if (!w) return;
+  const wf = $("ss-wf").value;
+  $("ss-modal").classList.add("hidden");
+  const sid = "s" + Math.floor(Date.now() / 1000);
+  const name = wf + "." + sid;
+  // pending 占位：首条消息发出才真正写日志
+  w.sessions.push({ name, pending: true });
+  state.session = name;
+  $("title-s").textContent = name;
+  $("messages").textContent = "";
+  renderTree();
+  setTab("chat");
+}
+
+// ---- 双 tab ----
+function setTab(t) {
+  state.tab = t;
+  $("tab-chat").classList.toggle("active", t === "chat");
+  $("tab-debug").classList.toggle("active", t === "debug");
+  $("chat-pane").classList.toggle("hidden", t !== "chat");
+  $("debug-pane").classList.toggle("hidden", t !== "debug");
+  if (t === "debug") updateDebugUI();        // 调试 tab：按钮按状态显示
+  else $("dbg-refresh").classList.add("hidden");  // 对话 tab：隐藏调试按钮
+}
+
+// 调试 tab：工具条状态管理——能生成则显示「⚙ 生成」，已生成则显示「⟳ 刷新」
+function canDebug() {
+  // 可调试 = 已绑定 workflow（名字带点）的会话；pending 也可（未发消息时 debug 端返回"尚无记录"）
+  const s = currentSession();
+  return !!s && !!state.session && state.session.includes(".");
+}
+
+function updateDebugUI() {
+  const frame = $("dbg-frame");
+  const ph = $("dbg-placeholder");
+  const ref = $("dbg-refresh");
+
+  if (!canDebug()) {
+    // 无法生成：隐藏 iframe 与生成按钮，只显示占位说明
+    frame.classList.add("hidden"); frame.srcdoc = ""; frame.dataset.sid = "";
+    ph.classList.remove("hidden");
+    ref.classList.add("hidden");
+    return;
+  }
+  // 可生成：显示按钮（未生成→「⚙ 生成」；已生成→「⟳ 刷新」）+ 隐藏占位
+  ph.classList.add("hidden");
+  ref.classList.remove("hidden");
+  if (frame.dataset.sid !== state.session) {
+    // 尚未生成：按钮是「生成」，iframe 隐藏
+    frame.classList.add("hidden");
+    ref.textContent = "⚙ 生成";
+  } else {
+    frame.classList.remove("hidden");
+    ref.textContent = "⟳ 刷新";
+  }
+}
+
+// 生成/刷新调试页：未生成（dataset.sid 未设）→ 生成；已生成 → 重新生成
+function toggleDebug() {
+  const w = currentWs();
+  if (!canDebug()) return;  // 按钮只在可调试时显示，正常不会走到这
+  const frame = $("dbg-frame");
+  if (frame.dataset.sid === state.session) {
+    // 刷新：清缓存重载
+    frame.dataset.sid = "";
+    frame.src = "";
+  }
+  frame.src = qs({ action: "debug", ws: w.dir, s: state.session });
+  frame.dataset.sid = state.session;
+  frame.classList.remove("hidden");
+  $("dbg-placeholder").classList.add("hidden");
+  $("dbg-refresh").textContent = "⟳ 刷新";
+  frame.addEventListener("load", () => { frame.classList.remove("hidden"); }, { once: true });
 }
 
 // ---- 发送（流式：NDJSON 事件逐行渲染）----
@@ -320,22 +483,37 @@ async function streamChat(ws, s, q) {
 
 async function send() {
   const q = $("input").value.trim();
-  if (!q || !state.ws) return;
-  const w = state.workspaces.find(x => x.name === state.ws);
+  if (!q) return;
+  const w = currentWs();
   if (!w) return;
-  await ensureSession();  // 首个会话由首条消息自然创建（wfr 首次写 session 日志）
+  // 必须有绑定 workflow 的 session（pending 占位也可——首条消息触发 wfr 真正写日志）
+  if (!state.session || !state.session.includes(".")) {
+    $("messages").appendChild(elDiv("error-line", "请先选 workflow 新建会话"));
+    return;
+  }
   appendMsg("user", q, "");
   $("input").value = "";
   setBusy(true);
   try {
     await streamChat(w.dir, state.session, q);
-    loadSessions();
+    // 刷新树：pending 占位被真实条目替换
+    await refreshWs(w.name);
   } catch (e) {
-    const el = document.createElement("div"); el.className = "error-line"; el.textContent = "请求失败: " + e.message;
-    $("messages").appendChild(el);
+    $("messages").appendChild(elDiv("error-line", "请求失败: " + e.message));
   } finally {
     setBusy(false);
   }
+}
+
+async function refreshWs(name) {
+  const t = state.tree.find(x => x.name === name);
+  if (!t) return;
+  try {
+    const r = await raw("sessions", { ws: t.dir });
+    const real = (r.sessions || []).map(s => ({ name: s.name, pending: false }));
+    t.sessions = real;
+    renderTree();
+  } catch (e) { /* 目录扫描失败：保留现状 */ }
 }
 
 function setBusy(b) {
@@ -344,14 +522,21 @@ function setBusy(b) {
 }
 
 // ---- 事件 ----
-$("ws-select").addEventListener("change", (e) => selectWorkspace(e.target.value));
-$("new-session").addEventListener("click", newSession);
+$("new-workspace").addEventListener("click", openWsModal);
+$("ws-cancel").addEventListener("click", () => $("ws-modal").classList.add("hidden"));
+$("ws-ok").addEventListener("click", submitWs);
+$("new-session").addEventListener("click", openSsModal);
+$("ss-cancel").addEventListener("click", () => $("ss-modal").classList.add("hidden"));
+$("ss-ok").addEventListener("click", submitSs);
+$("tab-chat").addEventListener("click", () => setTab("chat"));
+$("tab-debug").addEventListener("click", () => setTab("debug"));
+$("dbg-refresh").addEventListener("click", toggleDebug);
 $("send").addEventListener("click", send);
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
 // boot
-loadWorkspaces().catch(e => {
+loadTree().catch(e => {
   $("messages").innerHTML = '<div class="error-line">初始化失败: ' + e.message + '</div>';
 });

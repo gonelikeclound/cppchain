@@ -26,10 +26,12 @@
 
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>  // open /dev/null
 
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/tool/spawn_runner.hpp"
 #include "cppchain/workflow/session_log.hpp"
+#include "wfr_cgi_lib.hpp"  // 纯逻辑（parse_session_id / default_sets_for / 枚举等，测试共用）
 
 using Json = nlohmann::json;
 
@@ -101,6 +103,31 @@ std::string wfr_bin() {
   return "build/dev/bin/wfr";
 }
 
+// workflow 枚举目录集（顺序即优先级）：工作区 settings.workflow_dirs → 显式 cgi-workflows →
+// 发布（WFR_WORKFLOWS_DIR 环境 → share/wfr/workflows）。CGI 已 chdir 到 repo 根。
+std::vector<std::filesystem::path> workflow_dirs_for(std::string const& ws) {
+  std::vector<std::filesystem::path> dirs;
+  // 1) 工作区 .wfr/settings.json 的 workflow_dirs（相对 ws 解析；与 wfr_read_settings 同语义）
+  std::filesystem::path const settings = std::filesystem::path(ws) / ".wfr" / "settings.json";
+  if (std::ifstream in(settings); in) {
+    Json j;
+    try { in >> j; } catch (...) { j = Json::object(); }
+    if (j.contains("workflow_dirs") && j["workflow_dirs"].is_array())
+      for (auto const& d : j["workflow_dirs"])
+        if (d.is_string()) {
+          std::filesystem::path dp(d.get<std::string>());
+          dirs.push_back(dp.is_absolute() ? dp : std::filesystem::path(ws) / dp);
+        }
+  }
+  // 2) 显式 cgi-workflows（本专题的自定义 workflow 目录，隔离自 share/）
+  dirs.push_back(std::filesystem::path("cgi-workflows"));
+  // 3) 发布目录：WFR_WORKFLOWS_DIR 环境 > share/wfr/workflows
+  if (char const* e = std::getenv("WFR_WORKFLOWS_DIR"); e && *e)
+    dirs.push_back(e);
+  dirs.push_back(std::filesystem::path("share") / "wfr" / "workflows");
+  return dirs;
+}
+
 void json_out(Json const& j) {
   std::cout << "Content-Type: application/json; charset=utf-8\r\n\r\n" << j.dump() << "\n";
 }
@@ -117,13 +144,29 @@ void action_chat_stream(std::vector<std::pair<std::string, std::string>> const& 
     return;
   }
 
-  std::vector<std::string> av = {wfr_bin(), "chat_cgi",
-                                 "--workdir", ws, "--session", s,
-                                 "--set", "compress_when=messages",
-                                 "--set", "compress_max_msgs=40",
-                                 "--set", "compress_keep_last=6",
-                                 "--stream",
-                                 text};
+  // session 名 = `wfname.sessionid`（workflow 绑定编码在名字里）→ 解析 workflow + 校验白名单
+  auto const seg = cppchain::cgi::parse_session_id(s);
+  if (!seg) {
+    std::cout << "Content-Type: application/x-ndjson\r\n\r\n"
+              << "{\"type\":\"error\",\"msg\":\"session 未绑定 workflow（名字需为 wfname.sessionid）\"}\n";
+    return;
+  }
+  auto const dirs = workflow_dirs_for(ws);
+  if (!cppchain::cgi::is_registered_workflow(dirs, seg->workflow)) {
+    std::cout << "Content-Type: application/x-ndjson\r\n\r\n"
+              << "{\"type\":\"error\",\"msg\":\"workflow '" + seg->workflow + "' 不在可枚举目录里\"}\n";
+    return;
+  }
+
+  // argv：`wfr <workflow> --workdir <ws> --session <wfname.sessionid> [--set k=v…] --stream <text>`
+  std::vector<std::string> av = {wfr_bin(), seg->workflow,
+                                 "--workdir", ws, "--session", s};  // s = 完整 wfname.sessionid
+  for (auto const& [k, v] : cppchain::cgi::default_sets_for(seg->workflow, text)) {
+    av.push_back("--set");
+    av.push_back(k + "=" + v);
+  }
+  av.push_back("--stream");
+  av.push_back(text);
   // argv → C 数组（execvp 用）
   std::vector<char*> cargv;
   for (auto& a : av) cargv.push_back(a.data());
@@ -207,15 +250,140 @@ Json action_sessions(std::vector<std::pair<std::string, std::string>> const& q) 
 // workspaces：读 <repo>/web/workspaces.json（{workspaces:[{name,dir}]}），缺省给空
 Json action_workspaces() {
   std::filesystem::path const cfg = std::filesystem::path("web") / "workspaces.json";
-  Json out = Json::array();
-  if (std::ifstream in(cfg); in) {
-    Json j;
-    try { in >> j; } catch (...) { j = Json::object(); }
-    if (j.contains("workspaces") && j["workspaces"].is_array())
-      for (auto const& w : j["workspaces"])
-        if (w.is_object()) out.push_back(w);
-  }
+  Json out = cppchain::cgi::read_workspaces_file(cfg);
   return Json{{"workspaces", std::move(out)}};
+}
+
+// workflows：枚举 session 可绑定的 workflow（工作区 settings → cgi-workflows → 发布）。
+// 出 {workflows:[{name, source}]}，source = 所在目录 basename（官方/自定义角标）。
+Json action_workflows(std::vector<std::pair<std::string, std::string>> const& q) {
+  std::string const ws = param(q, "ws");
+  if (ws.empty()) return Json{{"error", "missing ws"}};
+  Json arr = Json::array();
+  auto const dirs = workflow_dirs_for(ws);
+  for (auto const& d : dirs) {
+    std::string const source = d.filename().string();
+    for (std::string const& n : cppchain::cgi::list_workflow_names(d))
+      arr.push_back(Json{{"name", n}, {"source", source}});
+  }
+  // 按名去重（首个 win，即目录优先级序）——保持与 wfr locate 语义一致
+  Json seen = Json::object();
+  Json dedup = Json::array();
+  for (auto const& w : arr) {
+    std::string const n = w.value("name", "");
+    if (seen.contains(n)) continue;
+    seen[n] = true;
+    dedup.push_back(w);
+  }
+  return Json{{"workflows", std::move(dedup)}};
+}
+
+// workspace_create：建目录 + 种子 settings + 注册进 workspaces.json（原子写）。
+Json action_workspace_create(std::vector<std::pair<std::string, std::string>> const& q) {
+  std::string const name = param(q, "name");
+  std::string const dir = param(q, "dir");
+  if (!cppchain::cgi::valid_workspace_name(name))
+    return Json{{"error", "非法 workspace 名（字母数字开头，≤32 字符）"}};
+  auto const dir_ok = cppchain::cgi::sanitize_workspace_dir(std::filesystem::current_path(), dir);
+  if (!dir_ok)
+    return Json{{"error", "非法目录（非绝对、无 ..、以仓库根为前缀）"}};
+  std::filesystem::path const cfg = std::filesystem::path("web") / "workspaces.json";
+  // 重名检查（读现有）
+  for (auto const& w : cppchain::cgi::read_workspaces_file(cfg))
+    if (w.is_object() && (w.value("name", "") == name || w.value("dir", "") == *dir_ok))
+      return Json{{"error", "name 或 dir 已存在"}};
+  // 建目录
+  std::error_code ec;
+  std::filesystem::create_directories(std::filesystem::path(*dir_ok), ec);
+  if (ec) return Json{{"error", "建目录失败"}};
+  // 种子 settings：指向 cgi-workflows（保证新 ws 能跑自定义 workflow）
+  std::filesystem::path const settings =
+      std::filesystem::path(*dir_ok) / ".wfr" / "settings.json";
+  if (!std::filesystem::exists(settings, ec)) {
+    std::filesystem::create_directories(settings.parent_path(), ec);
+    Json s = Json{{"workflow_dirs",
+                   Json::array({(std::filesystem::current_path() / "cgi-workflows").string()})}};
+    if (std::ofstream out(settings); out) out << s.dump(2) << "\n";
+  }
+  if (!cppchain::cgi::append_workspace(cfg, name, *dir_ok))
+    return Json{{"error", "写入 workspaces.json 失败"}};
+  return Json{{"ok", true}, {"workspace", Json{{"name", name}, {"dir", *dir_ok}}}};
+}
+
+// debug：跑 `wfr debug <wf> --workdir <ws> --session <wfname.sessionid> --out <tmp>` 读回单 HTML。
+// 自己写 Content-Type: text/html（iframe 直接显示）；失败给 text/html 错误页。
+void action_debug(std::vector<std::pair<std::string, std::string>> const& q) {
+  std::string const ws = param(q, "ws");
+  std::string const s = param(q, "s");
+  auto const seg = cppchain::cgi::parse_session_id(s);
+  if (ws.empty() || !seg) {
+    std::cout << "Content-Type: text/html; charset=utf-8\r\n\r\n"
+              << "<html><body style='font-family:monospace;padding:1em'>"
+                 "<b>无法生成调试台</b>：session 未绑定 workflow（名字需为 wfname.sessionid）"
+                 "</body></html>\n";
+    return;
+  }
+  // 临时文件
+  std::string tmpl = "/tmp/wfr-dbg-XXXXXX.html";
+  std::vector<char> buf(tmpl.begin(), tmpl.end()); buf.push_back('\0');
+  int fd = mkstemps(buf.data(), 5 /* .html */);
+  if (fd < 0) {
+    std::cout << "Content-Type: text/html\r\n\r\n<html><body>mkstemps 失败</body></html>\n";
+    return;
+  }
+  close(fd);
+  std::string const tmp_out(buf.data());
+
+  std::vector<std::string> av = {wfr_bin(), "debug", seg->workflow,
+                                 "--workdir", ws, "--session", s,  // 完整 wfname.sessionid
+                                 "--out", tmp_out};
+  std::vector<char*> cargv;
+  for (auto& a : av) cargv.push_back(a.data());
+  cargv.push_back(nullptr);
+
+  int pipefd[2];
+  if (pipe(pipefd) != 0) {
+    unlink(tmp_out.c_str());
+    std::cout << "Content-Type: text/html\r\n\r\n<html><body>pipe 失败</body></html>\n";
+    return;
+  }
+  pid_t pid = fork();
+  if (pid < 0) {
+    unlink(tmp_out.c_str());
+    std::cout << "Content-Type: text/html\r\n\r\n<html><body>fork 失败</body></html>\n";
+    return;
+  }
+  if (pid == 0) {
+    // stdout 丢弃（wfr debug 的人类提示行不进响应）
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) dup2(devnull, STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[0]); close(pipefd[1]);
+    execvp(cargv[0], cargv.data());
+    _exit(127);
+  }
+  close(pipefd[1]);
+  // 消费子进程 stderr（防阻塞）；等结束
+  FILE* errfp = fdopen(pipefd[0], "r");
+  char ebuf[4096];
+  if (errfp) while (fgets(ebuf, sizeof ebuf, errfp)) {}
+  if (errfp) fclose(errfp);
+  int status = 0;
+  waitpid(pid, &status, 0);
+  bool const ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+
+  if (ok && std::filesystem::is_regular_file(tmp_out)) {
+    std::cout << "Content-Type: text/html; charset=utf-8\r\n\r\n";
+    if (std::ifstream in(tmp_out); in)
+      std::cout << in.rdbuf();
+  } else {
+    std::cout << "Content-Type: text/html; charset=utf-8\r\n\r\n"
+              << "<html><body style='font-family:monospace;padding:1em'>"
+                 "<b>调试台生成失败</b>（wfr debug 退出码 "
+              << (WIFEXITED(status) ? std::to_string(WEXITSTATUS(status)) : "1")
+              << "）——会话可能还没有任何记录</body></html>\n";
+  }
+  unlink(tmp_out.c_str());
 }
 
 }  // namespace
@@ -248,10 +416,16 @@ int main() {
     action_chat_stream(q);  // 流式：自己写 HTTP 头 + NDJSON 事件行
     return 0;
   }
+  if (action == "debug") {
+    action_debug(q);  // 返回 text/html（wfr debug 单页）
+    return 0;
+  }
   Json result;
   if (action == "history") result = action_history(q);
   else if (action == "sessions") result = action_sessions(q);
   else if (action == "workspaces") result = action_workspaces();
+  else if (action == "workflows") result = action_workflows(q);
+  else if (action == "workspace_create") result = action_workspace_create(q);
   else result = Json{{"error", "unknown action: " + action}};
   json_out(result);
   return 0;

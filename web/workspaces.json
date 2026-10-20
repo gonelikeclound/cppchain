@@ -1,5 +1,12 @@
 {
   "workspaces": [
-    { "name": "demo", "dir": "tmp/cgi_ws/demo" }
+    {
+      "dir": "tmp/cgi_ws/demo",
+      "name": "demo"
+    },
+    {
+      "dir": "tmp/cgi_ws/demo3",
+      "name": "demo3"
+    }
   ]
 }

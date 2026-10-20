@@ -28,7 +28,9 @@ body {
 
 /* ---- 中栏 ---- */
 .main { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
-.main-top { flex: none; padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+.main-top { flex: none; padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.main-top-right { display: flex; align-items: center; gap: 10px; }
+.main-top-right .ghost { padding: 5px 12px; font-size: 12px; }
 .crumb .sep { margin: 0 6px; color: var(--dim); }
 .busy { color: var(--accent); font-size: 13px; }
 .busy.hidden { visibility: hidden; }
@@ -65,3 +67,67 @@ body {
 .composer button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 18px; cursor: pointer; }
 .composer button:disabled { opacity: .5; cursor: not-allowed; }
 .error-line { color: #ff8585; align-self: flex-start; padding: 8px; }
+
+/* ---- 左侧二级树（workspace → session）---- */
+.side-actions { display: flex; gap: 6px; }
+.side-actions .ghost { flex: 1; }
+.tree { flex: 1; overflow: hidden; padding: 4px; }
+.ws-row {
+  display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 6px;
+  cursor: pointer; color: var(--text); font-weight: 600;
+}
+.ws-row:hover { background: rgba(108,140,255,.08); }
+.ws-row.active { background: var(--panel2); }
+.ws-row .arrow { width: 14px; color: var(--dim); }
+.ws-row .ws-count { margin-left: auto; color: var(--dim); font-weight: 400; font-size: 12px; }
+.session-row {
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 26px; border-radius: 6px;
+  cursor: pointer; color: var(--dim); font-size: 13px;
+}
+.session-row:hover { background: rgba(108,140,255,.08); }
+.session-row.active { background: rgba(108,140,255,.16); color: var(--text); }
+.session-row.legacy { color: #556; cursor: default; }
+.session-row .dot { width: 10px; color: var(--dim); font-size: 10px; }
+.session-row .s-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-row .x { background: none; border: 0; color: var(--dim); cursor: pointer; opacity: 0; font-size: 12px; }
+.session-row:hover .x { opacity: 1; }
+
+/* ---- 中栏双 tab ---- */
+.tab-bar { flex: none; display: flex; border-bottom: 1px solid var(--border); }
+.tab {
+  background: transparent; color: var(--dim); border: 0; padding: 9px 18px; cursor: pointer;
+  font-size: 13px; border-bottom: 2px solid transparent;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+/* 通用隐藏（占位/iframe/按钮等都用 classList.add("hidden") 控制）：
+   此前只有 .pane.hidden / .busy.hidden / .modal.hidden 有规则，占位/iframe 的 hidden 不生效 */
+.hidden { display: none !important; }
+.pane.hidden { display: none; }
+#chat-pane { /* messages + composer 垂直 */ }
+#debug-pane iframe { flex: 1; width: 100%; border: 0; background: #fff; min-height: 0; }
+.dbg-placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--dim); font-size: 13px; text-align: center; padding: 20px;
+}
+.dbg-placeholder code { background: rgba(0,0,0,.35); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+/* ---- modal ---- */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex;
+  align-items: center; justify-content: center; z-index: 100;
+}
+.modal.hidden { display: none; }
+.modal-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px; width: 340px; display: flex; flex-direction: column; gap: 12px;
+}
+.modal-card h2 { font-size: 15px; }
+.modal-card label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--dim); }
+.modal-card input, .modal-card select {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 9px; font: inherit;
+}
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.modal-actions .primary { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 16px; cursor: pointer; }
+.modal-actions .ghost { padding: 7px 16px; }

@@ -630,10 +630,18 @@ int main(int argc, char** argv) {
   // --stream：引擎事件逐条打 JSON 行到 stdout（CGI/前端流式渲染思考/工具/文本的通道）。
   // 事件含 node_start/node_end + node_kind + step + payload（= 节点 update，model→messages
   // 含 AI/reasoning/tool_calls，run_tools→Tool 消息）。逐行 flush 保证边跑边出。
+  // 同时投影到会话日志（project_stream_to_log）：--stream 让 wrapper 结构日志让位（streaming=true），
+  // 若只打 stdout 不投影，AI/工具消息不会落会话日志 → 下轮 replay / CGI history / debug 读不到。
   if (stream_events) {
-    fo.stream = [](cppchain::graph::StreamEvent const& ev) {
+    fo.stream = [wf_ptr = &wf.value()](cppchain::graph::StreamEvent const& ev) {
       std::cout << ev_json(ev).dump() << '\n';
       std::cout.flush();
+      // 投影到会话日志：与默认 wrapper 同信封（engine_enter/exit + update），
+      // 保证会话历史完整可回放（CGI 的 history/debug 依赖它）。
+      if (wf_ptr->sink->log != nullptr) {
+        cppchain::workflow::project_stream_to_log(*wf_ptr->sink->log, wf_ptr->sink->run,
+                                                  ev, "");
+      }
     };
   }
   Json inp = Json::array();
