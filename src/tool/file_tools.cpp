@@ -218,7 +218,7 @@ ToolSpec make_file_write_tool(FileToolsConfig cfg) {
 
     return probe_file(*target, content, content.size());
   };
-  return spec;  // 写入是"创造/修改数据"，不设 ttl（时效性语义不适用）
+  return spec.with_effect_class(EffectClass::Idempotent);  // 治理(problems/33)：确定性写，可安全重放
 }
 
 ToolSpec make_list_dir_tool(FileToolsConfig cfg) {

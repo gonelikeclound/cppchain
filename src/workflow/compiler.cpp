@@ -101,9 +101,11 @@ Json merge_slots(Json const& left, Json const& right) {
   return out;
 }
 
-// `_fail` 的落地节点名（见 ir.hpp 的 kFailName）。
+// `_fail`/`_timeout`/`_cancelled` 的落地节点名（见 ir.hpp 的 kFailName/kTimeoutName/kCancelledName）。
 // 各节点类型的"编译"已迁到 node_types.cpp；本文件只剩图装配与 schema。
 constexpr char kFailTarget[] = "__fail__";
+constexpr char kTimeoutTarget[] = "__timeout__";
+constexpr char kCancelTarget[] = "__cancelled__";
 
 }  // namespace
 
@@ -127,12 +129,22 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   if (ir.nodes.empty())
     return invalid("IR nodes 为空（生成器不应产出）");
 
-  bool need_fail_node = false;  // 只有真的用到 _fail 才注册那个节点（否则会污染 registered 计数）
+  bool need_fail_node = false;      // 只有真的用到 _fail 才注册那个节点
+  bool need_timeout_node = false;   // _timeout 同理（governed 的 loop on_max）
+  bool need_cancel_node = false;    // _cancelled 同理（plan_review abort）
   auto resolve = [&](std::string const& t) -> std::string {
     if (t == kTurnEndName) return graph::kEnd;
     if (t == kFailName) {
       need_fail_node = true;
       return kFailTarget;
+    }
+    if (t == kTimeoutName) {
+      need_timeout_node = true;
+      return kTimeoutTarget;
+    }
+    if (t == kCancelledName) {
+      need_cancel_node = true;
+      return kCancelTarget;
     }
     return t;  // id 全局唯一：不再需要 label 那种"续接消解"
   };
@@ -205,6 +217,48 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     g.add_node(kFailTarget, [ir_id = ir.id](Json const&, NodeContext&) -> Command {
       throw tool::ToolException("workflow '" + ir_id +
                                 "' 路由到 _fail：本次触发以错误终止（原因见 state.messages）");
+    });
+  }
+
+  // 3.6) _timeout / _cancelled 落地节点（治理终态四档，problems/33）。
+  //      与 _fail 不同：**不抛异常**（超时/取消 ≠ 崩溃）——写 plan.terminal + plan_log 终态行，
+  //      再 goto __end__ 正常收尾。终态无并发写出，plan overwrite 安全；须从 state 读现有 plan 补字段。
+  if (need_timeout_node) {
+    g.note_kind(kTimeoutTarget, "timeout");
+    g.add_node(kTimeoutTarget, [ir_id = ir.id](Json const& state, NodeContext&) -> Command {
+      Json update;
+      Json plan = state.contains("plan") && state["plan"].is_object() ? state["plan"]
+                                                                     : Json::object();
+      plan["terminal"] = "timeout";
+      update["plan"] = std::move(plan);
+      Json pl = state.contains("plan_log") && state["plan_log"].is_array() ? state["plan_log"]
+                                                                          : Json::array();
+      pl.push_back(Json{{"step", "*"}, {"kind", "terminal"}, {"verdict", "timeout"},
+                        {"why", "loop on_max 触达且未收口（超时档）"}});
+      update["plan_log"] = std::move(pl);
+      Json results = Json::object();
+      results[kTimeoutTarget] = Json{{"terminal", "timeout"}, {"workflow", ir_id}};
+      update[kResultsKey] = std::move(results);
+      return Command{std::move(update), {graph::kEnd}, {}};
+    });
+  }
+  if (need_cancel_node) {
+    g.note_kind(kCancelTarget, "cancelled");
+    g.add_node(kCancelTarget, [ir_id = ir.id](Json const& state, NodeContext&) -> Command {
+      Json update;
+      Json plan = state.contains("plan") && state["plan"].is_object() ? state["plan"]
+                                                                     : Json::object();
+      plan["terminal"] = "cancelled";
+      update["plan"] = std::move(plan);
+      Json pl = state.contains("plan_log") && state["plan_log"].is_array() ? state["plan_log"]
+                                                                          : Json::array();
+      pl.push_back(Json{{"step", "*"}, {"kind", "terminal"}, {"verdict", "cancelled"},
+                        {"why", "用户中止 / 计划取消（取消档）"}});
+      update["plan_log"] = std::move(pl);
+      Json results = Json::object();
+      results[kCancelTarget] = Json{{"terminal", "cancelled"}, {"workflow", ir_id}};
+      update[kResultsKey] = std::move(results);
+      return Command{std::move(update), {graph::kEnd}, {}};
     });
   }
 

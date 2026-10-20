@@ -307,7 +307,8 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       c.err("VN1", "节点 id '" + n.id + "' 不符合 [A-Za-z][A-Za-z0-9_]*（无前导 _）");
     if (n.id == "result" || is_internal_key(n.id))
       c.err("VN2", "节点 id '" + n.id + "' 是保留名/内部状态键");
-    if (n.id == "_turn_start" || n.id == "_turn_end")
+    if (n.id == "_turn_start" || n.id == "_turn_end" || n.id == "_fail" ||
+        n.id == "_timeout" || n.id == "_cancelled")
       c.err("VN2", "节点 id 不得用保留名 '" + n.id + "'");
 
     // 类型专属校验走注册表（VN5–VN11）。通用图规则不在这里 —— 见下方 VG 段（② 会收敛到 edges()）。
@@ -403,6 +404,7 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
       if (e.target == "_turn_start") {
         c.err("VG1", "节点 '" + n.id + "' 的 " + e.label + " 指向保留名 _turn_start（不允许）");
       } else if (e.target != kTurnEnd && e.target != kFailName &&
+                 e.target != kTimeoutName && e.target != kCancelledName &&
                  c.index.find(e.target) == c.index.end()) {
         c.err("VG1", "节点 '" + n.id + "' 的 " + e.label + " 指向不存在的节点 '" + e.target + "'");
       }
@@ -600,12 +602,16 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                                    target.kind == NodeKind::Route ||
                                    target.kind == NodeKind::Summarize ||
                                    target.kind == NodeKind::RefineHistory ||
-                                   target.kind == NodeKind::ApproveTools;
+                                   target.kind == NodeKind::ApproveTools ||
+                                   // wfr-㊹ 治理（problems/33）：verify 发布 verdict/outcome、
+                                   // plan_review 发布裁决 —— expr 门（jgate/rgate）要引用它们
+                                   target.kind == NodeKind::Verify ||
+                                   target.kind == NodeKind::PlanReview;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
                                "' 指向非 result 节点（仅 tool / model / run_tools / "
                                "load_history / route / summarize / refine_history / "
-                               "approve_tools 发布 result）");
+                               "approve_tools / verify / plan_review 发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");

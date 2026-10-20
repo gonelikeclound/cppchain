@@ -45,6 +45,21 @@ enum class ToolApprovalLevel : unsigned char {
   NeedHuman, // 越过静态策略，直接要求人审（bash 出厂值；批② 起 approve_tools 对该类悬挂）
 };
 
+// ---- 效果域副作用分类（治理，problems/33，对齐 总纲 EffectContract.effectClass）----
+// 工具作者对副作用的**静态声明契约**（区别于 command_classify 的 bash 命令**词面动态**分类）：
+//   Read         只读，无副作用（read_only==true 隐含本类，无需显式声明）
+//   Idempotent   有副作用但可安全重放（同参同果，如确定性 file_write / submit_result）
+//   Irreversible 有副作用且不可安全重放（如任意 bash —— 词面挡不住、需人审/沙箱兜底）
+enum class EffectClass : unsigned char { Read, Idempotent, Irreversible };
+
+inline constexpr std::string_view kEffectClassNames[] = {"read", "idempotent", "irreversible"};
+
+[[nodiscard]] inline bool is_known_effect_class(std::string_view s) {
+  for (std::string_view const k : kEffectClassNames)
+    if (s == k) return true;
+  return false;
+}
+
 struct ToolSpec {
   // handler 契约：可能被并行调用 → 必须线程安全；args 为已解析的 JSON 参数
   using Handler = std::function<std::expected<nlohmann::json, ToolError>(
@@ -55,6 +70,10 @@ struct ToolSpec {
   nlohmann::json parameters = nlohmann::json::object();  // JSON Schema
   Handler handler;
   bool read_only = true;  // 副作用标记（M7 审批中间件用）
+
+  // 治理（problems/33）：效果域副作用声明（缺省 Read = 只读，read_only==false 必须显式
+  // 声明 Idempotent/Irreversible，否则启动自检 effect_class_violations 报违规 fail-fast）。
+  EffectClass effect_class = EffectClass::Read;
 
   // 结果时效性：超过该时长即视为"可能已过期"（余额/库存/价格/文件内容这类易变状态）。
   // 留空 = 不过期（静态知识类工具）。由 agent::StaleStateGuard 消费，见 04-problems/06。
@@ -89,6 +108,13 @@ struct ToolSpec {
   // 链式设置类别：`reg.add(make_tool(...).with_category("retrieval"))`
   ToolSpec& with_category(std::string c) {
     category = std::move(c);
+    return *this;
+  }
+
+  // 治理（problems/33）：链式声明效果域副作用分类：
+  // `reg.add(make_file_write_tool(...).with_effect_class(EffectClass::Idempotent))`
+  ToolSpec& with_effect_class(EffectClass e) {
+    effect_class = e;
     return *this;
   }
 

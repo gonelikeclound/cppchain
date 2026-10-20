@@ -50,4 +50,15 @@ class ToolRegistry {
   std::unordered_map<std::string, std::size_t> index_;
 };
 
+// 治理（problems/33 · G4 包装层自检）：扫描注册表，返回所有「有副作用却未显式声明效果分类」的工具名。
+// 判据：read_only==false 的工具必须声明 Idempotent/Irreversible（effect_class != Read）。
+// 读工具的 effect_class 隐含 Read，天然干净。宿主应在注册完成后调用，非空即 fail-fast（启动即失败）。
+[[nodiscard]] inline std::vector<std::string> effect_class_violations(ToolRegistry const& reg) {
+  std::vector<std::string> out;
+  for (ToolSpec const& t : reg.all())
+    if (!t.read_only && t.effect_class == EffectClass::Read)
+      out.push_back(t.name);
+  return out;
+}
+
 }  // namespace cppchain::tool

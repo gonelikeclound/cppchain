@@ -140,12 +140,13 @@ TEST(WfPlanL1, two_steps_execute_without_verify_and_advance_cursor) {
   Json const plan = st["plan"];
   ASSERT_EQ(plan["cursor"].get<long>(), 2) << "无验证 → 两步都做完并推进 cursor";
   ASSERT_EQ(plan["steps"].size(), 2u);
-  EXPECT_EQ(plan["steps"][0]["status"].get<std::string>(), "done");
-  EXPECT_EQ(plan["steps"][1]["status"].get<std::string>(), "done");
-  // plan_log：两步各一条 L1 判定（kind=none, verdict=done）
+  // 治理（problems/33）：L1 无判据 → 完成但未验证（unverified），不再是静默 done
+  EXPECT_EQ(plan["steps"][0]["status"].get<std::string>(), "unverified");
+  EXPECT_EQ(plan["steps"][1]["status"].get<std::string>(), "unverified");
+  // plan_log：两步各一条 L1 判定（kind=none, verdict=unverified）
   ASSERT_EQ(st["plan_log"].size(), 2u);
   EXPECT_EQ(st["plan_log"][0]["kind"].get<std::string>(), "none");
-  EXPECT_EQ(st["plan_log"][0]["verdict"].get<std::string>(), "done");
+  EXPECT_EQ(st["plan_log"][0]["verdict"].get<std::string>(), "unverified");
   EXPECT_EQ(st["plan_log"][1]["step"].get<std::string>(), "s2");
   // 步骤指令进了 messages（announce 把每步目标喂给模型）
   auto const msgs = st["messages"];
@@ -225,5 +226,5 @@ TEST(WfPlanL1, plan_node_model_generation_adopts_generated_steps) {
   Json const st = *r;
   EXPECT_EQ(st["plan"]["cursor"].get<long>(), 1);
   EXPECT_EQ(st["plan"]["steps"][0]["goal"].get<std::string>(), "生成的一步");
-  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "done");
+  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "unverified");  // 无判据 → 完成但未验证
 }

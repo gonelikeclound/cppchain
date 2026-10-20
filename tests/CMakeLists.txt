@@ -53,7 +53,8 @@ add_executable(tool_tests
   tool/bash_tool_test.cpp
   tool/sandbox_test.cpp
   tool/arxiv_test.cpp
-  tool/hybrid_selector_test.cpp)
+  tool/hybrid_selector_test.cpp
+  tool/effect_class_test.cpp)
 
 target_link_libraries(tool_tests PRIVATE
   cppchain_tool
@@ -157,6 +158,7 @@ add_executable(workflow_tests
   wf/plan_review_test.cpp
   wf/mch_test.cpp
   wf/parallel_mch_test.cpp
+  wf/governance_test.cpp
   wf/lot_task_test.cpp
   wf/history_nodes_test.cpp
   wf/plugin_import_test.cpp

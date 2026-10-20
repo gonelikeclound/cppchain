@@ -147,7 +147,7 @@ TEST(WfPlanReview, continue_passes_boundary_and_completes) {
   EXPECT_FALSE(wf->graph.last_interrupt().interrupted);  // 跑完
   Json st = *r2;
   EXPECT_EQ(st["plan"]["cursor"].get<long>(), 1);
-  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "done");
+  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "unverified");  // 无判据 → 完成但未验证
 }
 
 TEST(WfPlanReview, rollback_to_resets_step_and_redo) {
@@ -182,9 +182,9 @@ TEST(WfPlanReview, rollback_to_resets_step_and_redo) {
     ASSERT_TRUE(r3) << r3.error().message;
   }
   Json st = *r3;
-  // 回退到 0 → s1 重新做 → 最终 cursor=1、s1 done、s2 pending，plan_log 含 rollback 事件
+  // 回退到 0 → s1 重新做 → 最终 cursor=1、s1 unverified（无判据）、s2 pending，plan_log 含 rollback 事件
   EXPECT_EQ(st["plan"]["cursor"].get<long>(), 1) << st["plan"].dump();
-  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "done");
+  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "unverified");
   EXPECT_EQ(st["plan"]["steps"][1]["status"].get<std::string>(), "pending");
   auto const lg = st["plan_log"];
   bool found = false;
@@ -192,7 +192,7 @@ TEST(WfPlanReview, rollback_to_resets_step_and_redo) {
   EXPECT_TRUE(found) << "-- plan_log: " << lg.dump();
 }
 
-TEST(WfPlanReview, abort_stops_and_marks_aborted) {
+TEST(WfPlanReview, abort_stops_and_marks_cancelled) {
   Fixture f;
   auto wf = f.give(one_step());
   ASSERT_TRUE(wf) << wf.error();
@@ -204,9 +204,15 @@ TEST(WfPlanReview, abort_stops_and_marks_aborted) {
   auto r2 = fire_once(*wf, Json{{"goal", "x"}}, fo);
   ASSERT_TRUE(r2) << r2.error().message;
   Json st = *r2;
-  EXPECT_TRUE(st["plan"].value("aborted", false)) << st["plan"].dump();
-  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "aborted");
+  // 治理（problems/33）：abort 统一为取消档（cancelled），plan.terminal 由 _cancelled 落地节点写
+  EXPECT_TRUE(st["plan"].value("cancelled", false)) << st["plan"].dump();
+  EXPECT_EQ(st["plan"]["steps"][0]["status"].get<std::string>(), "cancelled");
+  EXPECT_EQ(st["plan"].value("terminal", ""), "cancelled") << st["plan"].dump();
   EXPECT_EQ(f.model.invoked, 0u) << "abort 后不得再调模型";
+  bool found_cancel = false;
+  for (auto const& e : st["plan_log"])
+    if (e.is_object() && e.value("kind", "") == "cancel") found_cancel = true;
+  EXPECT_TRUE(found_cancel) << st["plan_log"].dump();
 }
 
 TEST(WfPlanReview, confirm_false_passes_through_without_interrupt) {

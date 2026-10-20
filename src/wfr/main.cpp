@@ -529,6 +529,20 @@ int main(int argc, char** argv) {
     comps.toolsets["trip"] = std::move(names);
   }
 
+  // 治理（problems/33 · G4 包装层自检）：有副作用却未声明效果分类的工具 → 启动即失败。
+  // 缺省 Read = 只读；read_only=false 必须显式声明 Idempotent/Irreversible（否则运行期遗漏是静默的）。
+  // 位置：所有内置工具（含 bash/file_write/submit_result）注册完成后 —— ⑤ 动态插件在其后注册的
+  // 非只读工具需自行复调 effect_class_violations。
+  {
+    auto const v = tool::effect_class_violations(registry);
+    if (!v.empty()) {
+      std::println("治理自检失败：以下工具 read_only=false 但未声明效果分类（effect_class）：");
+      for (std::string const& n : v) std::println("  - {}", n);
+      std::println("请用 .with_effect_class(EffectClass::Idempotent|Irreversible) 声明（见 tool.hpp）");
+      return 2;
+    }
+  }
+
   std::optional<model::openai::OpenAIChatModel> model;
   if (model_needed_key) {
     std::string const key = env_or(dotenv, "LLM_API_KEY");
@@ -700,23 +714,25 @@ int main(int argc, char** argv) {
         std::string line;
         if (!std::getline(std::cin, line)) {
           std::println();
-          std::println("（stdin 结束，未获裁决 —— 本次触发止于边界确认点。）");
-          return 0;
-        }
-        std::string const t = cppchain::wfr::trim(line);
-        if (t.empty() || t == "abort" || t == "a" || t == "q" || t == "quit") {
-          std::println("（已中止 —— 本次触发止于边界确认点。）");
-          return 0;
-        }
-        if (t == "continue" || t == "c") {
-          resume = Json{{"action", "continue"}};
-        } else if (t.starts_with("rollback_to") || t == "r" || t.starts_with("r ")) {
-          long to = 0;
-          for (char ch : t)
-            if (ch >= '0' && ch <= '9') to = to * 10 + (ch - '0');
-          resume = Json{{"action", "rollback_to"}, {"to", to}};
+          // 治理（problems/33）：stdin 结束也走 abort 续跑 → _cancelled 终态成档
+          //（不再 return 0 悬挂残留，取消必须是可查的终态）
+          std::println("（stdin 结束，未获裁决 —— 按取消处理，落 _cancelled 档。）");
+          resume = Json{{"action", "abort"}};
         } else {
-          resume = Json{{"action", "abort"}};  // 未识别 → abort（fail-closed，留痕）
+          std::string const t = cppchain::wfr::trim(line);
+          if (t.empty() || t == "abort" || t == "a" || t == "q" || t == "quit") {
+            std::println("（已中止 —— 落 _cancelled 档。）");
+            resume = Json{{"action", "abort"}};
+          } else if (t == "continue" || t == "c") {
+            resume = Json{{"action", "continue"}};
+          } else if (t.starts_with("rollback_to") || t == "r" || t.starts_with("r ")) {
+            long to = 0;
+            for (char ch : t)
+              if (ch >= '0' && ch <= '9') to = to * 10 + (ch - '0');
+            resume = Json{{"action", "rollback_to"}, {"to", to}};
+          } else {
+            resume = Json{{"action", "abort"}};  // 未识别 → abort（fail-closed，留痕）
+          }
         }
         std::println("  → 裁决 {}", resume.dump());
       }

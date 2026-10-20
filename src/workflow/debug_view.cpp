@@ -47,7 +47,8 @@ Json debug_view_graph(WorkflowIR const& ir) {
         to = scope->exit_target;
       }
       bool const terminal = to == "__end__" || to == "__fail__" || to == "_turn_end" ||
-                            to == "_fail";
+                            to == "_fail" || to == "_timeout" || to == "_cancelled" ||
+                            to == "__timeout__" || to == "__cancelled__";
       edges.push_back(Json{{"from", n.id},
                            {"to", std::move(to)},
                            {"label", e.label},
@@ -306,7 +307,7 @@ function deriveRuns(records){
   // ③ 本轮走过的边：引擎 enter 序列里相邻两个执行节点 = 一条边（首个节点只记起点）。
   //    终端目标（_turn_end/_fail）不产生 enter，靠最后节点的 exit 里发布的 results.target，
   //    或"该节点在图上只有一条 terminal 出边"补 —— 两者都不明确就不猜。
-  const isTerm=t=>(t==='__end__'||t==='__fail__'||t==='_turn_end'||t==='_fail');
+  const isTerm=t=>(t==='__end__'||t==='__fail__'||t==='_turn_end'||t==='_fail'||t==='_timeout'||t==='_cancelled'||t==='__timeout__'||t==='__cancelled__');
   const out=[];
   order.forEach(k=>{
     const recs=byRun[k];

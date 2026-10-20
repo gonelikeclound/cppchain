@@ -1,0 +1,55 @@
+{
+  "id": "governed",
+  "description": "governed = 治理全链单 workflow（problems/33，对齐《Agent 执行治理总纲》）。批准→执行→账本→验证→终态四档。plan_review 人闸 + approve_tools 审批 + verify judge 三档(done/fail/unverified) + 批级独立终审；终态：完成(_turn_end)/失败(_fail)/超时(_timeout, loop on_max)/取消(_cancelled, plan_review abort)。",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "begin" },
+    { "id": "begin", "kind": "task", "task": "@config.task", "phase": "begin", "next": "plan" },
+    { "id": "plan", "kind": "plan",
+      "goal": "@config.goal",
+      "system_prompt": "你是【策划者 Planner】：把目标拆成不超过 3 个可执行步骤（每步一句可执行指令 + 落盘要求），不执行任务。",
+      "default_plan": {
+        "goal": "@config.goal",
+        "steps": [
+          { "id": "s1",
+            "goal": "用 file_write 写 .out/gov_artifact.md（内容含关键字 gov），再用 file_read 回读确认",
+            "deps": [],
+            "verify": { "kind": "probe", "path": ".out/gov_artifact.md", "contains": "gov" } },
+          { "id": "s2",
+            "goal": "给出本任务最终结论（一句话，注明落盘路径）",
+            "deps": ["s1"] }
+        ]
+      },
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 6, "next": "review", "on_max": "_timeout",
+      "body": [
+        { "id": "hitl", "kind": "plan_review", "next": "step" },
+        { "id": "step",  "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think", "kind": "model", "model": "main", "tools": "chat_bash",
+          "system_prompt": "你是【执行者 Executor】：只做当前这一步（读/查/写盘），产物落 .out/ 下，不评判对错。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "approve", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "approve", "kind": "approve_tools", "deny": [], "next": "act" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "model": "main", "role": "executor",
+          "system_prompt": "你是【步骤自查员】：按步骤 verify 判据核对（探针/规则/裁判），如实输出。",
+          "next": "jgate" },
+        { "id": "jgate", "kind": "expr",
+          "expr": "$judge.result.outcome == \"fail\"",
+          "then": "_fail", "else": "_continue" }
+      ] },
+    { "id": "review", "kind": "verify", "phase": "review", "model": "main", "role": "reviewer",
+      "criteria": "@config.mch_criteria",
+      "system_prompt": "你是【独立审查员 Reviewer】：只依据【步骤与判定】和【验收标准】独立判断整批。步骤判定为 unverified（未验证）的必须独立核对产物或明确放行理由，不得仅凭执行者自述放行。只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。",
+      "next": "gate" },
+    { "id": "gate", "kind": "expr",
+      "expr": "$review.result.verdict == \"fail\"",
+      "then": "_fail", "else": "final" },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "你是【解说者】：整合策划、执行、审查的结果给最终回答（简洁、有依据，勿夸大未验证内容）。",
+      "next": "end" },
+    { "id": "end", "kind": "task", "task": "@config.task", "phase": "end", "next": "_turn_end" }
+  ]
+}

@@ -169,6 +169,7 @@ std::vector<ToolSpec> make_trip_tools() {
                              return Res(validate_submit(j));
                            },
                            /*read_only=*/false);
+  sub.with_effect_class(EffectClass::Idempotent);  // 治理(problems/33)：确定性写 verdict，可安全重放
   out.push_back(std::move(sub));
   return out;
 }

@@ -56,7 +56,7 @@ ToolSpec build(ToolExecutor const* executor, std::optional<std::chrono::millisec
     if (!c) return CommandClass::Unknown;
     return classify_bash_command(*c);
   };
-  return spec;
+  return spec.with_effect_class(EffectClass::Irreversible);  // 治理(problems/33)：任意命令，不可安全重放
 }
 
 }  // namespace

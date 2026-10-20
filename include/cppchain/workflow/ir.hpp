@@ -24,6 +24,9 @@ using Json = nlohmann::json;
 // ---- M12：保留目标名（编译期映射，不是节点）----
 inline constexpr char kTurnEndName[] = "_turn_end";  // 正常终止
 inline constexpr char kFailName[] = "_fail";         // 以错误终止（route 的 fail-closed 档）
+// wfr-㊹ 治理（problems/33）：终态四档补齐 —— loop max 触达（超时）与用户取消（计划级 abort）
+inline constexpr char kTimeoutName[] = "_timeout";    // 超时终止（loop on_max 触达未收口）
+inline constexpr char kCancelledName[] = "_cancelled";  // 取消终止（plan_review abort / 用户中止）
 // ---- wfr-㉚：loop 体内的两个保留目标 ----
 inline constexpr char kContinueName[] = "_continue";  // 下一轮（回 loop 节点头；算回边）
 inline constexpr char kBreakName[] = "_break";        // 跳出循环（去 loop 的 next）

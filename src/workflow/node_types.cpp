@@ -1691,6 +1691,7 @@ bool judge_batch_review(Json const& plan, Json const& plan_log, std::string cons
       rev_sys.empty()
           ? "你是独立审查员。依据【验收标准】对【任务目标】的各步骤判定做独立复核。"
             "你只看步骤目标与步内判定，不偏信执行者的口头自述。"
+            "步骤判定为 unverified（未验证）的必须独立核对产物或明确放行理由，不得仅凭执行者自述放行。"
             "只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。"
           : rev_sys);
   message::Message const usr =
@@ -1717,8 +1718,12 @@ void c_plan_review(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const node_id = n.id;
   std::string const confirm_spec = n.confirm;
   std::string const break_target = ctx.goto_resolve ? ctx.goto_resolve(kBreakName) : kBreakName;
+  // 治理（problems/33）：取消 = 终态档 `_cancelled`（不再是"跳 loop 出口冒充完成"）
+  std::string const cancelled_target =
+      ctx.goto_resolve ? ctx.goto_resolve(kCancelledName) : kCancelledName;
   ctx.graph.add_node(
-      n.id, [node_id, confirm_spec, break_target](Json const& state, NodeContext& nc) {
+      n.id, [node_id, confirm_spec, break_target, cancelled_target](Json const& state,
+                                                                   NodeContext& nc) {
     Json plan = plan_from_state(state);
     Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
     long const cursor = plan.value("cursor", 0L);
@@ -1742,8 +1747,10 @@ void c_plan_review(NodeIR const& n, NodeType::CompileContext& ctx) {
     std::string done_summary;
     for (Json const& s : steps) {
       std::string const st = s.value("status", "pending");
-      if (st == "done")
-        done_summary += (s.value("id", "?") + std::string("✓ ") + s.value("goal", "") + "\n");
+      // 治理（problems/33）：unverified（完成但未验证）也计入进度摘录，HITL 人闸才看得到
+      if (st == "done" || st == "unverified")
+        done_summary += (s.value("id", "?") + std::string(st == "done" ? "✓ " : "◌ ") +
+                         s.value("goal", "") + "\n");
     }
     std::string const next_goal =
         cursor >= 0 && cursor < static_cast<long>(steps.size())
@@ -1777,18 +1784,18 @@ void c_plan_review(NodeIR const& n, NodeType::CompileContext& ctx) {
                               {"rolled", rolled}, {"priority", 1}});
       update[kPlanLogStateKey] = std::move(plan_log);
       results[node_id] = Json{{"action", "rollback_to"}, {"to", to}, {"rolled", rolled}};
-    } else {  // abort / 未知（fail-closed 按 abort）
-      plan["aborted"] = true;
+    } else {  // abort / 未知（fail-closed 按 abort）→ 治理统一取消档
+      plan["cancelled"] = true;
       for (auto& s : steps)
         if (s.is_object() && s.value("status", "pending") == "pending")
-          s["status"] = "aborted";
+          s["status"] = "cancelled";
       plan["steps"] = std::move(steps);
       update[kPlanStateKey] = plan;
-      plan_log.push_back(Json{{"kind", "abort"}, {"action", "abort"}});
+      plan_log.push_back(Json{{"kind", "cancel"}, {"action", "abort"}});
       update[kPlanLogStateKey] = std::move(plan_log);
       results[node_id] = Json{{"action", "abort"}};
       update[kResultsKey] = std::move(results);
-      return Command{std::move(update), {break_target}, {}};  // 中止 → 跳 loop 出口
+      return Command{std::move(update), {cancelled_target}, {}};  // 取消 → _cancelled 终端
     }
     update[kResultsKey] = std::move(results);
     return Command::with_update(std::move(update));
@@ -2155,7 +2162,10 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
                           {"why", "未知 verify kind: " + kind}};
       }
     } else {
-      verdict_obj = Json{{"step", id}, {"kind", "none"}, {"verdict", "done"}, {"why", "L1 无验证"}};
+      // wfr-㊹ 治理（problems/33）：无 verify 判据 → **unverified**（完成但未验证，L1 语义升级）。
+      // 不再当 done 静默通过 —— Reviewer 批级终审可据此问责（总纲 G5 裁决：ReAct+ANSWER 诚实标未验证）。
+      verdict_obj = Json{{"step", id}, {"kind", "none"}, {"verdict", "unverified"},
+                         {"why", "L1 无验证（无判据，诚实标注 unverified）"}};
     }
     // wfr-㊾：judge 落行的"谁判的"（审计角色），非空才写（既有 workflow 不带 role，不破坏）
     if (!judge_role.empty()) verdict_obj["role"] = judge_role;
@@ -2195,15 +2205,27 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
       }
     }
-    if (!auto_rolled)
-      steps[static_cast<std::size_t>(cursor)]["status"] = advance ? "done" : "failed";
+    if (!auto_rolled) {
+      // 治理（problems/33）：advance 时带判据→done、无判据→unverified（完成但未验证）
+      if (advance)
+        steps[static_cast<std::size_t>(cursor)]["status"] = has_verify ? "done" : "unverified";
+      else
+        steps[static_cast<std::size_t>(cursor)]["status"] = "failed";
+    }
     if (advance) cursor += 1;
     plan["steps"] = std::move(steps);
     plan["cursor"] = cursor;
     plan_log.push_back(std::move(verdict_obj));
+    // 治理（problems/33）：results 发布 verdict/outcome，供 expr 门（jgate/rgate）引用。
+    // outcome 用 auto_retry 区分 rollback_deps（否则被 jgate 误送 _fail）。
+    Json const outcome =
+        auto_rolled ? "auto_retry"
+                    : (advance ? (has_verify ? "done" : "unverified") : "fail");
     Json update{{kPlanStateKey, plan}, {kPlanLogStateKey, std::move(plan_log)},
                 {kResultsKey, Json{{node_id, Json{{"phase", "judge"}, {"cursor", cursor},
-                                                   {"count", plan["steps"].size()}}}}}};
+                                                   {"count", plan["steps"].size()},
+                                                   {"verdict", outcome},
+                                                   {"outcome", outcome}}}}}};
     (void)cursor;
     return Command::with_update(std::move(update));  // 静态 next=_continue → 回 loop 头；max=steps 收口
   });
@@ -2426,8 +2448,9 @@ void c_executor(NodeIR const& n, NodeType::CompileContext& ctx) {
       frame = Json{{"step", step_id}, {"goal", step_goal}, {"kind", "model"},
                    {"verdict", ok ? "done" : "fail"}, {"why", why}};
     } else {
+      // 治理（problems/33）：并行 Executor 无判据步同样诚实标 unverified（与串行 judge 一致）
       frame = Json{{"step", step_id}, {"goal", step_goal}, {"kind", "none"},
-                   {"verdict", "done"}, {"why", "L1 无验证（并行 Executor 无判据步）"}};
+                   {"verdict", "unverified"}, {"why", "L1 无验证（并行 Executor 无判据步）"}};
     }
     if (!role.empty()) frame["role"] = role;
     frame["artifacts"] = Json::array();  // 交接件产物引用（真机 .out/* 落盘断言的依据）
@@ -2500,7 +2523,8 @@ void c_parallel(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
       if (already) continue;  // 幂等：这批早就折过
       std::string const vd = h.value("verdict", "fail");
-      s["status"] = (vd == "done") ? "done" : "failed";
+      // 治理（problems/33）：三档 —— done / unverified（完成但未验证）/ failed
+      s["status"] = (vd == "done") ? "done" : (vd == "unverified") ? "unverified" : "failed";
       Json row = Json{{"step", sid}, {"kind", h.value("kind", "none")},
                       {"verdict", vd}, {"why", h.value("why", "")}};
       if (h.contains("role") && h["role"].is_string()) row["role"] = h["role"];
@@ -2511,11 +2535,13 @@ void c_parallel(NodeIR const& n, NodeType::CompileContext& ctx) {
       folded_any = true;
     }
     if (folded_any) {
-      // cursor 前移：跳过连续 done 步
+      // cursor 前移：跳过连续 done / unverified 步（完成或完成但未验证都算推进）
       long nc = start_cursor;
-      while (nc < static_cast<long>(steps.size()) &&
-             steps[static_cast<std::size_t>(nc)].value("status", "pending") == "done")
+      while (nc < static_cast<long>(steps.size())) {
+        std::string const st = steps[static_cast<std::size_t>(nc)].value("status", "pending");
+        if (st != "done" && st != "unverified") break;
         ++nc;
+      }
       plan["cursor"] = nc;
       plan["steps"] = std::move(steps);
       // 更新 par_dispatched（去掉已收拢的 id）
