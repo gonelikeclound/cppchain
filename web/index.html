@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wfr CGI · Agent 对话</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app" class="three-col">
+  <!-- 左栏：工作区 + 会话 -->
+  <aside class="side">
+    <div class="side-top">
+      <h1>wfr<span class="dim"> CGI</span></h1>
+      <select id="ws-select" title="工作区"></select>
+      <button id="new-session" class="ghost" title="新建会话">＋ 新会话</button>
+    </div>
+    <ul id="session-list"></ul>
+  </aside>
+
+  <!-- 中栏：消息流 + composer -->
+  <main class="main">
+    <header class="main-top">
+      <div class="crumb"><span id="title-ws">—</span><span class="sep">/</span><span id="title-s">—</span></div>
+      <div id="busy" class="busy hidden">发送中…</div>
+    </header>
+    <div id="messages" class="messages"></div>
+    <footer class="composer">
+      <textarea id="input" rows="1" placeholder="输入消息…（Enter 发送）"></textarea>
+      <button id="send">发送</button>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

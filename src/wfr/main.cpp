@@ -71,6 +71,12 @@ using cppchain::wfr::load_dotenv;
 namespace {
 
 
+// --stream 的辅助：StreamEvent → JSON（node_start/node_end/interrupt/values + payload）
+nlohmann::json ev_json(cppchain::graph::StreamEvent const& ev) {
+  return nlohmann::json{{"type", ev.type}, {"node", ev.node}, {"node_kind", ev.node_kind},
+                        {"step", ev.step}, {"payload", ev.payload}, {"ok", ev.ok}};
+}
+
 std::string last_ai_text(Json const& state) {
   if (!state.contains("messages") || !state["messages"].is_array()) return {};
   auto const& arr = state["messages"];
@@ -138,6 +144,7 @@ bool has_model_node(Json const& ir_json) {
 int main(int argc, char** argv) {
   std::string workdir = ".", session = "default", name_or_path, input;
   bool reset = false, allow_import = false;
+  bool stream_events = false;  // --stream：把引擎事件（node_start/node_end）逐条打 JSON 行到 stdout
   std::size_t max_parallel = 1;  // wfr-㊾ 批③：Send 并行波宽度（编译期选项）
   std::map<std::string, std::string> sets;
 
@@ -145,7 +152,7 @@ int main(int argc, char** argv) {
     std::println(
         "用法:\n"
         "  wfr <name-or-path> [--workdir DIR] [--session NAME] [--set key=value]... "
-        "[--max-parallel N] [--reset] [--allow-import] <query>...\n"
+        "[--max-parallel N] [--reset] [--allow-import] [--stream] <query>...\n"
         "  wfr list [--workdir DIR]\n"
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
@@ -309,6 +316,7 @@ int main(int argc, char** argv) {
       sets[kv.substr(0, eq)] = eq == std::string::npos ? std::string{} : kv.substr(eq + 1);
     } else if (a == "--reset") reset = true;
     else if (a == "--allow-import") allow_import = true;
+    else if (a == "--stream") stream_events = true;
     else if (a == "--max-parallel" && i + 1 < argc) {
       // 编译期并行度（不写 IR；host 决定）。非法值 → 报错（fail-closed，不用 0 当串行掩盖）。
       try { max_parallel = std::stoul(argv[++i]); }
@@ -619,6 +627,15 @@ int main(int argc, char** argv) {
   FireOptions fo;
   fo.log = &slog;
   fo.thread_id = "fire";  // wfr-㊸ @②：人审悬挂/恢复共用的线程（进程内 cp）
+  // --stream：引擎事件逐条打 JSON 行到 stdout（CGI/前端流式渲染思考/工具/文本的通道）。
+  // 事件含 node_start/node_end + node_kind + step + payload（= 节点 update，model→messages
+  // 含 AI/reasoning/tool_calls，run_tools→Tool 消息）。逐行 flush 保证边跑边出。
+  if (stream_events) {
+    fo.stream = [](cppchain::graph::StreamEvent const& ev) {
+      std::cout << ev_json(ev).dump() << '\n';
+      std::cout.flush();
+    };
+  }
   Json inp = Json::array();
   inp.push_back(message::human_message(input));
   fo.input_messages = std::move(inp);
@@ -778,11 +795,14 @@ int main(int argc, char** argv) {
 
   std::string answer = last_ai_text(result_state);
   message::sanitize_utf8(answer);  // 模型串流拼接可能带断字节：净化后完整打印（不截断）
-  std::println("\n{}", answer.empty() ? "(无文本回复)" : answer);
+  // --stream：事件流就是输出（CGI 按行解析 JSON），抑制人类可读打印避免污染。
+  if (!stream_events)
+    std::println("\n{}", answer.empty() ? "(无文本回复)" : answer);
   // wfr-㊷：副作用防护统计（验证陷阱纪律：计数/审计行数证明被测路径真被走到）
-  if (guard.has_log())
+  if (!stream_events && guard.has_log())
     std::println("副作用防护: 执行 {} · 重放 {} · fail-closed {} · 审计 {} 行",
                  guard.executions(), guard.replays(), guard.blocked(), audit_written);
-  std::println("会话已更新: {} 条消息", replay_session_messages(slog_path).size());
+  if (!stream_events)
+    std::println("会话已更新: {} 条消息", replay_session_messages(slog_path).size());
   return 0;
 }

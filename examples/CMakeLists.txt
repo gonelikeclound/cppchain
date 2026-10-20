@@ -100,3 +100,10 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_message)
   endif()
 endforeach()
+
+# ---- CGI WebUI（wfr-🈟 CGI 专题，discuss 17）----
+# cgi-bin/wfr_cgi：C++ CGI 可执行。独立 target（不走上面以 examples/<t>/main.cpp 命名的循环，
+# 也不进 run-demo 清单）。链接 workflow（replay_session_messages）+ tool（run_argv）。
+add_executable(wfr_cgi ../cgi-bin/wfr_cgi.cpp)
+target_link_libraries(wfr_cgi PRIVATE cppchain_workflow cppchain_tool)
+target_compile_options(wfr_cgi PRIVATE -Wall -Wextra -Wpedantic)

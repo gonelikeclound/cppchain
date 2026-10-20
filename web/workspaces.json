@@ -1,0 +1,5 @@
+{
+  "workspaces": [
+    { "name": "demo", "dir": "tmp/cgi_ws/demo" }
+  ]
+}

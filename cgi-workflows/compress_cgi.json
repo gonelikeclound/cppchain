@@ -1,0 +1,25 @@
+{
+  "id": "compress_cgi",
+  "description": "CGI WebUI 辅助 workflow：独立上下文压缩链（手动/按需调用）。load_history → summarize(detailed) 折叠 → refine_history(aggressive 规则裁剪) → echo 回报。零新 node 类型，全部现有节点。",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session",
+      "next": "summ" },
+    { "id": "summ", "kind": "summarize", "model": "main",
+      "when": "always",
+      "style": "detailed",
+      "summary_role": "human",
+      "keep_last": "@config.compress_keep_last",
+      "on_fail": "skip",
+      "next": "refine" },
+    { "id": "refine", "kind": "refine_history",
+      "preset": "aggressive",
+      "clip_scope": "both",
+      "tool_budget": "200",
+      "ai_budget": "400",
+      "next": "done" },
+    { "id": "done", "kind": "echo",
+      "text": "✅ 上下文已压缩（summ 折叠 + refine 规则裁剪），会话日志已落 fold/transform 事件",
+      "next": "_turn_end" }
+  ]
+}
