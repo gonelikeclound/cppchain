@@ -436,6 +436,9 @@ function appendTool(text) {
 // 解析一条事件：把 model/run_tools 的 node_end payload.messages 增量渲染（AI 文本 / 工具结果）
 function renderStreamEvent(e) {
   if (e.type !== "node_end") return;
+  // 跳过 load_history：它的 payload.messages 是**整段历史回放**（第 N 轮会把前 N-1 轮全量带上），
+  // 若当增量渲染会导致历史反复叠加（"AbCd→AbCad"）。历史由 selectSession 的 renderHistory 负责。
+  if (e.node_kind === "load_history") return;
   const msgs = (e.payload && e.payload.messages) || [];
   for (const m of msgs) {
     if (m.type === "ai") {
