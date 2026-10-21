@@ -1,0 +1,26 @@
+{
+  "id": "sidefx_mock_demo",
+  "nodes": [
+    { "id": "sfx_reg", "kind": "tool_registry", "next": "recall",
+      "tools": [ { "from": "sidefx_notify", "type": "so", "load": [
+        "mock_order_create","mock_wechat_send","mock_wechat_revoke",
+        "mock_sms_send","mock_call_dial","mock_call_connect",
+        "mock_call_hangup","mock_clock_forward" ] } ] },
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 5, "next": "_turn_end",
+      "body": [
+        { "id": "think", "kind": "model", "model": "main",
+          "system_prompt": "你是副作用演示助手（可逆性梯度测试）。工具与建议：\n· 下单 mock_order_create（幂等，同 order_id 再下会 existing）\n· 发微信 mock_wechat_send，撤回 mock_wechat_revoke（仅窗口内有效）\n· 发短信 mock_sms_send（不可撤回——发出即生效，没有反向工具）\n· 打电话 mock_call_dial（需审批）→ mock_call_connect 接通 → mock_call_hangup 挂断（接通前=取消、接通后=关闭）\n· 推进模拟时钟验证撤回窗口用 mock_clock_forward（seconds 正整数）\n如实报告工具结果；被拒绝/报错就说明原因（如：已过撤回窗口、通话已结束）。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "approve", "invalid_tool_calls": "_fail", "text": "_turn_end" },
+          "default": "_fail" },
+        { "id": "approve", "kind": "approve_tools", "deny": [],
+          "next": "act" },
+        { "id": "act", "kind": "run_tools", "next": "echo_tool" },
+        { "id": "echo_tool", "kind": "echo",
+          "text": "🔧 $act.result.summary", "next": "_continue" }
+      ] }
+  ]
+}

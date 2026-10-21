@@ -94,10 +94,14 @@ int mock_submit_result_run(char const* args, char** out, char** err) {
 int probe_hit(char const*) { return 0; }
 
 // ---- descriptor 工厂 ----
+// 注意：必须给每个工具**稳定的 descriptor 指针**。不用 thread_local —— 批量 dlsym 时
+// pending 阶段逐个调用 creator，thread_local 会让所有 creator 复用同一个 d（最后一次覆写），
+// 导致全部工具串成同一 handler。用进程期 static map（加载阶段宿主串行 creator()，无并发）。
 cppchain_tool_descriptor const* desc_for(char const* name, char const* desc,
                                         char const* params, int read_only, int effect,
                                         int approval, ToolRunFn handler, ToolProbeFn probe = nullptr) {
-  static thread_local cppchain_tool_descriptor d;  // 每 creator 调用一次，thread_local 免静态冲突
+  static std::unordered_map<std::string, cppchain_tool_descriptor> by_name;
+  cppchain_tool_descriptor& d = by_name[std::string(name)];
   d = cppchain_tool_descriptor{};
   d.name = name;
   d.version = kToolApiVersion;

@@ -111,6 +111,34 @@ std::vector<std::string> publish_workflow_dirs() {
   return out;
 }
 
+// 发布自带的定 tool 库目录（tool_registry 按 `lib<from>.so` 在此找）：三档，仿 publish_workflow_dirs：
+//   1) WFR_TOOL_LIB_DIRS 环境（':' 分隔多目录）
+//   2) 安装布局：<bin>/../lib（从 /proc/self/exe 推断）
+//   3) 编译期宏（开发构建 = tests 目录，由 tests/CMakeLists.txt 对 wfr 注入）兜底
+std::vector<std::string> publish_tool_lib_dirs() {
+  std::vector<std::string> out;
+  if (char const* env = std::getenv("WFR_TOOL_LIB_DIRS"); env && *env) {
+    std::string s(env);
+    std::size_t pos = 0;
+    while ((pos = s.find(':')) != std::string::npos) {
+      if (!s.substr(0, pos).empty()) out.push_back(s.substr(0, pos));
+      s.erase(0, pos + 1);
+    }
+    if (!s.empty()) out.push_back(s);
+  }
+  {
+    std::error_code ec;
+    auto const exe = std::filesystem::canonical("/proc/self/exe", ec);
+    if (!ec) {
+      std::filesystem::path const lib = exe.parent_path().parent_path() / "lib";
+      if (std::filesystem::is_directory(lib, ec)) out.push_back(lib.string());
+    }
+  }
+  if (WFR_TOOL_LIB_DIRS != nullptr && WFR_TOOL_LIB_DIRS[0] != '\0')  // 编译宏兜底（空则跳过）
+    out.push_back(WFR_TOOL_LIB_DIRS);
+  return out;
+}
+
 // 按名/路径定位 workflow 文件：显式路径存在 → 之；否则按 lookup 约定
 //（settings.workflow_dirs → ws → 全局 → 发布自带）名字查找。找不到 → nullopt。
 std::optional<std::string> locate(std::string const& workdir, std::string const& spec,
@@ -168,7 +196,9 @@ int main(int argc, char** argv) {
         "reasoning_echo=drop|tool_calls|always、reasoning_effort=…）。\n"
         "副作用 demo：approve_bash_demo（bash 人审悬挂/恢复；--set allow_prefixes=on 会话级"
         "allow 前缀复用，--set approve_policy=allow|deny|deny:<理由> 可 mock 人工审批免交互）、"
-        "sidefx_approve_demo（file_write deny 硬拦）。\n"
+        "sidefx_approve_demo（file_write deny 硬拦）、sidefx_mock_demo（可逆性梯度 mock："
+        "订单幂等/微信窗口可撤/短信不可撤/电话任状态可关 + 模拟时钟；需 tool_registry 动态库，"
+        "dev 构建自动命中，release 用 WFR_TOOL_LIB_DIRS env 指向 lib 目录）。\n"
         "<name> 查找顺序：显式路径 → <ws>/.wfr/settings.json 的 workflow_dirs → "
         "<ws>/.wfr/workflows → ~/.wfr/workflows → 发布自带。\n"
         "workspace 的 .wfr 路径本身不可被覆盖；settings 只能追加 workflow_dirs。\n"
@@ -597,9 +627,18 @@ int main(int argc, char** argv) {
   };
   tool::ExecutionGuard guard{std::move(guard_opts)};
 
+  // wfr-㊹ 治理（problems/34）：tool_registry 节点的共享注册表 + 动态库搜索目录。
+  //   shared_registry   —— tool_registry 运行期把 `*.so` 工具加载进它；独立于内置表，
+  //                        消费点（model/run_tools/approve_tools）共享优先、内置兜底。
+  //   tool_lib_dirs     —— 按 `lib<from>.so` 找库的目录；三档：env → 安装布局 → 编译宏。
+  tool::ToolRegistry shared_registry;
+  std::vector<std::string> const tool_lib_dirs = publish_tool_lib_dirs();
+
   CompileOptions opts;
   opts.components = &comps;
   opts.tool_policy = &guard;  // wfr-㊷：挂进 c_tool / c_run_tools 两个执行点
+  opts.shared_registry = &shared_registry;  // wfr-㊹：tool_registry 加载目标（可空则 workflow 里该节点报错）
+  if (!tool_lib_dirs.empty()) opts.tool_lib_dirs = &tool_lib_dirs;  // wfr-㊹：`lib<from>.so` 搜索目录
   opts.max_parallel = max_parallel;  // wfr-㊾ 批③：Send 并行波宽度（>1 时 parallel/executor 生效）
   // 不做 config_keys 白名单（生成器侧防护；wfr 跑手写/内置 workflow 由 --set 提供键）
   // wfr-㊸ @②：人审悬挂（interrupt）需要 checkpointer + thread_id。用**进程内**
@@ -689,6 +728,16 @@ int main(int argc, char** argv) {
       return 1;
     }
     result_state = *r;
+    // wfr-㊹：动态工具在 tool_registry 运行期才进共享表 → 治理自检延后到 fire 后复调
+    //（插件 descriptor 契约本已声明；这是纵深防御，防"新库漏声明"成为静默盲区）。
+    {
+      auto const v2 = tool::effect_class_violations(shared_registry);
+      if (!v2.empty()) {
+        std::println("治理自检失败：动态加载工具 read_only=false 未声明 effect_class：");
+        for (std::string const& n : v2) std::println("  - {}", n);
+        return 2;
+      }
+    }
     auto const& pend = wf->graph.last_interrupt();
     if (!pend.interrupted) break;  // 跑完（或本就不需要人审）
 

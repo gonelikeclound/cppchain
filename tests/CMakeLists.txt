@@ -144,6 +144,12 @@ target_include_directories(mock_tools PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(mock_tools SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
 target_compile_options(mock_tools PRIVATE -Wall -Wextra -Wpedantic)
 
+# wfr-㊹：副作用场景 mock 库（订单/微信可撤/短信不可撤/电话可关 + 模拟时钟），副作用测试专属
+add_library(sidefx_notify SHARED plugin_demo/sidefx_notify.cpp)
+target_include_directories(sidefx_notify PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(sidefx_notify SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(sidefx_notify PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(workflow_tests
   wf/expr_test.cpp
   wf/refs_test.cpp
@@ -156,6 +162,7 @@ add_executable(workflow_tests
   wf/agent_loop_test.cpp
   wf/side_effect_workflow_test.cpp
   wf/tool_registry_select_test.cpp
+  wf/sidefx_notify_test.cpp
   wf/approve_tools_test.cpp
   wf/approve_tools_interrupt_test.cpp
   wf/approve_tools_persist_test.cpp
@@ -196,11 +203,22 @@ target_compile_definitions(workflow_tests PRIVATE
   CPPCHAIN_NODE_DEMO_SO="$<TARGET_FILE:node_demo_plugin>"
   CPPCHAIN_NODE_ENUM_SO="$<TARGET_FILE:node_enum_plugin>"
   # wfr-㊹：mock_tools 动态工具库的**目录**（tool_registry 按 `lib<from>.so` 在此找库）
-  CPPCHAIN_MOCK_TOOLS_DIR="$<TARGET_FILE_DIR:mock_tools>")
-add_dependencies(workflow_tests node_demo_plugin node_enum_plugin mock_tools)
+  CPPCHAIN_MOCK_TOOLS_DIR="$<TARGET_FILE_DIR:mock_tools>"
+  # 副作用场景 mock 库目录（sidefx_notify_test.cpp 用它定位 + state_reset 隔离）
+  CPPCHAIN_SIDEFX_NOTIFY_DIR="$<TARGET_FILE_DIR:sidefx_notify>")
+add_dependencies(workflow_tests node_demo_plugin node_enum_plugin mock_tools sidefx_notify)
 
 target_compile_options(workflow_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(workflow_tests)
+
+# wfr-㊹：dev 构建让 wfr 真机能自动找到副作用 mock 库（tool_lib_dirs 编译宏兜底）。
+# 只在此 (tests ON) 环境下联动；release（tests OFF）靠 WFR_TOOL_LIB_DIRS env / 安装到 <prefix>/lib。
+if(TARGET wfr)
+  add_dependencies(wfr sidefx_notify)
+  target_compile_definitions(wfr PRIVATE
+    WFR_TOOL_LIB_DIRS="$<TARGET_FILE_DIR:sidefx_notify>")
+  install(TARGETS sidefx_notify LIBRARY DESTINATION lib)
+endif()
 
 # ---- 调试台页面 JS 的推导测试（wfr-㉟）----
 # 日志的推导（分组 / loop 迭代号 / 走过的边）在**页面里的 JS**（唯一实现，因为"拖入日志

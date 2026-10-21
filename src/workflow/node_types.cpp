@@ -1209,7 +1209,11 @@ void c_approve_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
         };
 
         for (message::ToolCall const& c : calls) {
+          // wfr-㊹：内置 registry 找不到 → 共享 registry 兜底（动态 mock 工具常驻 shared_tools）。
+          // 与 c_run_tools 的解析优先级对齐；再找不到才是"未知工具" fail-closed deny。
           tool::ToolSpec const* spec = reg ? reg->find(c.name) : nullptr;
+          if (spec == nullptr && nc.shared_tools != nullptr)
+            spec = static_cast<tool::ToolRegistry const*>(nc.shared_tools)->find(c.name);
           if (spec == nullptr) {
             // 未知工具 → fail-closed deny（ToolApproval"名单外放行"的兜底）
             std::string const why = "未知工具 '" + c.name + "'（不在注册表里），拒绝执行";

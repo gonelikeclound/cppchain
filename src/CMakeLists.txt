@@ -218,8 +218,12 @@ if(CPPCHAIN_WFR_STATIC_RUNTIME)
   message(STATUS "wfr: 静态链接 libstdc++/libgcc（发布构建）")
 endif()
 # 发布自带的固定 workflow 目录（编译期注入；开发构建 = 源码 share/wfr/workflows，安装后 = <prefix>/share/wfr/workflows）
+# WFR_TOOL_LIB_DIRS：tool_registry 动态库搜索目录兜底。默认空（空串被 publish_tool_lib_dirs 过滤）——
+# dev(tests ON) 时 tests/CMakeLists.txt 用 tests 目录覆盖注入；release(tests OFF) 请用 WFR_TOOL_LIB_DIRS env
+# 或安装 sidefx_notify 到 <prefix>/lib（runtime 自动并入）。
 target_compile_definitions(wfr PRIVATE
-  WFR_SHARE_WORKFLOWS_DIR="${PROJECT_SOURCE_DIR}/share/wfr/workflows")
+  WFR_SHARE_WORKFLOWS_DIR="${PROJECT_SOURCE_DIR}/share/wfr/workflows"
+  WFR_TOOL_LIB_DIRS="")
 set_target_properties(wfr PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
