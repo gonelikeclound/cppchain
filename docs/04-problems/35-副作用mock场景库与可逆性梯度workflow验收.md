@@ -71,3 +71,75 @@
 - 全仓 **763 全绿**（732 基线 + 31 新）。
 - `wfr debug sidefx_mock_demo --graph-only` 生成调试页（tool_registry 编译装配在 wfr 层通过）。
 - `wfr list` 显示 `sidefx_mock_demo`。
+
+## 附录 · 30 case 编排表（case → 测试 → 断言 → 工具）
+
+> 断言统一走**库内状态 + guard 计数（replays/blocked/executions）+ ToolMessage status**，
+> 不看模型嘴上（problems/03 §5 纪律）。`串行` = 用 `chain_loop_ir`（loop 每轮一个调用）驱动，
+> 避开 run_tools 同批并行竞态；其余用并行 4 节点链。
+
+### A 组 · tool_registry 装配与活动集（5）
+
+| # | 测试名 | 输入场景 | 断言要点 | 工具 |
+|---|---|---|---|---|
+| A1 | `A1_active_set_published_in_order` | 入口 tool_registry(so, 8 工具) 一次 fire | `results.treg.loaded` 与 `.active_tools` 均 == 声明序 8 名单 | tool_registry 节点 |
+| A2 | `A2_model_schema_equals_active_set` | 同左；model 无 toolset 组件 | `last_opts.tools` function.name == 活动集（8 把） | model 消费活动集 |
+| A3 | `A3_allowlist_rejects_non_active_tool` | 模型调用 `mock_ghost_tool`（非活动名） | allowlist 拒绝：error + 「不在本 workflow 的活动工具名单」，guard 不执行 | run 允许名单 |
+| A4 | `A4_so_source_runtime_load_shares_active` | `mock_order_create{O-A4}` | success exec + created（so 工具已加载进 shared 并被 run 消费） | mock_order_create |
+| A5 | `A5_no_tool_registry_zero_regression` | 无 tool_registry 的老 3 节点链 | model 空 schema；results 无 active_tools 帧 | — |
+
+### B 组 · 订单 · 幂等（5）
+
+| # | 测试名 | 输入场景 | 断言要点 | 工具 |
+|---|---|---|---|---|
+| B1 | `B1_order_create_succeeds_and_persists` | `mock_order_create{O1}` | success created；guard executions=1 | mock_order_create |
+| B2 | `B2_intent_residue_probe_complete_replays` | 先真建 O2 → 换 intent 残留 guard 同参 | probe Complete → **replay**（executions=0、replays≥1、文案含「已执行」） | guard+probe |
+| B3 | `B3_same_args_same_order_replays` | 库有 O3 + FakeLog completed | NameAndArgs 命中 → replay（executions=0、replays=1） | guard 重放 |
+| B4 | `B4_different_order_creates_new` | `mock_order_create{O4}` | executions=1 新订单 | mock_order_create |
+| B5 | `B5_probe_unknown_fail_closed_blocked` | `mock_order_create{?O5}`（`?`=Unknown 注入） | probe Unknown → **blocked**（blocked=1、executions=0） | probe 故障注入 |
+
+### C 组 · 微信 · 可撤回窗口（5）
+
+| # | 测试名 | 输入场景 | 断言要点 | 工具 |
+|---|---|---|---|---|
+| C1 | `C1_send_records_and_returns_msg` | `mock_wechat_send{M1}` | success sent；返回含 revoke_window_sec | mock_wechat_send |
+| C2 | `C2_revoke_within_window_succeeds` | 串行 send M2 → revoke M2 | send success；revoke 窗口内 success revoked | send + revoke |
+| C3 | `C3_revoke_out_of_window_errors` | 串行 send M3 → forward(500s) → revoke M3 | revoke error + 「已过撤回窗口」 | clock_forward 拨窗口 |
+| C4 | `C4_double_revoke_errors` | 串行 send → revoke → revoke 同 M4 | 首次 revoked success；二次 error + 「已撤回」 | revoke 幂等 |
+| C5 | `C5_revoke_result_referenceable` | 串行 send M5 → revoke M5 → text | act 帧有 summary（revoke 结果对下游 echo 可引用） | loop 链 echo |
+
+### D 组 · 短信 · 不可撤回（4）
+
+| # | 测试名 | 输入场景 | 断言要点 | 工具 |
+|---|---|---|---|---|
+| D1 | `D1_sms_send_irreversible` | `mock_sms_send{S1}` → 查 shared spec | success；`effect_class==Irreversible`、read_only=false | mock_sms_send |
+| D2 | `D2_no_reverse_tool_for_sms` | 一次 fire 看 schema | 含 "sms" 工具**只有** `mock_sms_send` 一把（无任何 revoke/undo） | 工具集无反向 |
+| D3 | `D3_sms_same_args_replays` | 真发 S3 + FakeLog completed 同参 | guard replay（executions=0、replays=1）——不可撤 = 至少不重发 | guard 重放 |
+| D4 | `D4_sms_intent_probe_complete_replays` | 真发 S4 + intent 残留 | probe Complete → replay（replays=1、executions=0） | guard+probe |
+
+### E 组 · 电话 · 任何状态可关闭（5）
+
+| # | 测试名 | 输入场景 | 断言要点 | 工具 |
+|---|---|---|---|---|
+| E1 | `E1_dial_to_ring` | `mock_call_dial{C1}` | success + ring 状态 | mock_call_dial |
+| E2 | `E2_hangup_before_connect_cancels` | 串行 dial → hangup C2 | hangup success + 「接通前取消」（未发生副作用） | dial + hangup |
+| E3 | `E3_hangup_after_connect_closes` | 串行 dial → connect → hangup C3 | hangup success + 「接通后关闭」（已发生通话） | dial+connect+hangup |
+| E4 | `E4_dial_intent_probe_complete_does_not_redial` | 真拨 C4 + intent 残留同参 | probe Complete → replay（replays=1、executions=0）不重呼 | guard+probe |
+| E5 | `E5_ended_call_ops_error` | 串行 dial → hangup → connect C5 | ended 后 connect → error + 「通话已结束」 | 状态机完整性 |
+
+### F 组 · 治理 · 审批 · guard 矩阵（4，5 节点 approve 链）
+
+| # | 测试名 | 输入场景 | 断言要点 | 工具 |
+|---|---|---|---|---|
+| F1a | `F1a_deny_builtin_tool_static_rejects` | approve deny `send_notification`；模型调它 | 审批静态拒绝 error；收件箱空（副作用被拦 in 审批链）；guard 未执行 | approve_tools deny |
+| F1b | `F1b_deny_mock_name_vn17_rejected` | approve deny `mock_sms_send` | VN17 校验期拒（deny 存在性只查内置表——限界） | VN17 限界 |
+| F2 | `F2_needhuman_dial_suspend_then_approve` | `mock_call_dial`（approval=NeedHuman）→ approve | interrupt 悬挂（payload calls 含 dial）→ resume approve → 执行 ring（guard executions=1） | approve 悬挂 |
+| F3 | `F3_read_only_tool_not_in_active_by_default` | 一次 fire 扫活动集 | 全部场景工具 read_only=false（无只读可测免审——预期如此） | 场景工具契约 |
+| F4 | `F4_probe_matrix_partial_blocked` | `mock_order_create{#O-F4}`（`#`=Partial 注入） | probe Partial → blocked（blocked=1、executions=0、error 回喂） | probe 故障注入 |
+
+### G 组 · 时序与状态隔离（2）
+
+| # | 测试名 | 输入场景 | 断言要点 | 工具 |
+|---|---|---|---|---|
+| G1 | `G1_clock_global_and_forward_idempotent` | 串行 forward(60)×2 | 首个 forwarded、第二个 already_applied（distinct N 幂等台账） | mock_clock_forward |
+| G2 | `G2_state_accumulates_independent_across_rounds` | 串行 order O-G2 / wechat M-G2 / dial C-G2 | 各自 success 且结果含各自对象名（互不串扰） | 全场景工具累积 |
