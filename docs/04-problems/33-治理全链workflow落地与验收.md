@@ -39,3 +39,21 @@
 
 ## 四、遗留与押后
 - irreversible 自动升审批/进 HITL payload（P1）；approve 边界 EOF 取消落档（P1）；_timeout/_cancelled 写任务档案终态（P1）；effect_class 自检覆盖 ⑤ 动态插件（文档注明复调 helper）；governed 真机对照（同任务带判据 vs 不带 + abort 一趟）待 LLM 环境跑。
+
+## 五、真机对照（2026-10-21，同 governed workflow × 三趟）
+
+> 同一 `governed` workflow，不同 `@config.plan_steps` 注入；`plan_confirm=false`（abort 趟除外）+ `approve_policy=allow`。
+> 工作区留档 `tmp/govcmp/ws_{judged,unv,abort}`；`export_lot_data.py` 可导出 verdicts 与 terminal。
+
+| 趟 | plan_steps | 步骤 verdict | 批级 review | 终态 |
+|---|---|---|---|---|
+| **带判据** | s1/s2 都带 `verify:{probe}` | `done / done`（probe 命中，产物落盘） | done | 完成档（无 terminal） |
+| **不带判据** | s1/s2 无 verify | `unverified / unverified`（诚实标注） | **fail**（"均未提供可独立核对的产物"）→ gate → `_fail` | 失败档 |
+| **abort** | s1/s2 无 verify + 确认门打开 | —（第一步悬挂） | — | **`plan.cancelled=True + terminal=cancelled`** + plan_log `{kind:cancel}`/`{kind:terminal}` |
+
+**治理思想真机兑现**（对照总纲 G5 / G7）：
+1. **无判据步诚实标 unverified**（不再静默 done）——带判据 vs 不带判据 verdict 差异清晰：`done/done` vs `unverified/unverified`。
+2. **Reviewer 拒绝凭自述放行**——不带判据趟 review 判 fail（"无法独立核对产物"）→ `_fail`，正是"ReAct+ANSWER 的 L4 真空由独立复核把守"。
+3. **取消档成档**——stdin `abort` → `plan.cancelled + terminal=cancelled` + plan_log 双行（修复旧"取消不成档"缺口：EOF/quit 不再 return 0 悬挂残留）。
+
+**已知边界**：`approve_policy=allow` 会把 plan_review 确认门 mock 成 continue（HITL 与审批都吃该策略）——abort 趟需 `approve_policy` 缺省（prompt）才能人工取消；这是 mock 策略的既有语义。
