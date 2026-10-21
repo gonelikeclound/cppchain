@@ -26,11 +26,22 @@ Message error_tool_message(std::string const& tool_call_id, std::string const& t
 
 }  // namespace
 
+// wfr-㊹ 治理（problems/34）：共享优先、内置兜底（动态工具可覆盖同名内置 → mock 顶替真工具）
+ToolSpec const* ToolNode::find(std::string_view name) const {
+  if (registry_ != nullptr) {
+    if (ToolSpec const* s = registry_->find(name); s != nullptr) return s;
+  }
+  if (fallback_ != nullptr) {
+    if (ToolSpec const* s = fallback_->find(name); s != nullptr) return s;
+  }
+  return nullptr;
+}
+
 Message ToolNode::execute_one(ToolCall const& call) const {
   ToolContext ctx;
   ctx.tool_call_id = call.id;
 
-  ToolSpec const* spec = (registry_ != nullptr) ? registry_->find(call.name) : nullptr;
+  ToolSpec const* spec = find(call.name);
   if (spec == nullptr) {
     if (!opts_.catch_errors) throw ToolException("unknown tool: " + call.name);
     return error_tool_message(call.id, "unknown tool: " + call.name);

@@ -170,7 +170,9 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   std::string compile_error;
   // 一份 cctx 复用（registered 要累加），只按当前作用域换 resolve。
   NodeType::CompileContext cctx{g, &registry, opts.components, resolve, nullptr, 0, {}, sink};
-  cctx.guard = opts.tool_policy;  // wfr-㊷：副作用执行点防护（null = 不防护）
+  cctx.guard = opts.tool_policy;              // wfr-㊷：副作用执行点防护（null = 不防护）
+  cctx.shared_registry = opts.shared_registry;  // wfr-㊹：共享工具注册表（tool_registry 用）
+  cctx.tool_lib_dirs = opts.tool_lib_dirs;      // wfr-㊹：动态工具库搜索路径（from 定位用）
   std::function<void(std::vector<NodeIR> const&, LoopScope const*)> compile_list =
       [&](std::vector<NodeIR> const& nodes, LoopScope const* scope) {
         for (NodeIR const& n : nodes) {
@@ -270,7 +272,8 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   g.set_entry_point(entry);
 
   // 5) 编译（cp 可空）。配好 max_steps / max_parallel 兜底。
-  auto compiled = g.compile(cp, graph::CompileOptions{opts.max_steps, opts.max_parallel});
+  auto compiled = g.compile(cp, graph::CompileOptions{opts.max_steps, opts.max_parallel,
+                                                       opts.shared_registry});
   if (!compiled)
     return std::unexpected(WorkflowError{WorkflowError::Kind::Compile, compiled.error().message});
 

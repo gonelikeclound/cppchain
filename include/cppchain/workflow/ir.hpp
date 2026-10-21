@@ -87,6 +87,9 @@ enum class NodeKind {
   Executor, // 复合 worker：一次节点调用完成「模型 → 工具 → 自查」，是 `parallel` 扇出的 Send 目标
   Parallel, // 扇出+收拢编排：按 plan 步骤的 deps 把互不依赖的步以 Send 派给 Executor；join 后
             // 幂等收拢（唯一写 plan/plan_log 者），全 done → _break。宿主决定 max_parallel（IR 不写）
+  // ---- wfr-㊹ 治理：动态工具源（见 02-arch-design/24，problems/34）----
+  ToolRegistry, // 声明一组工具源（{from,type,load}），运行期加载进共享 ToolRegistry →
+                // NodeContext.shared_tools；think/run_tools 从 context 取（共享优先、内置兜底）
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -194,6 +197,14 @@ struct NodeIR {
   std::string criteria;  // verify phase=review（wfr-㊾）：批级判据（可 @config.*，缺省空 = 用 plan.goal）
   // wfr-㊾ 批③：parallel 节点扇出 Send 的目标节点 id（= Executor 节点），见 c_parallel
   std::string target;
+  // wfr-㊹ 治理（problems/34）：tool_registry 节点的工具源声明
+  // [{from:"mock_tools", type:"so",   load:["mock1","mock2"]}]（加载 .so 动态工具）
+  // [{from:"builtin",   type:"select",load:["web_search","bash"]}]（仅激活内置工具，
+  //  定义留在宿主内置注册表，不拷贝；load 名编译/校验期必须能于内置表解析）
+  // 两类源的 load 并集 = **活动工具集**，由节点发布进 results.<id>.active_tools，
+  // model/run_tools 从 context 取（共享优先、内置兜底）。from/type/load 结构二者共用。
+  struct ToolSource { std::string from; std::string type; std::vector<std::string> load; };
+  std::vector<ToolSource> tool_sources;
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

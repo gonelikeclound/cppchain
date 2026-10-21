@@ -260,6 +260,7 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
               wctx.mode = mode_;
               wctx.seq = &last_seq_;
               wctx.emit_mu = emit_mu_.get();  // delta 直发：seq 分配 + sink 投递在锁内
+              wctx.shared_tools = opts_.shared_tools;  // wfr-㊹：并行波成员同样注入共享工具注册表
               // resume 不注入并行波成员（波内 interrupt 被拒，见下）
               Command mc;
               try {
@@ -402,6 +403,7 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
     ctx.sink = &sink_;
     ctx.mode = mode_;
     ctx.seq = &last_seq_;
+    ctx.shared_tools = opts_.shared_tools;  // wfr-㊹：workflow 共享工具注册表（tool_registry 注入）
     // resume 只注入**重跑包**（is_restart 标记），避免误给同节点的其它 Send 包
     if (resuming_interrupt && node == interrupt_node && pkt.is_restart)
       ctx.pending_resume = opts.resume;

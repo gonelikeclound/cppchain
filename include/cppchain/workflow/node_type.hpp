@@ -77,6 +77,13 @@ struct NodeType {
     // wfr-㊷：副作用执行点防护（非拥有；null = 不防护）。c_tool / c_run_tools 编译时捕获，
     // 运行期在工具执行点调用。由 CompileOptions::tool_policy 注入。
     tool::ExecutionGuard const* guard = nullptr;
+    // wfr-㊹ 治理（problems/34）：workflow 共享工具注册表（非拥有；null = 无动态源）。
+    // `tool_registry` 节点编译期捕获它（运行期 dlopen 加载工具进共享 registry）；
+    // 由 CompileOptions::shared_registry 注入。同时透传给 graph CompileOptions →
+    // NodeContext.shared_tools（c_model / c_run_tools 运行期取）。
+    tool::ToolRegistry* shared_registry = nullptr;
+    // wfr-㊹ 治理：动态工具库搜索路径（tool_registry 的 from 在这些目录里找 lib<from>.so）
+    std::vector<std::string> const* tool_lib_dirs = nullptr;
   };
   std::function<void(NodeIR const&, CompileContext&)> compile;
 

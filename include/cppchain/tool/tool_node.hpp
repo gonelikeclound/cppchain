@@ -20,7 +20,12 @@ struct ToolNodeOptions {
 class ToolNode {
  public:
   explicit ToolNode(ToolRegistry const* registry, ToolNodeOptions opts = {})
-      : registry_(registry), opts_(opts) {}
+      : registry_(registry), fallback_(nullptr), opts_(opts) {}
+
+  // wfr-㊹ 治理（problems/34）：双指针 —— primary（共享动态工具，可 null）+ fallback（内置）。
+  // 查找 primary 优先、fallback 兜底（同名工具动态胜出 → mock 可顶替真工具做离线对照）。
+  ToolNode(ToolRegistry const* primary, ToolRegistry const* fallback, ToolNodeOptions opts = {})
+      : registry_(primary), fallback_(fallback), opts_(opts) {}
 
   // 执行 AI 消息里的全部 tool_calls（顺序与 tool_calls 一致）
   [[nodiscard]] std::vector<message::Message> run(message::Message const& ai_message) const {
@@ -29,12 +34,17 @@ class ToolNode {
 
   [[nodiscard]] std::vector<message::Message> run(std::span<message::ToolCall const> calls) const;
 
+  // 共享优先、内置兜底的工具查找（tool_registry 动态工具可覆盖同名内置）。
+  // 公开：c_run_tools 的 guard 路径也要用（联合查找 spec 供 guard.prepare）。
+  [[nodiscard]] ToolSpec const* find(std::string_view name) const;
+
   [[nodiscard]] ToolNodeOptions const& options() const { return opts_; }
 
  private:
   [[nodiscard]] message::Message execute_one(message::ToolCall const& call) const;
 
-  ToolRegistry const* registry_;
+  ToolRegistry const* registry_;   // primary（共享动态，可 null）
+  ToolRegistry const* fallback_;   // 内置兜底
   ToolNodeOptions opts_;
 };
 

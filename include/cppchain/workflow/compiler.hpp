@@ -62,6 +62,18 @@ struct CompileOptions {
   // wfr-㊷：副作用执行点防护（非拥有；null = 不防护）。编译期注入 CompileContext.guard，
   // c_tool / c_run_tools 在工具执行点调用（防重放 / 幂等 / probe）。宿主负责构造并保活。
   tool::ExecutionGuard const* tool_policy = nullptr;
+
+  // wfr-㊹ 治理（problems/34）：workflow 层共享工具注册表（非拥有；null = 无动态源）。
+  // `tool_registry` 节点运行期把**动态（so）工具**加载进它，并透传给 graph::CompileOptions
+  // 让引擎注入 NodeContext.shared_tools —— c_model / c_run_tools 运行期取共享优先、内置兜底。
+  // select（内置选择）源**不拷贝定义**：只把名字加入活动工具集（发布进 results.active_tools），
+  // 定义仍从宿主内置 registry 解析。宿主负责构造并保活；
+  // tool_registry 须为 workflow 起始/先于所有消费节点（find 指针稳定性 + 活动集先发布）。
+  tool::ToolRegistry* shared_registry = nullptr;
+
+  // wfr-㊹ 治理（problems/34）：动态工具库搜索路径（非拥有；null = 默认空 → 只按相对/绝对路径）。
+  // tool_registry 的 from 是纯库名，宿主在这些目录里找 `lib<from>.so`（通用机制，不指向具体库）。
+  std::vector<std::string> const* tool_lib_dirs = nullptr;
 };
 
 struct CompiledWorkflow {

@@ -61,4 +61,11 @@ class ToolRegistry {
   return out;
 }
 
+// wfr-㊹ 治理（problems/34）：从一个动态库加载一批工具（dlopen → 逐 name dlsym creator → 校验 →
+// 宿主侧组装 ToolSpec）。语义对齐 workflow/plugin.cpp：fail-closed（任一失败整体失败）、
+// 跨 DSO 用裸 C 函数指针 + C 字符串 schema（std::function 宿主侧构造）、库进程期持有不 dlclose。
+// 返回宿主侧构造的 ToolSpec 列表（调用方 ToolRegistry::add 进共享/节点 registry）。
+[[nodiscard]] std::expected<std::vector<ToolSpec>, std::string>
+load_dynamic_tools(std::string const& lib_path, std::vector<std::string> const& names);
+
 }  // namespace cppchain::tool

@@ -127,6 +127,11 @@ struct NodeContext {
   void emit(std::string_view type, Json payload);
 
   std::mutex* emit_mu = nullptr;  // 并行波 worker 注入事件发射互斥；串行路径可为空
+
+  // wfr-㊹ 治理（problems/34）：workflow 层共享工具注册表（tool_registry 节点加载的动态工具）。
+  // 不透明指针（graph 层不依赖 tool 层）；由 engine 从 CompileOptions 注入，workflow 节点
+  //（c_model / c_run_tools / c_tool_registry）自行 cast 使用。null = 无动态工具源（既有行为）。
+  void* shared_tools = nullptr;
 };
 
 using NodeFn = std::function<Command(Json const& state, NodeContext& ctx)>;
@@ -169,6 +174,9 @@ struct CompileOptions {
   // 并行波（wfr-㊾ 批②）：一个 Command 的 sends（size>1）在 worker 线程上并发执行。
   // 1 = 串行（既有语义，逐包 FIFO）；>1 = 波内成员并行，join 后按 send 声明序归约回主 state。
   std::size_t max_parallel = 1;
+  // wfr-㊹ 治理（problems/34）：workflow 层共享工具注册表（tool_registry 加载的动态工具）。
+  // 每次 invoke 注入 NodeContext.shared_tools（不透明指针，graph 层不解释）；null = 无动态源。
+  void* shared_tools = nullptr;
 };
 
 class CompiledGraph;

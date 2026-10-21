@@ -29,6 +29,7 @@
 #include "cppchain/tool/command_classify.hpp"  // wfr-㊸ ⑤：allow 前缀按类别封顶
 #include "cppchain/tool/exec_guard.hpp"
 #include "cppchain/tool/tool_node.hpp"
+#include "cppchain/tool/tool_plugin.hpp"  // wfr-㊹：动态工具描述符/loader（tool_registry 用）
 #include "cppchain/workflow/expr.hpp"
 #include "cppchain/workflow/ir_walk.hpp"
 #include "cppchain/workflow/refs.hpp"
@@ -578,6 +579,32 @@ std::string last_ai_outcome(Json const& state) {
   return {};
 }
 
+// ---- wfr-㊹ 治理（problems/34）：活动工具集 ----
+// tool_registry 节点在 workflow 起始处发布 `results.<id>.active_tools`，think/run 从此取。
+// 扫 state["results"] 全帧收集该字段求并集（保序去重）；没有任何帧带它 → nullopt
+//（走既有 toolset 组件 / 编译期快照路径 = 零回归分支）。
+struct ActiveTools {
+  std::vector<std::string> order;        // 保序去重活动名（model schema 顺序）
+  std::unordered_set<std::string> set;   // 名称集合（run_tools 允许名单查重）
+  [[nodiscard]] bool empty() const { return order.empty(); }
+};
+std::optional<ActiveTools> scan_active_tools(Json const& state) {
+  auto const res = state.find(kResultsKey);
+  if (res == state.end() || !res->is_object()) return std::nullopt;
+  ActiveTools out;
+  for (auto const& [k, v] : res->items()) {
+    if (!v.is_object()) continue;
+    auto const it = v.find("active_tools");
+    if (it == v.end() || !it->is_array()) continue;
+    for (auto const& name : *it)
+      if (name.is_string()) {
+        std::string const s = name.get<std::string>();
+        if (out.set.insert(s).second) out.order.push_back(s);
+      }
+  }
+  return out.set.empty() ? std::nullopt : std::optional<ActiveTools>(std::move(out));
+}
+
 // ---- 出边（通用图规则的唯一输入）----
 
 std::vector<NodeType::Edge> e_tool(NodeIR const& n) {
@@ -790,23 +817,60 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     return;
   }
   Json tools_json = Json::array();
+  std::vector<std::string> toolset_names;  // wfr-㊹：共享 registry 存在时按此名单重建 schema
   if (!n.toolset.empty() && ctx.components != nullptr)
-    if (auto const* ts = ctx.components->toolset(n.toolset); ts != nullptr)
-      for (std::string const& tname : *ts)
+    if (auto const* ts = ctx.components->toolset(n.toolset); ts != nullptr) {
+      for (std::string const& tname : *ts) {
+        toolset_names.push_back(tname);
         if (auto const* sp = ctx.registry->find(tname); sp != nullptr)
           tools_json.push_back(sp->to_openai());
+      }
+    }
   std::string const sys = n.system_prompt;
   std::string const model_name = n.model;
   Json const params = n.model_params;          // wfr-㉙：运行期解析后并入 CallOptions.extra
   std::string const echo_spec = n.reasoning_echo;
   auto sink_p = ctx.sink;  // 触发期注入的 NodeLog（docs/12 §6.4：source=node 的诊断日志）
 
-  ctx.graph.add_node(n.id, [m, tools_json, sys, model_name, params, echo_spec, sink_p,
-                            node_id = n.id](Json const& state, NodeContext& nc) {
+  ctx.graph.add_node(
+      n.id, [m, tools_json, toolset_names, sys, model_name, params, echo_spec, sink_p,
+             node_id = n.id, reg = ctx.registry](Json const& state, NodeContext& nc) {
     std::vector<message::Message> msgs = messages_from_state(state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
     model::CallOptions co;
-    co.tools = tools_json;
+    // wfr-㊹ 治理（problems/34）：共享工具注册表存在时，按 toolset 名单**运行期重建** schema
+    //（共享优先、内置兜底，mock 工具可覆盖同名内置）；否则用编译期快照（既有行为）。
+    // wfr-㊹ select：tool_registry 发布的活动工具集**优先于** toolset 组件 ——
+    // 逐名取定义（共享→内置兜底），取不到即 fail-closed（正常编排不可达：select 名
+    // 编译期已验、so 名已加载进共享表）。
+    tool::ToolRegistry const* shared =
+        (nc.shared_tools != nullptr) ? static_cast<tool::ToolRegistry const*>(nc.shared_tools)
+                                     : nullptr;
+    if (auto act = scan_active_tools(state); act != std::nullopt && !act->empty()) {
+      Json live = Json::array();
+      for (std::string const& name : act->order) {
+        tool::ToolSpec const* sp = (shared != nullptr) ? shared->find(name) : nullptr;
+        if (sp == nullptr && reg != nullptr) sp = reg->find(name);
+        if (sp == nullptr)
+          throw tool::ToolException("model 节点 '" + node_id + "'：活动工具 '" + name +
+                                    "' 在共享/内置注册表都取不到定义");
+        live.push_back(sp->to_openai());
+      }
+      co.tools = std::move(live);
+    } else if (shared != nullptr && !toolset_names.empty()) {
+      Json live = Json::array();
+      for (std::string const& tname : toolset_names) {
+        if (tool::ToolSpec const* sp = shared->find(tname); sp != nullptr)
+          live.push_back(sp->to_openai());
+        else if (reg != nullptr) {
+          if (tool::ToolSpec const* bp = reg->find(tname); bp != nullptr)
+            live.push_back(bp->to_openai());
+        }
+      }
+      co.tools = std::move(live);
+    } else {
+      co.tools = tools_json;
+    }
     // 厂商私有参数：逐键解析引用；解析为 null（@config 缺键）的**顶层键直接丢弃** ——
     // 不把 "reasoning_effort": null 发给端点（那会被当成显式设值）。
     for (auto it = params.begin(); it != params.end(); ++it) {
@@ -907,11 +971,16 @@ void c_route(NodeIR const& n, NodeType::CompileContext& ctx) {
 }
 
 void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
-  tool::ToolNode tn(ctx.registry);  // 复用 M3 的实现（并行、顺序对齐、错误回喂）
+  tool::ToolNode tn(ctx.registry);  // 复用 M3 的实现（并行、顺序对齐、错误回喂）——内置 registry 兜底
   tool::ExecutionGuard const* guard = ctx.guard;  // wfr-㊷：副作用防护（null = 不防护）
   tool::ToolRegistry const* reg = ctx.registry;
   ctx.graph.add_node(
-      n.id, [tn, guard, reg, node_id = n.id](Json const& state, NodeContext&) {
+      n.id, [tn, guard, reg, node_id = n.id](Json const& state, NodeContext& nc) {
+        // wfr-㊹ 治理（problems/34）：共享工具优先 + 内置兜底（nc.shared_tools 由 tool_registry 注入）
+        tool::ToolRegistry const* shared =
+            (nc.shared_tools != nullptr) ? static_cast<tool::ToolRegistry const*>(nc.shared_tools)
+                                         : nullptr;
+        tool::ToolNode tn_eff = (shared != nullptr) ? tool::ToolNode(shared, reg) : tn;
         // 找最后一条 AI 消息：它（若在位置 i）之后的 ToolMessage 视为"已回执的调用"
         std::vector<message::ToolCall> calls;
         auto const msgs = messages_from_state(state);
@@ -960,38 +1029,66 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
           }
         }
 
-        std::vector<message::Message> tool_msgs;
+        // wfr-㊹ select：活动工具集允许名单（state 里 tool_registry 发布的 active_tools）。
+        // 非活动名调用 → 拒绝执行（error ToolMessage 回喂，对齐 approve_tools denied 语义）。
+        // 拒绝必须发生在这里（guard.prepare 之前）——被拒调用不进 guard（与 done_ids 过滤同位置）。
+        std::vector<message::ToolCall> const all_calls = calls;  // 过滤后的原序（by_id/summary 用）
+        std::vector<message::ToolCall> to_exec;
+        std::vector<char> denied;  // 与 all_calls 对齐：1 = 拒绝（不执行）
+        if (auto act = scan_active_tools(state); act != std::nullopt && !act->empty()) {
+          denied.assign(all_calls.size(), 0);
+          for (std::size_t i = 0; i < all_calls.size(); ++i)
+            if (act->set.count(all_calls[i].name) > 0) to_exec.push_back(all_calls[i]);
+            else denied[i] = 1;
+        } else {
+          to_exec = all_calls;  // 无活动集 → 全部执行（旧路径零回归）
+        }
+
+        std::vector<message::Message> exec_msgs;  // 与 to_exec 对齐
         if (guard == nullptr) {
-          // 原路：ToolNode 自己并行执行（无防护时的行为与现状完全一致）
-          tool_msgs = tn.run(calls);
+          // 原路：ToolNode 自己并行执行；有共享 registry 时用「共享优先+内置兜底」的 tn_eff
+          exec_msgs = tn_eff.run(to_exec);
         } else {
           // wfr-㊷：先**串行 prepare** 全部（审批/查重/登记意图，单线程访问日志与审计），
           // 放行的再**并行 run**（handler 直跑，不碰日志 → 并行安全）。顺序按下标回填。
-          std::size_t const width = std::max<std::size_t>(1, tn.options().max_parallel);
+          std::size_t const width = std::max<std::size_t>(1, tn_eff.options().max_parallel);
           struct Plan {
             tool::ExecutionGuard::Prepared prep;
             tool::ToolSpec const* spec = nullptr;
           };
-          std::vector<Plan> plans(calls.size());
-          for (std::size_t i = 0; i < calls.size(); ++i) {  // 串行段
-            plans[i].spec = reg ? reg->find(calls[i].name) : nullptr;
+          std::vector<Plan> plans(to_exec.size());
+          for (std::size_t i = 0; i < to_exec.size(); ++i) {  // 串行段
+            // 治理：共享优先、内置兜底（动态工具可覆盖同名内置 —— mock 顶替真工具）
+            plans[i].spec = tn_eff.find(to_exec[i].name);
             plans[i].prep =
-                guard->prepare(calls[i], plans[i].spec, "model",
-                               approved_ids.count(calls[i].id) > 0);  // ⑤：人审放行 ≠ 重复拦
+                guard->prepare(to_exec[i], plans[i].spec, "model",
+                               approved_ids.count(to_exec[i].id) > 0);  // ⑤：人审放行 ≠ 重复拦
           }
-          tool_msgs.resize(calls.size());
-          for (std::size_t base = 0; base < calls.size(); base += width) {  // 并行段
-            std::size_t const end = std::min(base + width, calls.size());
+          exec_msgs.resize(to_exec.size());
+          for (std::size_t base = 0; base < to_exec.size(); base += width) {  // 并行段
+            std::size_t const end = std::min(base + width, to_exec.size());
             std::vector<std::future<message::Message>> batch;
             batch.reserve(end - base);
             for (std::size_t i = base; i < end; ++i) {
               batch.push_back(std::async(std::launch::async, [&, i] {
                 if (!plans[i].prep.execute) return plans[i].prep.report;  // 重放/拦截 → 报告
-                return guard->run(calls[i], plans[i].spec, calls[i].args);  // 真执行
+                return guard->run(to_exec[i], plans[i].spec, to_exec[i].args);  // 真执行
               }));
             }
-            for (std::size_t i = base; i < end; ++i) tool_msgs[i] = batch[i - base].get();
+            for (std::size_t i = base; i < end; ++i) exec_msgs[i] = batch[i - base].get();
           }
+        }
+        // 按 all_calls 原序归并：被拒调用 → error ToolMessage 回喂（summary/审计可见工具名）
+        std::vector<message::Message> tool_msgs;
+        tool_msgs.reserve(all_calls.size());
+        std::size_t ei = 0;
+        for (std::size_t i = 0; i < all_calls.size(); ++i) {
+          if (!denied.empty() && denied[i])
+            tool_msgs.push_back(message::tool_message(
+                "工具 '" + all_calls[i].name + "' 不在本 workflow 的活动工具名单里，拒绝执行",
+                all_calls[i].id, "error"));
+          else
+            tool_msgs.push_back(std::move(exec_msgs[ei++]));
         }
         Json arr = Json::array();
     for (message::Message& m : tool_msgs) {
@@ -1001,8 +1098,9 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
       arr.push_back(m);
     }
     // 发布可引用 result（echo 节点 $引用打印）：每个工具调用的 名字(参数) → 结果截断
+    // 用 all_calls 建索引：被活动集拒绝的调用也有名字/参数可显示（而非裸 "tool"）。
     std::unordered_map<std::string, message::ToolCall const*> by_id;
-    for (auto const& tc : calls) by_id[tc.id] = &tc;
+    for (auto const& tc : all_calls) by_id[tc.id] = &tc;
     Json summary = Json::array();
     for (message::Message const& m : tool_msgs) {
       std::string name = "tool", args;
@@ -2677,6 +2775,108 @@ void c_parallel(NodeIR const& n, NodeType::CompileContext& ctx) {
   // 不注册静态边：路由全靠 Command（sends / goto _break / 空自灭）。同 c_loop 的手法。
 }
 
+// ================= wfr-㊹ 治理：tool_registry（动态工具源，problems/34）=================
+// 声明一组工具源（{from,type,load}）。两种源：
+//   · type="so"   —— 运行期 dlopen `lib<from>.so` 加载列出的工具进**共享 ToolRegistry**
+//     （NodeContext.shared_tools 的持有者）；动态工具可顶替同名内置（mock 对照）。
+//   · type="select" from="builtin" —— **仅激活**内置工具（不拷贝定义，定义留在宿主内置表），
+//     load 名在编译/校验期必须能于内置注册表里解析。
+// 本节点把**活动工具名单**（两类源的 load 并集）发布进 `results.<id>.active_tools`，
+// think/model 与 run_tools 从 context 取（共享优先、内置兜底）；无本节点 → 零回归。
+// 注意：须排在所有消费节点之前（find 指针稳定性 + 运行期先发布 active_tools）。
+void v_tool_registry(NodeIR const& n, NodeType::ValidateContext const& ctx,
+                     NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN23", "tool_registry 节点 '" + n.id + "' 缺少 next");
+  if (n.tool_sources.empty()) err("VN23", "tool_registry 节点 '" + n.id + "' 缺 tools（工具源声明）");
+  for (auto const& s : n.tool_sources) {
+    if (s.from.empty()) err("VN23", "tool_registry 节点 '" + n.id + "' 的 from 为空");
+    if (s.type != "so" && s.type != "select")
+      err("VN23", "tool_registry 节点 '" + n.id + "' 的 type='" + s.type +
+                      "' 不在词表里（so / select）");
+    if (s.type == "select" && s.from != "builtin")
+      err("VN23", "tool_registry 节点 '" + n.id + "' 的 select 源 from='" + s.from +
+                      "' 必须为 \"builtin\"（select 只激活内置工具，不加载动态库）");
+    if (s.load.empty()) err("VN23", "tool_registry 节点 '" + n.id + "' 的 load 为空（from='" +
+                                        s.from + "'）");
+    if (s.type == "select" && ctx.registry != nullptr)
+      for (std::string const& name : s.load)
+        if (ctx.registry->find(name) == nullptr)
+          err("VN23", "tool_registry 节点 '" + n.id + "' 的 select 源引用内置注册表里不存在的工具 '" +
+                          name + "'");
+  }
+  // 排序提示（编排约定，不构成图拓扑规则）：tool_registry 应放在 workflow 起始 nodes[0]，
+  // 消费节点（model/run_tools）才能在 results 里读到 active_tools。
+}
+
+void c_tool_registry(NodeIR const& n, NodeType::CompileContext& ctx) {
+  tool::ToolRegistry* shared = ctx.shared_registry;
+  if (shared == nullptr) {
+    // 宿主没配共享注册表 → 加载无处可放（fail-closed；这是 workflow 层的装配错误）
+    ctx.error = "tool_registry 节点 '" + n.id + "'：宿主未提供 shared_registry（CompileOptions）";
+    return;
+  }
+  // 纵深防御：compile_workflow 公开路径先过 validator（同一 registry），此处兜手工构造 IR 的路径。
+  if (ctx.registry != nullptr)
+    for (auto const& s : n.tool_sources)
+      if (s.type == "select")
+        for (std::string const& name : s.load)
+          if (ctx.registry->find(name) == nullptr) {
+            ctx.error = "tool_registry 节点 '" + n.id + "' 的 select 源引用内置注册表里不存在的工具 '" +
+                        name + "'";
+            return;
+          }
+  auto const lib_dirs = ctx.tool_lib_dirs;  // 可为 null（只按相对/绝对路径）
+  auto const sources = n.tool_sources;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [shared, lib_dirs, sources, sink_p, node_id = n.id](
+                               Json const&, NodeContext&) {
+    Json results = Json::object();
+    Json loaded = Json::array();
+    std::vector<std::string> active;  // 活动工具集：本节点所有源的 load 并集（保序去重）
+    std::unordered_set<std::string> seen;
+    for (auto const& s : sources) {
+      if (s.type == "select") {
+        // 仅激活内置（定义留内置注册表）；名字在编译/校验期已验证可解析
+        for (std::string const& nm : s.load)
+          if (seen.insert(nm).second) active.push_back(nm);
+        continue;
+      }
+      // 库路径：tool_lib_dirs 里找 `lib<from>.so`；找不到 → 相对/绝对路径
+      std::string const fname = "lib" + s.from + ".so";
+      std::string lib_path = fname;
+      if (lib_dirs != nullptr) {
+        for (auto const& d : *lib_dirs) {
+          std::filesystem::path const cand = std::filesystem::path(d) / fname;
+          if (std::filesystem::exists(cand)) { lib_path = cand.string(); break; }
+        }
+      }
+      auto const specs = tool::load_dynamic_tools(lib_path, s.load);
+      if (!specs) {
+        // fail-closed：任一工具源加载失败 → 整体失败（不部分加载）
+        throw tool::ToolException("tool_registry '" + node_id + "' 加载工具源 from='" + s.from +
+                                  "' 失败：" + specs.error());
+      }
+      for (auto const& spec : *specs) {
+        shared->add(spec);  // 按名覆盖 → 重跑幂等（find 取最新）
+        loaded.push_back(spec.name);
+        if (seen.insert(spec.name).second) active.push_back(spec.name);
+      }
+    }
+    Json active_json = Json::array();
+    for (std::string const& a : active) active_json.push_back(a);
+    if (sink_p) sink_p->log_node(node_id, "info", "tool_registry '" + node_id + "' 装配活动工具",
+                                 Json{{"count", active.size()},
+                                      {"loaded", loaded},
+                                      {"active_tools", active_json}});
+    results[node_id] = Json{{"action", "load"},
+                            {"loaded", loaded},
+                            {"active_tools", std::move(active_json)}};
+    return Command::with_update(Json{{kResultsKey, std::move(results)}});
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 }  // namespace
 
 std::vector<NodeType> const& builtin_node_types() {
@@ -3031,6 +3231,44 @@ std::vector<NodeType> const& builtin_node_types() {
          if (!n.confirm.empty()) d += " confirm=" + n.confirm;
          return d + " → " + n.next;
        }, v_plan_review, c_plan_review, e_next, t_none},
+
+      // ---------------- tool_registry（wfr-㊹ 治理，problems/34）：动态工具源 ----------------
+      {NodeKind::ToolRegistry, "tool_registry",
+       [](Json const& n) { return kind_is(n, "tool_registry"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "next", out.next);
+         if (node.contains("tools") && node["tools"].is_array())
+           for (auto const& t : node["tools"]) {
+             if (!t.is_object()) continue;
+             NodeIR::ToolSource s;
+             if (t.contains("from") && t["from"].is_string()) s.from = t["from"].get<std::string>();
+             if (t.contains("type") && t["type"].is_string()) s.type = t["type"].get<std::string>();
+             if (t.contains("load") && t["load"].is_array())
+               for (auto const& l : t["load"])
+                 if (l.is_string()) s.load.push_back(l.get<std::string>());
+             out.tool_sources.push_back(std::move(s));
+           }
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "tool_registry";
+         Json arr = Json::array();
+         for (auto const& s : n.tool_sources) {
+           Json j = Json{{"from", s.from}, {"type", s.type}};
+           Json ls = Json::array();
+           for (auto const& l : s.load) ls.push_back(l);
+           j["load"] = std::move(ls);
+           arr.push_back(std::move(j));
+         }
+         node["tools"] = std::move(arr);
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         std::string d = "tool_registry (" + std::to_string(n.tool_sources.size()) + " 源)";
+         for (auto const& s : n.tool_sources) {
+           d += " from=" + s.from + "[" + s.type + "] load=" + std::to_string(s.load.size());
+         }
+         return d + " → " + n.next;
+       }, v_tool_registry, c_tool_registry, e_next, t_none},
       // ---------------- task（wfr-㊿ 长程）：任务档案 begin/end ----------------
       {NodeKind::Task, "task",
        [](Json const& nn) { return kind_is(nn, "task"); },

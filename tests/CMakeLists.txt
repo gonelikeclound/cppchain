@@ -138,6 +138,12 @@ target_include_directories(node_enum_plugin PRIVATE ${PROJECT_SOURCE_DIR}/includ
 target_include_directories(node_enum_plugin SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
 target_compile_options(node_enum_plugin PRIVATE -Wall -Wextra -Wpedantic)
 
+# wfr-㊹ 治理（problems/34）：动态 mock 工具库 —— 纯 C descriptor + 裸函数指针，不链 cppchain
+add_library(mock_tools SHARED plugin_demo/mock_tools.cpp)
+target_include_directories(mock_tools PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(mock_tools SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(mock_tools PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(workflow_tests
   wf/expr_test.cpp
   wf/refs_test.cpp
@@ -149,6 +155,7 @@ add_executable(workflow_tests
   wf/fakes_test.cpp
   wf/agent_loop_test.cpp
   wf/side_effect_workflow_test.cpp
+  wf/tool_registry_select_test.cpp
   wf/approve_tools_test.cpp
   wf/approve_tools_interrupt_test.cpp
   wf/approve_tools_persist_test.cpp
@@ -187,8 +194,10 @@ target_link_options(workflow_tests PRIVATE -Wl,--export-dynamic)
 # 给测试 bake 进 .so 的绝对路径（dlopen/枚举用）；依赖关系保证先构建
 target_compile_definitions(workflow_tests PRIVATE
   CPPCHAIN_NODE_DEMO_SO="$<TARGET_FILE:node_demo_plugin>"
-  CPPCHAIN_NODE_ENUM_SO="$<TARGET_FILE:node_enum_plugin>")
-add_dependencies(workflow_tests node_demo_plugin node_enum_plugin)
+  CPPCHAIN_NODE_ENUM_SO="$<TARGET_FILE:node_enum_plugin>"
+  # wfr-㊹：mock_tools 动态工具库的**目录**（tool_registry 按 `lib<from>.so` 在此找库）
+  CPPCHAIN_MOCK_TOOLS_DIR="$<TARGET_FILE_DIR:mock_tools>")
+add_dependencies(workflow_tests node_demo_plugin node_enum_plugin mock_tools)
 
 target_compile_options(workflow_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(workflow_tests)

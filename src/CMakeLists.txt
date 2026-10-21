@@ -52,6 +52,7 @@ add_library(cppchain_tool STATIC
   tool/probe.cpp
   tool/exec_guard.cpp
   tool/command_classify.cpp
+  tool/tool_plugin.cpp  # wfr-㊹：动态工具库加载（load_dynamic_tools）
   tool/spawn_executor.cpp
   tool/spawn_runner.cpp
   tool/sandbox.cpp
