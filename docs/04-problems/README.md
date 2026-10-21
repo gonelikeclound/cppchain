@@ -82,3 +82,4 @@
 | 34 | [34-动态工具库与活动工具集落地.md](34-动态工具库与活动工具集落地.md) | **落地**（wfr-㊹ 治理）：tool_registry 节点两源——`.so` 动态库（裸 C 契约 dlopen，mock 顶替内置）+ `select` **内置按名选择**（不拷定义）；活动工具集发布进 results.active_tools，model/run_tools 从 context 取（共享优先、内置兜底）；run 允许名单防注入；12 新测试 | 🟢 732 全绿 |
 | 35 | [35-副作用mock场景库与可逆性梯度workflow验收.md](35-副作用mock场景库与可逆性梯度workflow验收.md) | **验收**（wfr-㊹）：sidefx_mock_demo + `libsidefx_notify.so`——可逆性梯度工具（订单幂等/微信窗口可撤/短信不可撤/电话任状态可关）+ 模拟时钟；31 case（30 清单）；**引擎修两处**（approve 共享回退、desc_for 批量 dlsym 稳定指针）；wfr 接 shared_registry/tool_lib_dirs | 🟢 763 全绿 |
 | 36 | [36-测试全景报告与方法论.md](36-测试全景报告与方法论.md) | **全景盘点**：763 测试 × 8 层（workflow 307 占 40%）；tool 纯函数+副作用计数 / agent 记忆化 / graph 引擎 / workflow 脚本化模型+动态库+probe 矩阵+模拟钟+串行链 九法；附纪律五条与运行命令 | 🟢 763 全绿 |
+| 37 | [37-副作用工具实现方法参考.md](37-副作用工具实现方法参考.md) | **Agent 可复用参考**：副作用工具自包含方法论——声明契约（read_only/effect_class/approval/probe/ttl）· 治理链三挂载（guard/approve/活动集允许名单）· 动态库工程（跨 DSO + 三个真实坑）· 可逆性梯度状态机四模式 · 测试 M1~M8 各配实测与有效性；含落地 checklist | 🟢 763 全绿 |
