@@ -39,6 +39,11 @@ using Json = nlohmann::json;
 // —— 引擎 `++g_run_seq` 后即得到该会话下一个不重复的轮次号（r-N）。
 void seed_run_seq(std::int64_t base);
 
+// B2（problems/39）：产物版本号单调源（引擎级原子，跨 fire/节点单调递增）。
+// 节点层在"写产物工具执行成功"后取一个号登记进 _artifact_ver（模型/工具伪造不了）；
+// 跨进程续跑靠 _artifact_ver 表 max（task 档案恢复旧值）。放这里与 g_run_seq 同源。
+[[nodiscard]] std::int64_t next_artifact_version();
+
 struct WorkflowError {
   enum class Kind { Invalid, Compile, Runtime };
   Kind kind = Kind::Compile;

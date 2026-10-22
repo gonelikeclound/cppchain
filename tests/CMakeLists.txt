@@ -166,6 +166,7 @@ add_executable(workflow_tests
   wf/sidefx_notify_test.cpp
   wf/tool_loop_test.cpp
   wf/verify_agent_test.cpp
+  wf/artifact_ver_test.cpp
   wf/approve_tools_test.cpp
   wf/approve_tools_interrupt_test.cpp
   wf/approve_tools_persist_test.cpp

@@ -230,6 +230,19 @@ set_target_properties(wfr PROPERTIES
 
 # 发布：二进制 → <prefix>/bin；固定 workflow → <prefix>/share/wfr/workflows
 install(TARGETS wfr RUNTIME DESTINATION bin)
+
+# ---- wfr_cgi：CGI WebUI 后端（discuss 17；与 wfr 同规格，进 bin/，release 同编）----
+# cgi-bin/wfr_cgi：读 QUERY_STRING 分发 action → fork wfr 跑 cgi-workflows/ 专属 workflow。
+add_executable(wfr_cgi ../cgi-bin/wfr_cgi.cpp)
+target_link_libraries(wfr_cgi PRIVATE cppchain_workflow cppchain_tool)
+target_compile_options(wfr_cgi PRIVATE -Wall -Wextra -Wpedantic)
+if(CPPCHAIN_WFR_STATIC_RUNTIME)
+  target_link_options(wfr_cgi PRIVATE -static-libstdc++ -static-libgcc)
+  message(STATUS "wfr_cgi: 静态链接 libstdc++/libgcc（发布构建）")
+endif()
+set_target_properties(wfr_cgi PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+install(TARGETS wfr_cgi RUNTIME DESTINATION bin)
 # share/wfr/workflows/*.json（DESTINATION share → <prefix>/share/wfr/workflows）
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/share/wfr DESTINATION share
   FILES_MATCHING PATTERN "*.json")

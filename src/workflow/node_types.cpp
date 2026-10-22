@@ -32,6 +32,7 @@
 #include "cppchain/tool/tool_plugin.hpp"  // wfr-㊹：动态工具描述符/loader（tool_registry 用）
 #include "cppchain/workflow/expr.hpp"
 #include "cppchain/workflow/ir_walk.hpp"
+#include "cppchain/workflow/compiler.hpp"  // B2：next_artifact_version（产物版本单调源）
 #include "cppchain/workflow/refs.hpp"
 #include "cppchain/workflow/session_log.hpp"
 
@@ -42,6 +43,11 @@ using cppchain::graph::NodeContext;
 using cppchain::graph::interrupt;
 
 namespace {
+
+// B2（problems/39）：写产物工具成功登记版本的 helper（定义在后，c_tool/c_run_tools 先用）。
+void b2_register_artifact(Json& update, Json const& call_args, bool ok);
+std::int64_t b2_artifact_version(Json const& state, std::string const& relpath);
+
 
 // ---- JSON 取值小工具（各类型的 parse 共用）----
 
@@ -765,6 +771,7 @@ void c_tool(NodeIR const& n, NodeType::CompileContext& ctx) {
           }
           if (r) {
             Json update = Json{{kResultsKey, Json{{node_id, *r}}}, {kLastExecKey, node_id}};
+            b2_register_artifact(update, args, /*ok=*/true);  // B2：写产物工具成功登记版本
             return Command::with_update(std::move(update));
           }
           last_err = r.error().message;
@@ -1207,6 +1214,10 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
     Json update = Json::object();
     update[kMessagesKey] = std::move(arr);
     update[kResultsKey] = std::move(results);
+    // B2（problems/39）：写产物工具执行**成功**（ToolMessage status=="success"）→ 登记版本。
+    // 版本号来自引擎单调源（模型/工具伪造不了）；verify 判据可据此校验产物新鲜度。
+    for (std::size_t i = 0; i < all_calls.size() && i < tool_msgs.size(); ++i)
+      if (tool_msgs[i].status == "success") b2_register_artifact(update, all_calls[i].args, true);
     // wfr-㊹ 环检测：跨轮指纹表更新（merge_slots 子键右胜；仅当本轮有非只读调用参与才写，
     // 无环/纯只读 workflow 不产该键 = 零回归）
     if (fp_map.size() > 1) update[kToolLoopKey] = std::move(fp_map);
@@ -1756,6 +1767,30 @@ std::string today_str() {
 
 }  // namespace
 
+// ---- B2（problems/39 优先级 2）：产物版本登记与新鲜度 ----
+// 版本号由引擎单调源 next_artifact_version() 分配（模型/工具伪造不了）；存 state._artifact_ver
+//（merge_slots 右胜）。verify probe 判据可声明 version 校验"产物新鲜度"。
+
+// 写产物工具执行**成功**后登记：call.args 含 "path"（相对沙箱根串，file_write 的 schema 约定）
+// → 给该 relpath 分配一个单调版本号写进 update["_artifact_ver"]。ok=false 不登记。
+void b2_register_artifact(Json& update, Json const& call_args, bool ok) {
+  if (!ok || !call_args.is_object() || !call_args.contains("path") ||
+      !call_args["path"].is_string())
+    return;
+  Json ver = update.contains(kArtifactVerKey) ? update[kArtifactVerKey] : Json::object();
+  ver[call_args["path"].get<std::string>()] = next_artifact_version();
+  update[kArtifactVerKey] = std::move(ver);
+}
+
+// 读 state 里某 relpath 的当前版本；未登记 → -1（视为过时/未写入）。
+std::int64_t b2_artifact_version(Json const& state, std::string const& relpath) {
+  auto const it = state.find(kArtifactVerKey);
+  if (it == state.end() || !it->is_object()) return -1;
+  auto const p = it->find(relpath);
+  if (p == it->end() || !p->is_number()) return -1;
+  return p->get<std::int64_t>();
+}
+
 // 批② L2：verify 的确定性判据（probe / rule），不调 LLM。路径按 @config.workspace 解析
 // （相对 → 工作区根；与 file_read/file_write 的沙箱根一致，probe 的就是同一棵树）。
 bool verify_rule_check(Json const& v, Json const& state, std::string& why) {
@@ -1779,7 +1814,22 @@ bool verify_rule_check(Json const& v, Json const& state, std::string& why) {
       if (v.contains("bytes") && v["bytes"].is_number_unsigned()) bytes = v["bytes"].get<std::size_t>();
       r = tool::probe_file(target, std::nullopt, bytes);
     }
-    if (r == tool::ProbeResult::Complete) { why = "文件完整 → " + target.string(); return true; }
+    if (r == tool::ProbeResult::Complete) {
+      // B2（problems/39）：文件内容完整后，若判据声明 version → 校验"产物新鲜度"
+      //（当前登记版本 ≥ 判据要求；未登记=从未写/跨 run 丢了 → 视为过时）。不新鲜映射 Partial
+      //（证据在但不可接受，fail-closed），与"内容不匹配"同档。
+      if (v.contains("version") && v["version"].is_number_unsigned()) {
+        std::int64_t const have = b2_artifact_version(state, p);
+        std::int64_t const want = v["version"].get<std::int64_t>();
+        if (have < want) {
+          why = "probe=Partial：路径 " + p + "（版本 " + std::to_string(have) + " < 要求 " +
+                std::to_string(want) + "）——证据过时";
+          return false;
+        }
+      }
+      why = "文件完整 → " + target.string();
+      return true;
+    }
     char const* n = r == tool::ProbeResult::Partial ? "Partial"
                     : r == tool::ProbeResult::Absent ? "Absent" : "Unknown";
     why = std::string("probe=") + n + "：" + target.string();
@@ -2106,6 +2156,10 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
       }
       Json update;
       update[kPlanStateKey] = plan;
+      // B2（problems/39）：档案里上次的产物版本表 → 恢复进运行期 state（跨 run 续跑保持单调）
+      if (plan.contains("artifact_versions") && plan["artifact_versions"].is_object() &&
+          !plan["artifact_versions"].empty())
+        update[kArtifactVerKey] = plan["artifact_versions"];
       std::string const prev = plan.value("last_summary", "");
       std::string const day = [&] {
         std::string const d = resolve_text_parameter("@config.task_date", state);
@@ -2134,6 +2188,12 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
       if (it->type == message::Role::Ai) { last = it->text(); break; }
     Json plan2 = plan;
     plan2["last_summary"] = last;
+    // B2（problems/39）：产物版本表快照进档案（跨 run 续跑恢复；merge_slots 运行期不冲突）
+    {
+      auto const av = state.find(kArtifactVerKey);
+      if (av != state.end() && av->is_object() && !av->empty())
+        plan2["artifact_versions"] = *av;
+    }
     // 批② 护栏：plan 无步骤（begin 缺种子等）不得覆盖档案
     if (!(plan2.contains("steps") && plan2["steps"].is_array() && !plan2["steps"].empty())) {
       results[node_id] = Json{{"action", "end_noop"}};

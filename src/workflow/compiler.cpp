@@ -34,6 +34,9 @@ namespace {
 
 // 跨触发的 run 序（仅用于可读的 run id；实际排序靠日志里的 seq）
 std::atomic<std::int64_t> g_run_seq{0};
+// B2（problems/39）：产物版本单调源。每次写入 +1；跨进程续跑靠 _artifact_ver 表 max。
+std::atomic<std::int64_t> g_artifact_ver{0};
+
 
 // 在"节点边界"统一写结构事件（docs/12 §6.3）。
 // 唯一的 chokepoint 是 StateGraph::add_node —— 9 种节点类型的编译无需各自埋点，之后
@@ -109,6 +112,10 @@ constexpr char kCancelTarget[] = "__cancelled__";
 
 }  // namespace
 
+// B2（problems/39）：产物版本单调源（公开，节点层取号）。定义放匿名块外，
+// g_artifact_ver 在匿名命名空间内，外层作用域经隐式 using 可见。
+std::int64_t next_artifact_version() { return ++g_artifact_ver; }
+
 // 垫高进程内 run 计数（跨进程续写同一会话时由宿主调用，
 // 见 session_log 的 max_run_seq 说明）。定义在匿名命名空间之外 → 导出符号。
 void seed_run_seq(std::int64_t base) {
@@ -159,6 +166,8 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   // wfr-㊹ 环检测：工具调用跨轮指纹表（merge_slots 子键右胜，对齐 loop_counts 范式）。
   // 内容见 refs.hpp kToolLoopKey 注释；c_run_tools 每轮"先读旧值、算新连续次数、写全量"。
   schema.set_reducer(std::string(kToolLoopKey), merge_slots);
+  // B2（problems/39）：产物版本表 {relpath: version}（merge_slots 子键右胜，对齐 _tool_loop）
+  schema.set_reducer(std::string(kArtifactVerKey), merge_slots);
   // messages 必须走 add_messages：model/run_tools 节点返回的是"新增消息"，
   // 默认的 overwrite 会把整个数组替换掉（历史当场丢光）。
   schema.set_reducer(std::string(kMessagesKey), state::add_messages);

@@ -39,6 +39,9 @@ inline constexpr char kHandoffStateKey[] = "handoff";
 // wfr-㊹ 环检测：工具调用跨轮指纹表（方法 1，c_run_tools 消费点）
 // 子键：{ "_prev": [上一轮执行指纹...], "<fp>": 连续次数 } —— merge_slots 右胜，对齐 loop_counts 范式
 inline constexpr char kToolLoopKey[] = "_tool_loop";
+// B2（problems/39）：产物版本表 —— { relpath: version }，merge_slots 右胜。
+// 版本号由节点层从 next_artifact_version()（引擎单调源）分配；verify probe 判据用 version 校验新鲜度。
+inline constexpr char kArtifactVerKey[] = "_artifact_ver";
 
 enum class RefKind { LastResult, NamedResult, Config };
 
