@@ -1,8 +1,10 @@
 /* wfr CGI · 前端逻辑（原生 JS，调 CGI action；NDJSON 流式对话 + 二级树 + 双 tab） */
 "use strict";
 
-// CGI 入口：本地用 http.server --cgi 时的映射。/cgi-bin/ → web 根下 cgi-bin（symlink 到 ../cgi-bin）
-const CGI = "cgi-bin/wfr_cgi";
+// CGI 入口：本地用 http.server --cgi 时的映射。**根相对**（以 / 开头）——页面可能在 /chat/ 等
+// 子目录，相对 "cgi-bin/…" 会解析成子目录下的 404。web/ 是 http.server 的 document root，
+// /cgi-bin/ → web 根下 cgi-bin（symlink 到 ../cgi-bin）。
+const CGI = "/cgi-bin/wfr_cgi";
 
 const state = {
   tree: [],          // [{name, dir, sessions:[{name, pending?}], expanded}]
