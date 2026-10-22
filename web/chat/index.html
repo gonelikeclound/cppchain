@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wfr CGI · Agent 对话</title>
+<link rel="stylesheet" href="../app.css">
+</head>
+<body>
+<div id="app" class="three-col">
+  <!-- 左栏：workspace 二级树 -->
+  <aside class="side">
+    <div class="side-top">
+      <h1>wfr<span class="dim"> CGI</span></h1>
+      <div class="side-actions">
+        <button id="new-workspace" class="ghost" title="新建工作区">＋ 工作区</button>
+        <button id="new-session" class="ghost" title="新建会话">＋ 新会话</button>
+      </div>
+    </div>
+    <div id="tree" class="tree"></div>
+  </aside>
+
+  <!-- 中栏：双 tab（对话 / 调试） -->
+  <main class="main">
+    <div class="tab-bar">
+      <button id="tab-chat" class="tab active">对话</button>
+      <button id="tab-debug" class="tab">调试</button>
+      <a class="tab-nav" href="../test/" title="查看测试报告">测试</a>
+    </div>
+    <header class="main-top">
+      <div class="crumb"><span id="title-ws">—</span><span class="sep">/</span><span id="title-s">—</span></div>
+      <div class="main-top-right">
+        <button id="dbg-refresh" class="ghost hidden" title="生成/重新生成调试信息">⚙ 生成</button>
+        <div id="busy" class="busy hidden">发送中…</div>
+      </div>
+    </header>
+    <section id="chat-pane" class="pane">
+      <div id="messages" class="messages"></div>
+      <footer class="composer">
+        <textarea id="input" rows="1" placeholder="输入消息…（Enter 发送）"></textarea>
+        <button id="send">发送</button>
+      </footer>
+    </section>
+    <section id="debug-pane" class="pane hidden">
+      <div id="dbg-placeholder" class="dbg-placeholder">
+        <p>选择一个 <b>已绑定 workflow 的会话</b>（名字形如 <code>wfname.sessionid</code>）后，点「⚙ 生成」查看节点图与 log。</p>
+      </div>
+      <iframe id="dbg-frame" title="wfr debug" class="hidden"></iframe>
+    </section>
+  </main>
+</div>
+
+<!-- 新建工作区 modal -->
+<div id="ws-modal" class="modal hidden">
+  <div class="modal-card">
+    <h2>新建工作区</h2>
+    <label>名称 <input id="ws-name" placeholder="demo2"></label>
+    <label>目录 <input id="ws-dir" placeholder="tmp/cgi_ws/demo2"></label>
+    <div class="modal-actions">
+      <button id="ws-cancel" class="ghost">取消</button>
+      <button id="ws-ok" class="primary">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建会话 modal（选 workflow） -->
+<div id="ss-modal" class="modal hidden">
+  <div class="modal-card">
+    <h2>新建会话 · 绑定 workflow</h2>
+    <select id="ss-wf"></select>
+    <div class="modal-actions">
+      <button id="ss-cancel" class="ghost">取消</button>
+      <button id="ss-ok" class="primary">创建</button>
+    </div>
+  </div>
+</div>
+
+<script src="../app.js"></script>
+</body>
+</html>
