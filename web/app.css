@@ -132,7 +132,7 @@ body {
 .modal-actions .ghost { padding: 7px 16px; }
 /* ---- 导航页（/） ---- */
 .nav-page {
-  min-height: 100vh; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100vh; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 28px; padding: 32px 20px;
   background:
     radial-gradient(600px 300px at 20% 0%, rgba(108,140,255,.12), transparent 60%),
@@ -174,7 +174,10 @@ body {
 .nav-foot code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 11.5px; }
 
 /* ---- 测试页（/test） ---- */
-.test-page { min-height: 100vh; overflow: auto; display: flex; flex-direction: column; }
+.test-page {
+  height: 100vh; overflow: hidden; display: flex; flex-direction: column;
+  /* body 已锁死（overflow:hidden）；滚动交给内部 .tests-scroll（同 chat 页 .messages 模式） */
+}
 .test-head {
   padding: 14px 20px; border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(108,140,255,.06), transparent), var(--panel);
@@ -196,7 +199,7 @@ body {
 .stat-card.total b { color: var(--accent); }
 .stat-card.time b { font-size: 18px; }
 
-.tests-scroll { flex: 1; padding: 16px 20px; overflow: auto; }
+.tests-scroll { flex: 1; min-height: 0; padding: 16px 20px; overflow-y: auto; }
 .tests-binary { margin: 0 0 10px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); overflow: hidden; }
 .tests-binary[open] { border-color: rgba(108,140,255,.35); }
 .tests-binary summary {
