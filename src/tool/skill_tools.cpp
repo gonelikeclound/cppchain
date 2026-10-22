@@ -37,6 +37,18 @@ std::optional<std::filesystem::path> env_dir(char const* key) {
   return p;
 }
 
+// skill 文档可查找目录：WFR_SKILL_DIR 及其 wiki/ 子目录（skill 与 LLM Wiki 同一知识区）
+std::vector<std::filesystem::path> skill_bases() {
+  std::vector<std::filesystem::path> out;
+  auto base = env_dir("WFR_SKILL_DIR");
+  if (!base) return out;
+  out.push_back(*base);
+  std::error_code ec;
+  std::filesystem::path sub = *base / "wiki";
+  if (std::filesystem::is_directory(sub, ec)) out.push_back(sub);
+  return out;
+}
+
 // 前缀包含守卫（词法 + 符号链接解析后质押在同一目录树内）
 bool within(std::filesystem::path const& base, std::filesystem::path const& p) {
   auto const bs = base.generic_string();
@@ -143,16 +155,18 @@ void collect_md(std::filesystem::path const& dir, std::vector<std::filesystem::p
 ToolSpec make_read_skill_tool() {
   return make_tool(
                "read_skill",
-               "读取一份 HMI 编辑器 skill 文档（工程编辑规范/规则/经验沉淀，如 hmi-skill、"
-               "hmi-layout、gotchas）。skill 名可带或不带 .md；文档不存在会返回可用清单。"
-               "撰写/修改 hmi.xml 前先读对应 skill。只读、无副作用。",
-               SchemaBuilder().prop("skill", "string", "skill 名（如 hmi-skill、hmi-layout）")
+               "读取一份 skill 文档（工程编辑规范/规则/经验/组件库目录，如 hmi-skill、"
+               "hmi-layout、gotchas、hmi-components）。文档在 WFR_SKILL_DIR（含其 wiki/ 子目录）"
+               "里按名找，可带或不带 .md；不存在会返回可用清单。撰写/修改 hmi.xml 前先读"
+               "对应 skill/组件目录。只读、无副作用。",
+               SchemaBuilder().prop("skill", "string",
+                                    "skill 名（如 hmi-skill、hmi-components）")
                    .build(),
                [](Json const& args, ToolContext& ctx)
                    -> std::expected<Json, ToolError> {
                  (void)ctx;
-                 auto base_opt = env_dir("WFR_SKILL_DIR");
-                 if (!base_opt)
+                 auto bases = skill_bases();
+                 if (bases.empty())
                    return std::unexpected(ToolError{
                        "未配置 skill 目录（宿主未设 WFR_SKILL_DIR）"});
                  auto name = req_string(args, "skill");
@@ -161,19 +175,26 @@ ToolSpec make_read_skill_tool() {
                  if (!rel)
                    return std::unexpected(ToolError{"skill 名非法：「" + *name +
                                                     "」（只允许相对路径、限 .md）"});
-                 std::filesystem::path const base = *base_opt;
-                 auto const target = base / *rel;
-                 std::error_code ec;
-                 auto const canon = std::filesystem::weakly_canonical(target, ec);
-                 auto const canon_base = std::filesystem::weakly_canonical(base, ec);
-                 if (ec || !within(canon_base, canon) ||
-                     !std::filesystem::is_regular_file(canon))
-                   return std::unexpected(ToolError{
-                       "skill 不存在：「" + *name + "」。可用：" + list_skills(base)});
-                 std::string const content = read_capped(canon, 64u * 1024);
-                 return Json{{"skill", canon.filename().string()},
-                             {"content", content},
-                             {"truncated", content.size() >= 64u * 1024}};
+                 for (auto const& base : bases) {
+                   std::error_code ec;
+                   auto const target = base / *rel;
+                   auto const canon = std::filesystem::weakly_canonical(target, ec);
+                   auto const canon_base = std::filesystem::weakly_canonical(base, ec);
+                   if (!ec && within(canon_base, canon) &&
+                       std::filesystem::is_regular_file(canon)) {
+                     std::string const content = read_capped(canon, 64u * 1024);
+                     return Json{{"skill", canon.filename().string()},
+                                 {"content", content},
+                                 {"truncated", content.size() >= 64u * 1024}};
+                   }
+                 }
+                 std::string avail;
+                 for (auto const& b : bases) {
+                   std::string const n = list_skills(b);
+                   if (!n.empty() && n != "(空)") avail += (avail.empty() ? "" : "；") + n;
+                 }
+                 return std::unexpected(ToolError{
+                     "skill 不存在：「" + *name + "」。可用：" + (avail.empty() ? "(空)" : avail)});
                })
       .with_category("retrieval");
 }
