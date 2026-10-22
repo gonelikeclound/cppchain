@@ -33,6 +33,9 @@ inline constexpr char kLastExecKey[] = "_last_exec";
 inline constexpr char kLoopCountsKey[] = "loop_counts";
 // wfr-㊾ 批③：交接件 state 键（per-step 子键合并，见 compiler.cpp 的 schema / node_types.cpp c_executor）
 inline constexpr char kHandoffStateKey[] = "handoff";
+// wfr-㊹ 环检测：工具调用跨轮指纹表（方法 1，c_run_tools 消费点）
+// 子键：{ "_prev": [上一轮执行指纹...], "<fp>": 连续次数 } —— merge_slots 右胜，对齐 loop_counts 范式
+inline constexpr char kToolLoopKey[] = "_tool_loop";
 
 enum class RefKind { LastResult, NamedResult, Config };
 

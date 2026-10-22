@@ -1044,6 +1044,69 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
           to_exec = all_calls;  // 无活动集 → 全部执行（旧路径零回归）
         }
 
+        // ---- wfr-㊹ 环检测：工具调用跨轮指纹（方法 1）----
+        // agent 反复调同一工具（同名同参）打转成环 → 用 state 里的跨轮指纹表识别"连续重复"：
+        //   第 1、2 次正常执行；第 3 次起**拦截**（error 回喂「已连续执行过 n 次，请换策略」）。
+        // 语义（用户在计划中拍板）：
+        //   · 指纹 = ExecutionGuard::key_for(call, NameAndArgs)（tool_name + canonical args，复用不新造）
+        //   · "连续" = 上一轮实际执行的指纹集合（_prev）含它；换工具/换参 → 计数复位
+        //   · 只读工具完全豁免（重复只读无害，同 guard 的 read_only 早退纪律）
+        //   · 拦截不进 to_exec、不进 guard（与 allowlist/done_ids 同一纪律：判定在 guard.prepare 之前）
+        // 表结构（state 顶层 kToolLoopKey，merge_slots 子键右胜）：
+        //   { "_prev": [<上一轮执行指纹>...], "<fp>": <连续次数>, ... }
+        // 注意：指纹表完全 state 派生（读 → 算 → 写），不碰外部日志 → 快照恢复重算一致（同 approve 纯态纪律）。
+        constexpr long kToolLoopThreshold = 3;
+        std::vector<char> repeat(all_calls.size(), 0);          // 与 all_calls 对齐：1 = 环拦截
+        std::vector<message::ToolCall> next_exec;
+        Json fp_map = Json::object();                           // 写回的新表（含 _prev + 计数）
+        std::unordered_set<std::string> prev_exec;              // 上一轮执行指纹
+        {
+          auto const tl = state.find(kToolLoopKey);
+          if (tl != state.end() && tl->is_object()) {
+            auto const pv = tl->find("_prev");
+            if (pv != tl->end() && pv->is_array())
+              for (auto const& f : *pv)
+                if (f.is_string()) prev_exec.insert(f.get<std::string>());
+          }
+        }
+        // 本组已执行指纹（本轮真正进 to_exec 的），写回 _prev
+        std::vector<std::string> this_prev;
+        for (std::size_t i = 0; i < all_calls.size(); ++i) {
+          if (!denied.empty() && denied[i]) continue;           // 已被活动集拒绝：不再参与
+          message::ToolCall const& c = all_calls[i];
+          // 只读豁免：spec 拿不到（未知）→ 不豁免（fail-closed 方向）
+          tool::ToolSpec const* sp = tn_eff.find(c.name);
+          if (sp != nullptr && sp->read_only) { next_exec.push_back(c); continue; }
+          std::string const fp = tool::ExecutionGuard::key_for(c, tool::ExecKeyMode::NameAndArgs);
+          // 连续次数 = 上一轮执行过同指纹 ? 旧计数+1 : 1（复位）
+          long cur = 1;
+          if (prev_exec.count(fp) > 0) {
+            auto const old = state.find(kToolLoopKey);
+            if (old != state.end() && old->is_object()) {
+              auto const it = old->find(fp);
+              if (it != old->end() && it->is_number()) cur = it->get<long>() + 1;
+              else cur = 2;  // 上一轮执行过但无计数记录（异常/旧表）→ 保守视为第 2 次
+            } else {
+              cur = 2;
+            }
+          }
+          if (cur >= kToolLoopThreshold) {                      // 环 → 拦截（计数保留继续涨）
+            repeat[i] = 1;
+            fp_map[fp] = cur;
+            this_prev.push_back(fp);  // 拦截也算"上轮来过"——下一轮 prev_exec 含它，继续累进
+            continue;
+          }
+          next_exec.push_back(c);
+          fp_map[fp] = cur;
+          this_prev.push_back(fp);
+        }
+        to_exec = std::move(next_exec);
+        fp_map["_prev"] = [&] {
+          Json a = Json::array();
+          for (std::string const& f : this_prev) a.push_back(f);
+          return a;
+        }();
+
         std::vector<message::Message> exec_msgs;  // 与 to_exec 对齐
         if (guard == nullptr) {
           // 原路：ToolNode 自己并行执行；有共享 registry 时用「共享优先+内置兜底」的 tn_eff
@@ -1078,7 +1141,7 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
             for (std::size_t i = base; i < end; ++i) exec_msgs[i] = batch[i - base].get();
           }
         }
-        // 按 all_calls 原序归并：被拒调用 → error ToolMessage 回喂（summary/审计可见工具名）
+        // 按 all_calls 原序归并：活动集拒绝 / 环拦截 → error ToolMessage 回喂（summary/审计可见工具名）
         std::vector<message::Message> tool_msgs;
         tool_msgs.reserve(all_calls.size());
         std::size_t ei = 0;
@@ -1086,6 +1149,11 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
           if (!denied.empty() && denied[i])
             tool_msgs.push_back(message::tool_message(
                 "工具 '" + all_calls[i].name + "' 不在本 workflow 的活动工具名单里，拒绝执行",
+                all_calls[i].id, "error"));
+          else if (!repeat.empty() && repeat[i])
+            tool_msgs.push_back(message::tool_message(
+                "工具 '" + all_calls[i].name +
+                    "' 已连续执行过多次（疑似在兜圈子），请换策略或换个参数，避免空转",
                 all_calls[i].id, "error"));
           else
             tool_msgs.push_back(std::move(exec_msgs[ei++]));
@@ -1122,6 +1190,9 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
     Json update = Json::object();
     update[kMessagesKey] = std::move(arr);
     update[kResultsKey] = std::move(results);
+    // wfr-㊹ 环检测：跨轮指纹表更新（merge_slots 子键右胜；仅当本轮有非只读调用参与才写，
+    // 无环/纯只读 workflow 不产该键 = 零回归）
+    if (fp_map.size() > 1) update[kToolLoopKey] = std::move(fp_map);
     return Command::with_update(std::move(update));
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));

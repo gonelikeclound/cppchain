@@ -83,3 +83,4 @@
 | 35 | [35-副作用mock场景库与可逆性梯度workflow验收.md](35-副作用mock场景库与可逆性梯度workflow验收.md) | **验收**（wfr-㊹）：sidefx_mock_demo + `libsidefx_notify.so`——可逆性梯度工具（订单幂等/微信窗口可撤/短信不可撤/电话任状态可关）+ 模拟时钟；31 case（30 清单）；**引擎修两处**（approve 共享回退、desc_for 批量 dlsym 稳定指针）；wfr 接 shared_registry/tool_lib_dirs | 🟢 763 全绿 |
 | 36 | [36-测试全景报告与方法论.md](36-测试全景报告与方法论.md) | **全景盘点**：763 测试 × 8 层（workflow 307 占 40%）；tool 纯函数+副作用计数 / agent 记忆化 / graph 引擎 / workflow 脚本化模型+动态库+probe 矩阵+模拟钟+串行链 九法；附纪律五条与运行命令 | 🟢 763 全绿 |
 | 37 | [37-副作用工具实现方法参考.md](37-副作用工具实现方法参考.md) | **Agent 可复用参考**：副作用工具自包含方法论——声明契约（read_only/effect_class/approval/probe/ttl）· 治理链三挂载（guard/approve/活动集允许名单）· 动态库工程（跨 DSO + 三个真实坑）· 可逆性梯度状态机四模式 · 测试 M1~M8 各配实测与有效性；含落地 checklist | 🟢 763 全绿 |
+| 38 | [38-Agent工具环检测落地.md](38-Agent工具环检测落地.md) | **落地**（wfr-㊹）：run_tools 跨轮指纹环检测（方法 1）——state `_tool_loop` 表 + `key_for(NameAndArgs)`；连续 3 次拦截不执行（error 点醒）；只读豁免 / 换参换工具复位 / 拦截计数保留；6 新测试 + 两个实测修正（拦截后计数、canonical_json 紧凑式）| 🟢 769 全绿 |

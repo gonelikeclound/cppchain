@@ -156,6 +156,9 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   // wfr-㊾ 批③：交接件 handoff 是 per-step 子键合并（merge_slots）——并行 Executor 各写各的
   // <step_id>，`parallel` 收拢按声明序折叠；同一键多写者（不同 step）不会 ConcurrentWriteConflict。
   schema.set_reducer(std::string(kHandoffStateKey), merge_slots);
+  // wfr-㊹ 环检测：工具调用跨轮指纹表（merge_slots 子键右胜，对齐 loop_counts 范式）。
+  // 内容见 refs.hpp kToolLoopKey 注释；c_run_tools 每轮"先读旧值、算新连续次数、写全量"。
+  schema.set_reducer(std::string(kToolLoopKey), merge_slots);
   // messages 必须走 add_messages：model/run_tools 节点返回的是"新增消息"，
   // 默认的 overwrite 会把整个数组替换掉（历史当场丢光）。
   schema.set_reducer(std::string(kMessagesKey), state::add_messages);
