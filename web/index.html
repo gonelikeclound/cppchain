@@ -3,26 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>wfr CGI</title>
+<title>wfr CGI · 工作台</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <div id="app" class="nav-page">
-  <h1 class="nav-title">wfr<span class="dim"> CGI</span></h1>
-  <p class="nav-sub">Agent 对话工作台 · 测试报告</p>
+  <header class="nav-brand">
+    <span class="brand-mark">wfr</span>
+    <span class="brand-sub">Agent 工作台 · cppchain</span>
+  </header>
+
+  <div class="nav-hero">
+    <h1 class="nav-title">对话与测试</h1>
+    <p class="nav-sub">在浏览器里驱动 Agent 循环、调试节点图、查看全仓测试报告。</p>
+  </div>
+
   <div class="nav-cards">
     <a class="nav-card" href="chat/">
-      <span class="nav-icon">💬</span>
-      <span class="nav-name">对话</span>
-      <span class="nav-desc">Agent 对话 · 工作区/会话 · 节点调试</span>
+      <span class="nav-icon" aria-hidden="true">💬</span>
+      <span class="nav-body">
+        <span class="nav-name">对话工作台</span>
+        <span class="nav-desc">Agent 对话 · 工作区与会话 · 节点调试台</span>
+      </span>
+      <span class="nav-go" aria-hidden="true">→</span>
     </a>
     <a class="nav-card" href="test/">
-      <span class="nav-icon">🧪</span>
-      <span class="nav-name">测试</span>
-      <span class="nav-desc">全仓测试报告 · 分套件/用例 · 失败点名</span>
+      <span class="nav-icon" aria-hidden="true">🧪</span>
+      <span class="nav-body">
+        <span class="nav-name">测试报告</span>
+        <span class="nav-desc">8 个测试套件 · 分用例明细 · 失败点名</span>
+      </span>
+      <span class="nav-go" aria-hidden="true">→</span>
     </a>
   </div>
-  <p class="nav-foot dim">测试报告快照由 <code>./run-tests-report.sh</code> 生成；对话页在 <code>/chat</code>，测试页在 <code>/test</code>。</p>
+
+  <footer class="nav-foot dim">
+    测试报告快照由 <code>./run-tests-report.sh</code> 生成 · 对话 <code>/chat</code> · 测试 <code>/test</code>
+  </footer>
 </div>
 </body>
 </html>

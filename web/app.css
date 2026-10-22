@@ -68,8 +68,7 @@ body {
 .composer button:disabled { opacity: .5; cursor: not-allowed; }
 .error-line { color: #ff8585; align-self: flex-start; padding: 8px; }
 
-/* ---- 左侧二级树（workspace → session）---- */
-.side-actions { display: flex; gap: 6px; }
+/* ---- 左侧二级树（workspace → session）---- */.side-actions { display: flex; gap: 6px; }
 .side-actions .ghost { flex: 1; }
 .tree { flex: 1; overflow: hidden; padding: 4px; }
 .ws-row {
@@ -131,49 +130,95 @@ body {
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal-actions .primary { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 16px; cursor: pointer; }
 .modal-actions .ghost { padding: 7px 16px; }
-/* ---- 测试 tab（方案 A：静态报告快照）---- */
-.tests-summary { padding: 12px 12px 4px; }
-.tests-summary-line { display: flex; gap: 10px; align-items: baseline; font-size: 14px; }
-.tests-scroll { padding: 12px; overflow: auto; }
-.tests-scroll details.tests-binary { margin: 4px 0; }
-.tests-scroll summary {
-  cursor: pointer; font-size: 14px; padding: 8px 10px; background: var(--panel2);
-  border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px;
+/* ---- 导航页（/） ---- */
+.nav-page {
+  min-height: 100vh; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 28px; padding: 32px 20px;
+  background:
+    radial-gradient(600px 300px at 20% 0%, rgba(108,140,255,.12), transparent 60%),
+    radial-gradient(500px 300px at 85% 100%, rgba(123,216,143,.06), transparent 60%),
+    var(--bg);
 }
-.tests-scroll summary .codename { font-family: ui-monospace, monospace; }
-.tests-scroll table.tests-table {
-  width: 100%; border-collapse: collapse; font-size: 12px; margin: 0 0 10px; display: block; overflow-x: auto;
+.nav-brand { display: flex; align-items: center; gap: 10px; }
+.brand-mark {
+  font: 700 17px/1 ui-monospace, monospace; letter-spacing: .2px; color: var(--accent);
+  background: rgba(108,140,255,.12); border: 1px solid rgba(108,140,255,.35);
+  padding: 5px 12px; border-radius: 9px;
 }
-.tests-scroll .tests-table th, .tests-scroll .tests-table td {
-  border: 1px solid var(--border); padding: 4px 8px; text-align: left; white-space: nowrap;
+.brand-mark.small { font-size: 13px; padding: 3px 9px; }
+.brand-sub { color: var(--dim); font-size: 13px; }
+.nav-hero { text-align: center; }
+.nav-title { font-size: 34px; letter-spacing: .3px; }
+.nav-sub { color: var(--dim); font-size: 14px; margin: 10px 0 0; max-width: 420px; }
+.nav-cards { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
+.nav-card {
+  position: relative; display: flex; align-items: center; gap: 14px; width: 320px;
+  padding: 20px 22px; background: linear-gradient(180deg, rgba(255,255,255,.02), transparent), var(--panel);
+  border: 1px solid var(--border); border-radius: 16px; color: var(--text);
+  text-decoration: none; transition: transform .15s, border-color .15s, box-shadow .15s;
+  overflow: hidden;
 }
-.tests-scroll .tests-table th { background: var(--panel2); font-weight: 600; }
-.tests-scroll .tests-table td.fail-detail {
-  white-space: pre-wrap; word-break: break-all; max-width: 520px; color: var(--dim);
+.nav-card::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity: 0; transition: opacity .2s;
 }
+.nav-card:hover { transform: translateY(-2px); border-color: rgba(108,140,255,.6); box-shadow: 0 8px 28px rgba(0,0,0,.35); }
+.nav-card:hover::before { opacity: 1; }
+.nav-icon { font-size: 30px; filter: drop-shadow(0 2px 6px rgba(0,0,0,.4)); }
+.nav-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.nav-name { font-size: 17px; font-weight: 650; }
+.nav-desc { font-size: 12.5px; color: var(--dim); }
+.nav-go { margin-left: auto; color: var(--dim); font-size: 20px; transition: transform .15s, color .15s; }
+.nav-card:hover .nav-go { transform: translateX(3px); color: var(--accent); }
+.nav-foot { font-size: 12px; color: var(--dim); text-align: center; }
+.nav-foot code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 11.5px; }
+
+/* ---- 测试页（/test） ---- */
+.test-page { min-height: 100vh; overflow: auto; display: flex; flex-direction: column; }
+.test-head {
+  padding: 14px 20px; border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(108,140,255,.06), transparent), var(--panel);
+}
+.test-nav { display: flex; align-items: center; gap: 12px; }
+.crumb-tip { font-size: 13px; color: var(--dim); }
+.test-links { margin-left: auto; display: flex; gap: 8px; }
+.test-links .ghost { padding: 5px 12px; font-size: 12px; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; max-width: 620px; }
+.stat-card {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; border-radius: 10px;
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+}
+.stat-card b { font-size: 22px; font-weight: 700; line-height: 1.1; }
+.stat-card span { font-size: 11.5px; color: var(--dim); }
+.stat-card.ok b { color: #7bd88f; }
+.stat-card.bad b { color: #ff8585; }
+.stat-card.bad.warn { border-color: rgba(255,133,133,.5); background: rgba(255,133,133,.06); }
+.stat-card.total b { color: var(--accent); }
+.stat-card.time b { font-size: 18px; }
+
+.tests-scroll { flex: 1; padding: 16px 20px; overflow: auto; }
+.tests-binary { margin: 0 0 10px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); overflow: hidden; }
+.tests-binary[open] { border-color: rgba(108,140,255,.35); }
+.tests-binary summary {
+  cursor: pointer; display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  font-size: 14px; background: var(--panel2); user-select: none; list-style: none;
+}
+.tests-binary summary::-webkit-details-marker { display: none; }
+.tests-binary summary::before { content: "▸"; color: var(--dim); transition: transform .15s; }
+.tests-binary[open] summary::before { transform: rotate(90deg); }
+.tests-binary .codename { font: 600 14px/1 ui-monospace, monospace; color: var(--text); }
+.bcounts { margin-left: auto; display: flex; gap: 8px; font-size: 12px; }
+.b-total { color: var(--dim); }
+.b-ok { color: #7bd88f; }
+.b-bad { color: #ff8585; font-weight: 600; }
+.tests-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tests-table th, .tests-table td { border-bottom: 1px solid var(--border); padding: 6px 14px; text-align: left; }
+.tests-table th { background: rgba(0,0,0,.18); color: var(--dim); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; }
+.tests-table tr:hover td { background: rgba(108,140,255,.05); }
+.tests-table tr.fail-row td { background: rgba(255,133,133,.05); }
+.tests-table td.ok { color: #7bd88f; }
+.tests-table td.bad { color: #ff8585; font-weight: 600; }
+.tests-table td.ms { color: var(--dim); font-variant-numeric: tabular-nums; }
+.tests-table td.fail-detail { white-space: pre-wrap; word-break: break-all; max-width: 480px; color: #ffb3b3; }
 .pass { color: #7bd88f; }
 .fail { color: #ff8585; }
-
-/* ---- 导航页（/）与测试页（/test）---- */
-.nav-page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; }
-.nav-title { font-size: 26px; margin: 0; }
-.nav-sub { color: var(--dim); margin: 0 0 18px; }
-.nav-cards { display: flex; gap: 16px; }
-.nav-card {
-  display: flex; flex-direction: column; gap: 6px; align-items: center; justify-content: center;
-  width: 200px; padding: 24px 16px; background: var(--panel); border: 1px solid var(--border);
-  border-radius: 14px; color: var(--text); text-decoration: none; transition: border-color .15s;
-}
-.nav-card:hover { border-color: var(--accent); }
-.nav-icon { font-size: 28px; }
-.nav-name { font-size: 16px; font-weight: 600; }
-.nav-desc { font-size: 12px; color: var(--dim); text-align: center; }
-.nav-foot { margin-top: 22px; font-size: 12px; }
-.nav-foot code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
-
-.test-page { min-height: 100vh; display: flex; flex-direction: column; }
-.test-head { padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
-.test-nav { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
-.test-nav .crumb-tip { font-size: 13px; color: var(--dim); margin-left: 8px; }
-.tests-summary { padding: 0; }
-.tests-scroll { flex: 1; padding: 12px 18px; overflow: auto; }
