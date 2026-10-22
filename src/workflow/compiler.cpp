@@ -104,11 +104,12 @@ Json merge_slots(Json const& left, Json const& right) {
   return out;
 }
 
-// `_fail`/`_timeout`/`_cancelled` 的落地节点名（见 ir.hpp 的 kFailName/kTimeoutName/kCancelledName）。
+// `_fail`/`_timeout`/`_cancelled`/`_impossible` 的落地节点名（见 ir.hpp 的 kFailName 等）。
 // 各节点类型的"编译"已迁到 node_types.cpp；本文件只剩图装配与 schema。
 constexpr char kFailTarget[] = "__fail__";
 constexpr char kTimeoutTarget[] = "__timeout__";
 constexpr char kCancelTarget[] = "__cancelled__";
+constexpr char kImpossibleTarget[] = "__impossible__";
 
 }  // namespace
 
@@ -139,6 +140,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   bool need_fail_node = false;      // 只有真的用到 _fail 才注册那个节点
   bool need_timeout_node = false;   // _timeout 同理（governed 的 loop on_max）
   bool need_cancel_node = false;    // _cancelled 同理（plan_review abort）
+  bool need_impossible_node = false; // A7：verify judge 判 impossible（_impossible 终端）
   auto resolve = [&](std::string const& t) -> std::string {
     if (t == kTurnEndName) return graph::kEnd;
     if (t == kFailName) {
@@ -152,6 +154,10 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     if (t == kCancelledName) {
       need_cancel_node = true;
       return kCancelTarget;
+    }
+    if (t == kImpossibleName) {
+      need_impossible_node = true;
+      return kImpossibleTarget;
     }
     return t;  // id 全局唯一：不再需要 label 那种"续接消解"
   };
@@ -271,6 +277,27 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
       update["plan_log"] = std::move(pl);
       Json results = Json::object();
       results[kCancelTarget] = Json{{"terminal", "cancelled"}, {"workflow", ir_id}};
+      update[kResultsKey] = std::move(results);
+      return Command{std::move(update), {graph::kEnd}, {}};
+    });
+  }
+  // A7（problems/39）：_impossible 终端 —— verify judge 判"做不到"时的正常收尾（不抛异常，
+  // 与 _timeout/_cancelled 同式：写 plan.terminal + plan_log 终态行 + goto __end__）。
+  if (need_impossible_node) {
+    g.note_kind(kImpossibleTarget, "impossible");
+    g.add_node(kImpossibleTarget, [ir_id = ir.id](Json const& state, NodeContext&) -> Command {
+      Json update;
+      Json plan = state.contains("plan") && state["plan"].is_object() ? state["plan"]
+                                                                     : Json::object();
+      plan["terminal"] = "impossible";
+      update["plan"] = std::move(plan);
+      Json pl = state.contains("plan_log") && state["plan_log"].is_array() ? state["plan_log"]
+                                                                          : Json::array();
+      pl.push_back(Json{{"step", "*"}, {"kind", "terminal"}, {"verdict", "impossible"},
+                        {"why", "步骤被判定为不可达成（impossible 档，与失败区分）"}});
+      update["plan_log"] = std::move(pl);
+      Json results = Json::object();
+      results[kImpossibleTarget] = Json{{"terminal", "impossible"}, {"workflow", ir_id}};
       update[kResultsKey] = std::move(results);
       return Command{std::move(update), {graph::kEnd}, {}};
     });

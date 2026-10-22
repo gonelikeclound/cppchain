@@ -2483,9 +2483,13 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
     if (!auto_rolled) {
       // 治理（problems/33）：advance 时 verdict=done→done、unverified→unverified（完成但未验证）。
       // A6：agent 判据判不了也产 unverified（推进+诚实标注）；无判据档 kind=none 同。
+      // A7：impossible（做不到）→ 独立档（区别于 failed，供 Reviewer/plan_log 区分"重做无望"）。
       bool const unverified = verdict_obj.value("verdict", "") == "unverified";
+      bool const impossible = verdict_obj.value("verdict", "") == "impossible";
       if (advance)
         steps[static_cast<std::size_t>(cursor)]["status"] = unverified ? "unverified" : "done";
+      else if (impossible)
+        steps[static_cast<std::size_t>(cursor)]["status"] = "impossible";
       else
         steps[static_cast<std::size_t>(cursor)]["status"] = "failed";
     }
@@ -2497,10 +2501,11 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
     plan_log.push_back(std::move(verdict_obj));
     // 治理（problems/33）：results 发布 verdict/outcome，供 expr 门（jgate/rgate）引用。
     // outcome 用 auto_retry 区分 rollback_deps（否则被 jgate 误送 _fail）。
+    // A7：impossible 独立第 5 值（≠ fail，jgate 的 `outcome=="fail"` 不会误送 _fail）。
     Json const outcome =
         auto_rolled ? "auto_retry"
                     : (advance ? (final_verdict == "unverified" ? "unverified" : "done")
-                               : "fail");
+                               : (final_verdict == "impossible" ? "impossible" : "fail"));
     Json update{{kPlanStateKey, plan}, {kPlanLogStateKey, std::move(plan_log)},
                 {kResultsKey, Json{{node_id, Json{{"phase", "judge"}, {"cursor", cursor},
                                                    {"count", plan["steps"].size()},
@@ -2577,9 +2582,10 @@ std::mutex& auditor_serial_for(model::ChatModel const* m) {
 // 它用只读工具真检查后只输出一行 JSON。
 constexpr char kAuditorPrompt[] =
     "你是独立验收员。用给定的只读工具检查产物文件是否满足【验收条目】。"
-    "只输出一行 JSON：{\"verdict\":\"done\"或\"fail\"或\"unverified\","
+    "只输出一行 JSON：{\"verdict\":\"done\"或\"fail\"或\"unverified\"或\"impossible\","
     "\"evidence\":\"具体证据（引用了哪个文件/哪次检查）\"}。"
-    "证据不足判不了 → unverified；不得声称你无法验证的内容；不要修改任何文件。";
+    "证据不足判不了 → unverified；前置条件缺失/目标确实不可达成 → impossible；"
+    "不得声称你无法验证的内容；不要修改任何文件。";
 
 // 把计划里一步的产物路径展开成提示文本（paths 数组；缺省只给 workspace）。
 std::string auditor_paths_hint(Json const& v, Json const& state) {
@@ -2620,6 +2626,7 @@ AgentReviewOutcome judge_agent_review(Json const& step, Json const& v, Json cons
           : std::string();
   if (verdict == "done") return {"done", "验收通过：" + evidence, true};
   if (verdict == "fail") return {"fail", "验收不通过：" + evidence, false};
+  if (verdict == "impossible") return {"impossible", "验收判定不可达成：" + evidence, false};  // A7：做不到→停+独立档
   return {"unverified", "验收者判定未决：" + evidence, true};  // 判不了 → 推进+诚实标注
 }
 
@@ -2874,8 +2881,10 @@ void c_parallel(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
       if (already) continue;  // 幂等：这批早就折过
       std::string const vd = h.value("verdict", "fail");
-      // 治理（problems/33）：三档 —— done / unverified（完成但未验证）/ failed
-      s["status"] = (vd == "done") ? "done" : (vd == "unverified") ? "unverified" : "failed";
+      // 治理（problems/33）+ A7：四档 —— done / unverified（完成但未验证）/ impossible（做不到）/ failed
+      s["status"] = (vd == "done") ? "done"
+                  : (vd == "unverified") ? "unverified"
+                  : (vd == "impossible") ? "impossible" : "failed";
       Json row = Json{{"step", sid}, {"kind", h.value("kind", "none")},
                       {"verdict", vd}, {"why", h.value("why", "")}};
       if (h.contains("role") && h["role"].is_string()) row["role"] = h["role"];

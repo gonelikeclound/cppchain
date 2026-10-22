@@ -27,6 +27,8 @@ inline constexpr char kFailName[] = "_fail";         // 以错误终止（route 
 // wfr-㊹ 治理（problems/33）：终态四档补齐 —— loop max 触达（超时）与用户取消（计划级 abort）
 inline constexpr char kTimeoutName[] = "_timeout";    // 超时终止（loop on_max 触达未收口）
 inline constexpr char kCancelledName[] = "_cancelled";  // 取消终止（plan_review abort / 用户中止）
+// A7（problems/39）：做不到终止（verify judge 判 impossible —— 独立于"失败"，正常收尾不抛异常）
+inline constexpr char kImpossibleName[] = "_impossible";
 // ---- wfr-㉚：loop 体内的两个保留目标 ----
 inline constexpr char kContinueName[] = "_continue";  // 下一轮（回 loop 节点头；算回边）
 inline constexpr char kBreakName[] = "_break";        // 跳出循环（去 loop 的 next）
