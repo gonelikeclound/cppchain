@@ -8,6 +8,12 @@ demo-out/
 # wfr 默认临时工作区（wfr.sh；session/checkpoint/debug 产物都在这里）
 tmp/
 
+# webui 测试报告快照（./run-tests-report.sh 生成，运行态非源码；git 不跟踪）
+web/tests_report.json
+# run-webui.sh 启动时创建的 symlink（指向 build 产物，运行态不入库）
+web/cgi-bin/
+web/wfr_bin
+
 # 密钥与本地环境配置 —— 绝不入库
 .env
 .env.*

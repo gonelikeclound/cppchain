@@ -8,7 +8,7 @@ const state = {
   tree: [],          // [{name, dir, sessions:[{name, pending?}], expanded}]
   ws: null,          // 选中 workspace 名
   session: null,     // 选中 session 全名（wfname.sessionid）
-  tab: "chat",       // "chat" | "debug"
+  tab: "chat",       // "chat" | "debug" | "tests"
 };
 
 const $ = (id) => document.getElementById(id);
@@ -367,10 +367,76 @@ function setTab(t) {
   state.tab = t;
   $("tab-chat").classList.toggle("active", t === "chat");
   $("tab-debug").classList.toggle("active", t === "debug");
+  $("tab-tests").classList.toggle("active", t === "tests");
   $("chat-pane").classList.toggle("hidden", t !== "chat");
   $("debug-pane").classList.toggle("hidden", t !== "debug");
-  if (t === "debug") updateDebugUI();        // 调试 tab：按钮按状态显示
+  $("tests-pane").classList.toggle("hidden", t !== "tests");
+  if (t === "tests") loadTestsReport();   // 测试 tab：读取静态报告快照
+  else if (t === "debug") updateDebugUI(); // 调试 tab：按钮按状态显示
   else $("dbg-refresh").classList.add("hidden");  // 对话 tab：隐藏调试按钮
+}
+
+// 测试 tab：读取静态报告快照 web/tests_report.json（./run-tests-report.sh 生成）并渲染。
+// 快照结构见 tools/make_tests_report.py：{ generated_at, binaries:[{name,total,passed,failed,suites:
+//   [{name,total,failed,tests:[{name,status:"ok"|"fail",ms,failure}] }]} ] }
+function loadTestsReport() {
+  const box = $("tests-table");
+  const sum = document.querySelector(".tests-summary");
+  fetch("tests_report.json", { cache: "no-store" })
+    .then(r => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    })
+    .then(report => {
+      if (!report || !Array.isArray(report.binaries) || report.binaries.length === 0) {
+        throw new Error("空报告（先 ./run-tests-report.sh）");
+      }
+      const total = report.binaries.reduce((a, b) => a + b.total, 0);
+      const passed = report.binaries.reduce((a, b) => a + b.passed, 0);
+      const failed = report.binaries.reduce((a, b) => a + b.failed, 0);
+      sum.innerHTML =
+        '<div class="tests-summary-line">' +
+        '<b class="' + (failed ? "fail" : "pass") + '">' + total + " 个测试 · " +
+        passed + " 通过" + (failed ? " · " + failed + " 失败" : " · 全绿") + "</b>" +
+        ' <span class="dim">快照 ' + (report.generated_at || "?") + "</span></div>";
+
+      let html = "";
+      for (const bin of report.binaries) {
+        const failedSuites = bin.suites.filter(s => s.failed > 0);
+        html +=
+          '<details class="tests-binary"' + (failedSuites.length ? " open" : "") + ">" +
+          "<summary>" +
+          "<span class='codename'>" + esc(bin.name) + "</span> " +
+          bin.total + " · <span class='pass'>" + bin.passed + "</span> 过" +
+          (bin.failed ? " · <span class='fail'>" + bin.failed + "</span> 败" : "") +
+          "</summary>" +
+          '<table class="tests-table"><thead><tr>' +
+          "<th>套件</th><th>用例</th><th>状态</th><th>耗时</th><th>失败原因</th>" +
+          "</tr></thead><tbody>";
+        for (const s of bin.suites) {
+          for (const t of s.tests) {
+            const ok = t.status === "ok";
+            html +=
+              "<tr><td>" + esc(s.name) +
+              "</td><td>" + esc(t.name) +
+              "</td><td class='" + (ok ? "pass" : "fail") + "'>" + (ok ? "✓" : "✗") +
+              "</td><td>" + t.ms + "ms</td><td class='fail-detail'>" +
+              (ok ? "" : esc(t.failure || "失败")) + "</td></tr>";
+          }
+        }
+        html += "</tbody></table></details>";
+      }
+      box.innerHTML = html;
+    })
+    .catch(e => {
+      box.innerHTML = '<div class="error-line">读取测试报告失败: ' + esc(e.message) +
+        '（先跑 ./run-tests-report.sh 生成 web/tests_report.json）</div>';
+    });
+}
+
+function esc(s) {
+  // 复用既有 escapeHtml，前缀补 null/非字符串防护（报告字段可能为 null）
+  return escapeHtml(String(s == null ? "" : s));
 }
 
 // 调试 tab：工具条状态管理——能生成则显示「⚙ 生成」，已生成则显示「⟳ 刷新」
@@ -533,6 +599,7 @@ $("ss-cancel").addEventListener("click", () => $("ss-modal").classList.add("hidd
 $("ss-ok").addEventListener("click", submitSs);
 $("tab-chat").addEventListener("click", () => setTab("chat"));
 $("tab-debug").addEventListener("click", () => setTab("debug"));
+$("tab-tests").addEventListener("click", () => setTab("tests"));
 $("dbg-refresh").addEventListener("click", toggleDebug);
 $("send").addEventListener("click", send);
 $("input").addEventListener("keydown", (e) => {

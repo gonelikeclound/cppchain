@@ -131,3 +131,25 @@ body {
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal-actions .primary { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 16px; cursor: pointer; }
 .modal-actions .ghost { padding: 7px 16px; }
+/* ---- 测试 tab（方案 A：静态报告快照）---- */
+.tests-summary { padding: 12px 12px 4px; }
+.tests-summary-line { display: flex; gap: 10px; align-items: baseline; font-size: 14px; }
+.tests-scroll { padding: 12px; overflow: auto; }
+.tests-scroll details.tests-binary { margin: 4px 0; }
+.tests-scroll summary {
+  cursor: pointer; font-size: 14px; padding: 8px 10px; background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px;
+}
+.tests-scroll summary .codename { font-family: ui-monospace, monospace; }
+.tests-scroll table.tests-table {
+  width: 100%; border-collapse: collapse; font-size: 12px; margin: 0 0 10px; display: block; overflow-x: auto;
+}
+.tests-scroll .tests-table th, .tests-scroll .tests-table td {
+  border: 1px solid var(--border); padding: 4px 8px; text-align: left; white-space: nowrap;
+}
+.tests-scroll .tests-table th { background: var(--panel2); font-weight: 600; }
+.tests-scroll .tests-table td.fail-detail {
+  white-space: pre-wrap; word-break: break-all; max-width: 520px; color: var(--dim);
+}
+.pass { color: #7bd88f; }
+.fail { color: #ff8585; }

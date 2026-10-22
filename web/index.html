@@ -25,6 +25,7 @@
     <div class="tab-bar">
       <button id="tab-chat" class="tab active">对话</button>
       <button id="tab-debug" class="tab">调试</button>
+      <button id="tab-tests" class="tab" title="离线测试结果快照（./run-tests-report.sh 生成）">测试</button>
     </div>
     <header class="main-top">
       <div class="crumb"><span id="title-ws">—</span><span class="sep">/</span><span id="title-s">—</span></div>
@@ -45,6 +46,10 @@
         <p>选择一个 <b>已绑定 workflow 的会话</b>（名字形如 <code>wfname.sessionid</code>）后，点「⚙ 生成」查看节点图与 log。</p>
       </div>
       <iframe id="dbg-frame" title="wfr debug" class="hidden"></iframe>
+    </section>
+    <section id="tests-pane" class="pane hidden">
+      <div class="tests-summary"></div>
+      <div id="tests-table" class="tests-scroll"></div>
     </section>
   </main>
 </div>
