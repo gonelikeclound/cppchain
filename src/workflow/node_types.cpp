@@ -2249,6 +2249,16 @@ void c_plan(NodeIR const& n, NodeType::CompileContext& ctx) {
 
 // ---- verify：每步门。announce=把当前步骤喂给模型 + in_progress；judge=判 done/fail + 推进 cursor；
 //      review（wfr-㊾）=批级独立终审：读整份 plan + plan_log 判定，不读执行思考（输入隔离）----
+// A6（problems/39）：verify kind=agent 判据函数前置声明（定义在其后；c_verify 用它须先见声明）。
+struct AgentReviewOutcome {
+  std::string verdict;    // "done" | "fail" | "unverified"
+  std::string evidence;
+  bool advance;
+};
+AgentReviewOutcome judge_agent_review(Json const& step, Json const& v, Json const& state,
+                                      model::ChatModel* m, tool::ToolRegistry const* ro,
+                                      std::string const& judge_sys);
+
 void v_verify(NodeIR const& n, NodeType::ValidateContext const&,
               NodeType::ErrorSink const& err) {
   if (n.phase != "announce" && n.phase != "judge" && n.phase != "review")
@@ -2256,8 +2266,7 @@ void v_verify(NodeIR const& n, NodeType::ValidateContext const&,
   if (n.next.empty()) err("VN20", "verify 节点 '" + n.id + "' 缺少 next");
 }
 
-void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
-  std::string const node_id = n.id;
+void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string const node_id = n.id;
   std::string const phase = n.phase;
   // wfr-㊹ 批④：做完后 goto _break（引擎 goto 容器名解析已支持）
   std::string const break_target = ctx.goto_resolve ? ctx.goto_resolve(kBreakName) : kBreakName;
@@ -2267,7 +2276,16 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const judge_sys = n.system_prompt;
   std::string const judge_role = n.role;
   std::string const batch_criteria = n.criteria;  // review 相位的批级判据（可 @config.*）
+  // A6（problems/39）：验收者只读工具集 —— 从 toolset 组件名解析，只拷贝 read_only 工具。
+  // 写工具不在 registry 里 → 模型发不出写调用（"不存在而非被拒"）。
+  auto ro_registry = std::make_shared<tool::ToolRegistry>();
+  if (ctx.components != nullptr && !n.toolset.empty())
+    if (auto const* ts = ctx.components->toolset(n.toolset); ts != nullptr)
+      for (std::string const& tname : *ts)
+        if (tool::ToolSpec const* sp = ctx.registry->find(tname); sp != nullptr)
+          if (sp->read_only) ro_registry->add(*sp);  // 只读才收；写工具跳过（不给验收者）
   ctx.graph.add_node(n.id, [node_id, phase, judge, judge_sys, judge_role, batch_criteria,
+                            ro_registry,
                             break_target](Json const& state, NodeContext&) {
     Json plan = plan_from_state(state);
     Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
@@ -2346,6 +2364,13 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
         verdict_obj = Json{{"step", id}, {"kind", "model"}, {"verdict", ok ? "done" : "fail"},
                           {"why", why}};
         advance = ok;
+      } else if (kind == "agent") {
+        // A6（problems/39 优先级 1）：独立验收 subagent（只读工具真检查）。
+        // 三态 done/fail/unverified；判不了 → unverified + 推进（诚实标注，K2 fail-open 免疫）。
+        auto const r = judge_agent_review(step, v, state, judge, ro_registry.get(), judge_sys);
+        verdict_obj = Json{{"step", id}, {"kind", "agent"}, {"verdict", r.verdict},
+                          {"why", r.evidence}, {"role", judge_role}};
+        advance = r.advance;
       } else {
         advance = false;
         verdict_obj = Json{{"step", id}, {"kind", kind}, {"verdict", "fail"},
@@ -2396,21 +2421,26 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {
       }
     }
     if (!auto_rolled) {
-      // 治理（problems/33）：advance 时带判据→done、无判据→unverified（完成但未验证）
+      // 治理（problems/33）：advance 时 verdict=done→done、unverified→unverified（完成但未验证）。
+      // A6：agent 判据判不了也产 unverified（推进+诚实标注）；无判据档 kind=none 同。
+      bool const unverified = verdict_obj.value("verdict", "") == "unverified";
       if (advance)
-        steps[static_cast<std::size_t>(cursor)]["status"] = has_verify ? "done" : "unverified";
+        steps[static_cast<std::size_t>(cursor)]["status"] = unverified ? "unverified" : "done";
       else
         steps[static_cast<std::size_t>(cursor)]["status"] = "failed";
     }
     if (advance) cursor += 1;
     plan["steps"] = std::move(steps);
     plan["cursor"] = cursor;
+    // 先取 verdict（plan_log.push_back 会 move 走 verdict_obj → 之后不能再读它）
+    std::string const final_verdict = verdict_obj.value("verdict", "");
     plan_log.push_back(std::move(verdict_obj));
     // 治理（problems/33）：results 发布 verdict/outcome，供 expr 门（jgate/rgate）引用。
     // outcome 用 auto_retry 区分 rollback_deps（否则被 jgate 误送 _fail）。
     Json const outcome =
         auto_rolled ? "auto_retry"
-                    : (advance ? (has_verify ? "done" : "unverified") : "fail");
+                    : (advance ? (final_verdict == "unverified" ? "unverified" : "done")
+                               : "fail");
     Json update{{kPlanStateKey, plan}, {kPlanLogStateKey, std::move(plan_log)},
                 {kResultsKey, Json{{node_id, Json{{"phase", "judge"}, {"cursor", cursor},
                                                    {"count", plan["steps"].size()},
@@ -2460,6 +2490,77 @@ bool judge_step_self(std::string const& goal, std::string const& criteria,
         + (j->contains("feedback") && (*j)["feedback"].is_string()
                ? std::string("：") + (*j)["feedback"].get<std::string>() : std::string());
   return pass;
+}
+
+// ---- A6（problems/39 优先级 1）：verify kind=agent 独立验收 subagent ----
+// 治 K1（判官只读 transcript 的洞）：验收者**带只读工具真读产物/真跑检查**，返回三态
+// done/fail/unverified。来源：discuss 19 A6/A4（agent 型钩子，"verification requires
+// inspecting actual files or test output"）。
+// 实现纪律：
+//   · 验收 agent 是独立 Agent（复用 agent::Agent），只给只读 registry → 写工具"不存在而非被拒"
+//     （agent.cpp:327 只发 registry 里的工具，模型发不出写调用）。
+//   · transcript 完全隔离：局部 msgs 调 invoke，不进 state.messages（同 judge_model_review）。
+//   · 判不了/证据不足 → unverified + **推进**（对齐 problems/33 无判据档，K2 fail-open 免疫）；
+//     Reviewer review 相位可查 unverified 批级兑责（governance_test.cpp:274-278 先例）。
+//   · 模型/解析失败 fail-closed → fail（同 judge_model_review 纪律）。
+
+// 同一 judge 模型实例的串行锁（subagent.cpp 的 serial_for 未公开；语义同款：
+// 多个 verify 节点/并行 Executor 不并发打同一模型）。条目永不删除（model 寿命长）。
+std::mutex& auditor_serial_for(model::ChatModel const* m) {
+  static std::mutex guard;
+  static std::unordered_map<model::ChatModel const*, std::mutex> locks;
+  std::lock_guard g(guard);
+  return locks[m];
+}
+
+// 验收 agent 的 system prompt（固定，无注入面）。给验收条目与 workspace，
+// 它用只读工具真检查后只输出一行 JSON。
+constexpr char kAuditorPrompt[] =
+    "你是独立验收员。用给定的只读工具检查产物文件是否满足【验收条目】。"
+    "只输出一行 JSON：{\"verdict\":\"done\"或\"fail\"或\"unverified\","
+    "\"evidence\":\"具体证据（引用了哪个文件/哪次检查）\"}。"
+    "证据不足判不了 → unverified；不得声称你无法验证的内容；不要修改任何文件。";
+
+// 把计划里一步的产物路径展开成提示文本（paths 数组；缺省只给 workspace）。
+std::string auditor_paths_hint(Json const& v, Json const& state) {
+  std::string ws = as_string(resolve_parameter(Json("@config.workspace"), state));
+  if (v.contains("paths") && v["paths"].is_array()) {
+    std::string hint;
+    for (auto const& p : v["paths"])
+      if (p.is_string()) hint += "\n  - " + p.get<std::string>();
+    return "【工作目录】" + ws + "\n【产物路径】" + hint;
+  }
+  return "【工作目录】" + ws;
+}
+
+AgentReviewOutcome judge_agent_review(Json const& step, Json const& v, Json const& state,
+                                      model::ChatModel* m, tool::ToolRegistry const* ro,
+                                      std::string const& judge_sys) {
+  if (m == nullptr) return {"fail", "验收模型未配置（verify 节点缺 model）", false};
+  std::string const request =
+      "【步骤目标】" + step.value("goal", "") +
+      "\n【验收条目】" + v.value("criteria", "") +
+      "\n" + auditor_paths_hint(v, state) +
+      "\n请只读检查产物是否满足条目，输出三态 JSON。";
+  // 独立验收 agent：现构 + 串行（同 subagent.cpp:53 语义）。transcript 不进主 state。
+  std::lock_guard lock(auditor_serial_for(m));
+  agent::Agent auditor(*m, *ro, agent::AgentOptions{
+                                     .system_prompt = judge_sys.empty() ? kAuditorPrompt
+                                                                         : judge_sys,
+                                     .max_iterations = 8,  // 对齐 A6 "最多 50 轮"精神，落地缩 8
+                                 });
+  auto ret = auditor.invoke({message::human_message(request)});
+  if (!ret) return {"fail", "验收 agent 调用失败：" + ret.error().message, false};
+  auto const j = json_block_of(ret->text());
+  if (!j.has_value()) return {"unverified", "验收者未返回可解析 JSON", true};
+  std::string const verdict = j->value("verdict", "");
+  std::string const evidence =
+      j->contains("evidence") && (*j)["evidence"].is_string()
+          ? (*j)["evidence"].get<std::string>()
+          : std::string();
+  if (verdict == "done") return {"done", "验收通过：" + evidence, true};
+  if (verdict == "fail") return {"fail", "验收不通过：" + evidence, false};
+  return {"unverified", "验收者判定未决：" + evidence, true};  // 判不了 → 推进+诚实标注
 }
 
 // 本步 AI 消息（含其 tool_calls 的 args）里 file_write 的目标路径 → 交接件 artifacts。
@@ -3422,6 +3523,7 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR& out, Json const& node) {
          get_str(out, node, "phase", out.phase);
          get_str(out, node, "model", out.model);       // judge/review 的 LLM 裁判（批③ / wfr-㊾）
+         get_str(out, node, "toolset", out.toolset);   // A6：验收者只读工具集组件名（kind=agent 用）
          get_str(out, node, "system_prompt", out.system_prompt);  // reviewer 独立身份（wfr-㊾）
          get_str(out, node, "role", out.role);         // 审计角色名（wfr-㊾）
          get_str(out, node, "criteria", out.criteria); // 批级终审判据 review（wfr-㊾）
@@ -3431,6 +3533,7 @@ std::vector<NodeType> const& builtin_node_types() {
          node["kind"] = "verify";
          node["phase"] = n.phase;
          if (!n.model.empty()) node["model"] = n.model;
+         if (!n.toolset.empty()) node["toolset"] = n.toolset;
          if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
          if (!n.role.empty()) node["role"] = n.role;
          if (!n.criteria.empty()) node["criteria"] = n.criteria;

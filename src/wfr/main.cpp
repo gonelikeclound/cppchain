@@ -567,6 +567,9 @@ int main(int argc, char** argv) {
     names.insert(names.end(), {"file_read", "file_write", "list_dir"});  // A2：D1 L2 用 file 落盘判据
     comps.toolsets["trip"] = std::move(names);
   }
+  // A6（problems/39）：验收 subagent 的只读工具面（verify kind=agent 用）。
+  // 只放读工具——写工具不在 registry 里，验收者模型发不出写调用（"不存在而非被拒"）。
+  comps.toolsets["verify_ro"] = {"file_read", "list_dir"};
 
   // 治理（problems/33 · G4 包装层自检）：有副作用却未声明效果分类的工具 → 启动即失败。
   // 缺省 Read = 只读；read_only=false 必须显式声明 Idempotent/Irreversible（否则运行期遗漏是静默的）。
