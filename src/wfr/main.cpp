@@ -32,6 +32,7 @@
 #include <cppchain/tool/weather.hpp>
 #include <cppchain/tool/web_search.hpp>
 #include <cppchain/tool/skill_tools.hpp>  // wfr-context（⑤）：read_skill / wiki_search
+#include <cppchain/tool/sketch_verify.hpp>
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/components.hpp>
 #include <cppchain/workflow/debug_view.hpp>
@@ -61,6 +62,7 @@ using namespace cppchain;
 using namespace cppchain::workflow;
 using cppchain::tool::make_calculator_tool;
 using cppchain::tool::make_datetime_tool;
+using cppchain::tool::make_sketch_verify_tool;
 using cppchain::tool::make_file_read_tool;
 using cppchain::tool::make_list_dir_tool;
 using cppchain::tool::make_weather_tool;
@@ -512,6 +514,7 @@ int main(int argc, char** argv) {
   auto transport = std::make_shared<http::CurlMultiTransport>();
   tool::ToolRegistry registry;
   registry.add(make_datetime_tool());
+  registry.add(make_sketch_verify_tool());
   registry.add(make_calculator_tool());
   registry.add(make_weather_tool(transport, {}));              // Open-Meteo，免密钥
   {
@@ -553,6 +556,8 @@ int main(int argc, char** argv) {
   // 内置 chat 专用：常用件 + 文件对（天气/搜索之外，兑现 artifact 引用 + 写文件）
   comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir", "file_write",
                             "read_skill", "wiki_search"};
+  // 题目修订工作流：只给一个自检工具（模型生成 sketch 后必须调用）。
+  comps.toolsets["question"] = {"verify_sketch"};
   // wfr-㊸ @②：chat 的增强档 —— 带上 bash（副作用任意 → NeedHuman 人审悬挂）。
   // 独立 toolset，不污染既有 chat 的既有行为（approve_bash_demo 等用它）。
   comps.toolsets["chat_bash"] = {"get_weather", "web_search", "file_read",

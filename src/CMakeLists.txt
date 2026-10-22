@@ -48,6 +48,7 @@ add_library(cppchain_tool STATIC
   tool/datetime.cpp
   tool/fetch_url.cpp
   tool/calculator.cpp
+  tool/sketch_verify.cpp
   tool/file_tools.cpp
   tool/skill_tools.cpp
   tool/probe.cpp
