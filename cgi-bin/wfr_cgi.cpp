@@ -17,9 +17,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -92,6 +94,33 @@ std::string param(std::vector<std::pair<std::string, std::string>> const& q,
   return dflt;
 }
 
+// 从 CGI stdin 读 JSON body：{"config": {k: v, …}} → 任意 --set 配置（大 payload 走 body，避开 QUERY_STRING 的 env 上限）。
+// geo-server 内部调用用；body 配置在后追加，覆盖 default_sets_for 的默认。
+std::map<std::string, std::string> body_config() {
+  std::map<std::string, std::string> out;
+  char const* cl = std::getenv("CONTENT_LENGTH");
+  if (!cl) return out;
+  int const len = std::atoi(cl);
+  if (len <= 0 || len > 8 * 1024 * 1024) return out;
+  std::string buf(len, '\0');
+  if (std::fread(buf.data(), 1, static_cast<std::size_t>(len), stdin) !=
+      static_cast<std::size_t>(len))
+    return out;
+  try {
+    Json j = Json::parse(buf);
+    if (j.contains("config") && j["config"].is_object())
+      for (auto const& [k, v] : j["config"].items()) {
+        if (v.is_string())
+          out[k] = v.get<std::string>();
+        else if (!v.is_null())
+          out[k] = v.dump();
+      }
+  } catch (...) {
+    // body 非 JSON：忽略，按无配置处理
+  }
+  return out;
+}
+
 // 工作区目录 → 会话日志路径（与 session_path 同构；这里独立拼避免拉整个 wfr 层）
 std::string session_log_path(std::string const& ws, std::string const& name) {
   std::string const n = name.empty() ? "session" : "session-" + name;
@@ -162,6 +191,11 @@ void action_chat_stream(std::vector<std::pair<std::string, std::string>> const& 
   std::vector<std::string> av = {wfr_bin(), seg->workflow,
                                  "--workdir", ws, "--session", s};  // s = 完整 wfname.sessionid
   for (auto const& [k, v] : cppchain::cgi::default_sets_for(seg->workflow, text)) {
+    av.push_back("--set");
+    av.push_back(k + "=" + v);
+  }
+  // 通用化：stdin body 的任意 config 也作为 --set 追加（后置 → 覆盖默认）
+  for (auto const& [k, v] : body_config()) {
     av.push_back("--set");
     av.push_back(k + "=" + v);
   }
