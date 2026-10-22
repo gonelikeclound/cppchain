@@ -244,6 +244,21 @@ endif()
 set_target_properties(wfr_cgi PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 install(TARGETS wfr_cgi RUNTIME DESTINATION bin)
+
+# ---- qplugin：geo-server 的动态加载插件（C ABI，独立 .so，dlopen 引入）----
+# 对外只暴露 extern "C"：qp_revise / qp_free / qp_version。链接 workflow（读会话）+ tool（run_argv）。
+# 静态运行时（发布用）→ dlopen 进 Rust 进程时自带 libstdc++，无 GLIBCXX 依赖。
+add_library(qplugin MODULE ../plugins/qplugin.cpp)
+target_link_libraries(qplugin PRIVATE cppchain_workflow cppchain_tool)
+target_compile_options(qplugin PRIVATE -Wall -Wextra -Wpedantic)
+if(CPPCHAIN_WFR_STATIC_RUNTIME)
+  target_link_options(qplugin PRIVATE -static-libstdc++ -static-libgcc)
+  message(STATUS "qplugin: 静态链接 libstdc++/libgcc（发布构建）")
+endif()
+set_target_properties(qplugin PROPERTIES
+  PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins)
+install(TARGETS qplugin LIBRARY DESTINATION lib)
 # share/wfr/workflows/*.json（DESTINATION share → <prefix>/share/wfr/workflows）
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/share/wfr DESTINATION share
   FILES_MATCHING PATTERN "*.json")
