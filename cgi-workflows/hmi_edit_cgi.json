@@ -1,0 +1,34 @@
+{
+  "id": "hmi_edit_cgi",
+  "description": "hmi-editor AI 助手主 workflow（⑤ context 升级版）：context（注入环境 + 加载 hmi-skill）→ load_history → summarize → loop 对话[model/route/run_tools]。工具集 chat=get_weather/web_search/file_read/list_dir/file_write/read_skill/wiki_search；workspace=工程目录。",
+  "nodes": [
+    { "id": "ctx", "kind": "context",
+      "env": { "工程": "@config.env_project", "当前页面": "@config.env_file", "视口": "@config.env_viewport" },
+      "system": [ { "file": "@config.skill_dir/hmi-skill.md" } ],
+      "next": "recall" },
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session",
+      "next": "compress" },
+    { "id": "compress", "kind": "summarize", "model": "main",
+      "when": "@config.compress_when",
+      "max_msgs": "@config.compress_max_msgs",
+      "keep_last": "@config.compress_keep_last",
+      "style": "concise",
+      "on_fail": "skip",
+      "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 8, "next": "_turn_end",
+      "body": [
+        { "id": "think", "kind": "model", "model": "main", "tools": "chat",
+          "system_prompt": "你是 hmi-editor 的 AI 助手，负责维护当前工作目录下的 HMI 工程。你会收到一条注入的「【skill: hmi-skill.md】」系统消息，那是 hmi.xml 的格式与约束依据，必须遵守（文件需 <page> 置顶、组件 meta 必有 default 主题、坐标走 ${W}/${H} 等）。开工先读工程结构：list_dir / file_read 看清 project.conf、project.conf 的 PAGES 和既有 pages 的写法再动手；要写规范/查经验，用 read_skill / wiki_search（LLM Wiki 里沉淀了方法和规则）；落盘一律 file_write。事件动作只写 var 不写 prop、多语句用分号，颜色尽量走 theme key，数组只支持数值数组。改完简要说明改动，并提醒用户点编译验证（编译由 hmi-editor 完成）。回答简短直接，数值必须与工具结果一致，不要编造。",
+          "next": "echo_think" },
+        { "id": "echo_think", "kind": "echo",
+          "text": "💭 $think.result.thinking", "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "_turn_end" },
+          "default": "_fail" },
+        { "id": "act", "kind": "run_tools", "next": "echo_tool" },
+        { "id": "echo_tool", "kind": "echo",
+          "text": "🔧 $act.result.summary", "next": "_continue" }
+      ] }
+  ]
+}

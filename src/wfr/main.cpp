@@ -31,6 +31,7 @@
 #include <cppchain/tool/trip_db.hpp>  // B2-B 出行规划 DB 面  // wfr-㊸ @③：沙箱执行器选择（bash 后端）
 #include <cppchain/tool/weather.hpp>
 #include <cppchain/tool/web_search.hpp>
+#include <cppchain/tool/skill_tools.hpp>  // wfr-context（⑤）：read_skill / wiki_search
 #include <cppchain/workflow/compiler.hpp>
 #include <cppchain/workflow/components.hpp>
 #include <cppchain/workflow/debug_view.hpp>
@@ -64,6 +65,8 @@ using cppchain::tool::make_file_read_tool;
 using cppchain::tool::make_list_dir_tool;
 using cppchain::tool::make_weather_tool;
 using cppchain::tool::make_web_search_tool;
+using cppchain::tool::make_read_skill_tool;
+using cppchain::tool::make_wiki_search_tool;
 using cppchain::wfr::ca_bundle_from_env;
 using cppchain::wfr::env_or;
 using cppchain::wfr::load_dotenv;
@@ -524,6 +527,10 @@ int main(int argc, char** argv) {
   registry.add(make_file_read_tool(ft_cfg));
   registry.add(make_list_dir_tool(ft_cfg));
   registry.add(make_file_write_tool(ft_cfg));
+  // wfr-context（⑤）：HMI 编辑器 skill 文档 + LLM Wiki 检索（目录由 WFR_SKILL_DIR /
+  // WFR_WIKI_DIR 指定；未配置 → 工具运行时报错，不影响其它工具）。
+  registry.add(make_read_skill_tool());
+  registry.add(make_wiki_search_tool());
   // wfr-㊸ @①/@②/@③：bash 工具 —— 副作用任意（NeedHuman 人审 + 词面静态门禁）。
   // 执行后端 = SandboxManager 解析的沙箱（Auto：bwrap 可用→bwrap；否则受限子进程兜底）；
   // 无任何可用 provider → bash 以**空执行器**注册，handler 侧 fail-closed 拒跑（绝不裸奔）。
@@ -544,11 +551,13 @@ int main(int argc, char** argv) {
   comps.toolsets["all"] = all_tools;
   comps.toolsets["ts"] = all_tools;
   // 内置 chat 专用：常用件 + 文件对（天气/搜索之外，兑现 artifact 引用 + 写文件）
-  comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir", "file_write"};
+  comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir", "file_write",
+                            "read_skill", "wiki_search"};
   // wfr-㊸ @②：chat 的增强档 —— 带上 bash（副作用任意 → NeedHuman 人审悬挂）。
   // 独立 toolset，不污染既有 chat 的既有行为（approve_bash_demo 等用它）。
   comps.toolsets["chat_bash"] = {"get_weather", "web_search", "file_read",
-                                 "list_dir",    "file_write", "bash"};
+                                 "list_dir",    "file_write", "bash",
+                                 "read_skill", "wiki_search"};
   // B2-B 出行规划工具面：只读业务 DB 查询 + submit_result（自动验证器写 .out/trip_verdict.json）
   {
     auto ts = tool::make_trip_tools();

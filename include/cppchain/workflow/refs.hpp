@@ -31,6 +31,9 @@ inline constexpr char kMessagesKey[] = "messages";  // M12：对话通道（add_
 inline constexpr char kResultsKey[] = "results";
 inline constexpr char kLastExecKey[] = "_last_exec";
 inline constexpr char kLoopCountsKey[] = "loop_counts";
+// Context 节点（⑤）的产物槽：system 消息数组。model 节点装配请求时拼在系统提示之后，
+// 不进 messages 通道/会话日志（replay 不回溯 → 上下文只对本 run 生效）。
+inline constexpr char kSystemContextKey[] = "system_context";
 // wfr-㊾ 批③：交接件 state 键（per-step 子键合并，见 compiler.cpp 的 schema / node_types.cpp c_executor）
 inline constexpr char kHandoffStateKey[] = "handoff";
 // wfr-㊹ 环检测：工具调用跨轮指纹表（方法 1，c_run_tools 消费点）

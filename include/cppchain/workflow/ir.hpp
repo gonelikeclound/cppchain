@@ -70,6 +70,10 @@ enum class NodeKind {
   RunTools,  // 执行最后一条 AI 消息的 tool_calls → ToolMessage 追加进 messages
   LoadHistory,   // 工作路径的历史消息 → 追加进 state.messages（④：日志的 replay 投影）
   // （save_history 已随 ④ 删除：history = 日志的投影，不再单独落盘）
+  // ---- Context（⑤：上下文注入）----
+  // 环境（env 键值对）+ 文本/文件（system 条目）→ 组装 system 消息写入 state[system_context]，
+  // 由 model 节点装配请求时统一拼在系统提示之后；不进 messages 通道/会话日志（避免 replay 污染）。
+  Context,
   // ---- wfr-㉗：回显节点（屏之道回显 thinking/工具摘要，纯副作用不改 state）----
   Echo,
   // ---- wfr-㊵：历史消息处理（见 02-arch-design/17）----
@@ -156,6 +160,16 @@ struct NodeIR {
   // 压缩是**投影的渲染期变换**：结果绝不落盘（回声抑制见 compiler.cpp），故不影响 replay。
   std::string history_mode;
   std::string history_budget;                // keep_evidence 的单条工具结果内联 token 预算（可选）
+
+  // Context 节点（wfr-context，⑤：上下文注入）。
+  //   env    : {<键>: 字符串引用} —— 各值运行期解析（可为 @config.* 整串引用），
+  //            聚成一条「【当前环境】key: value」system 消息；
+  //   system : [{from:<字符串引用>} | {file:<字符串引用>}] —— 前者文本注入，
+  //            后者读文件内容注入（宿主侧可信读；file 的值可为 @config.* 组合路径）。
+  //   产物是系统消息 JSON 数组，写入 state[system_context]（见 refs.hpp kSystemContextKey），
+  //   由 model 节点装配请求时统一拼在其系统提示之后 —— 不进 messages 通道与会话日志。
+  Json context_env = Json::object();
+  Json context_system = Json::array();
 
   // Summarize 节点（wfr-㊵）：模型调一次，把较早的一段历史折成一条摘要。
   // 下面这些都可以写成 `@config.*`（运行期解析：缺省回落、拼错硬错，同 wfr-㉙ 的手法）。

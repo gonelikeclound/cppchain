@@ -837,6 +837,23 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
              node_id = n.id, reg = ctx.registry](Json const& state, NodeContext& nc) {
     std::vector<message::Message> msgs = messages_from_state(state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
+    // wfr-context（⑤）：节点注入的 system 上下文（env + skill 等），装配时统一拼在
+    // 系统提示之后、对话历史之前。来源 state[system_context]（context 节点写入；不进
+    // messages 通道/会话日志 → 上下文只对本 run 生效，replay 不回溯）。
+    if (auto it = state.find(kSystemContextKey); it != state.end() && it->is_array()) {
+      std::vector<message::Message> ctx_msgs;
+      for (Json const& raw : *it) {
+        try {
+          ctx_msgs.push_back(raw.get<message::Message>());
+        } catch (std::exception const&) {
+          // 形状由 context 节点保证；坏消息跳过（防御）
+        }
+      }
+      if (!ctx_msgs.empty()) {
+        auto const at = msgs.empty() ? msgs.begin() : msgs.begin() + 1;
+        msgs.insert(at, ctx_msgs.begin(), ctx_msgs.end());
+      }
+    }
     model::CallOptions co;
     // wfr-㊹ 治理（problems/34）：共享工具注册表存在时，按 toolset 名单**运行期重建** schema
     //（共享优先、内置兜底，mock 工具可覆盖同名内置）；否则用编译期快照（既有行为）。
@@ -2952,6 +2969,114 @@ void c_tool_registry(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ================= Context（wfr-context，⑤：环境 / skill 上下文注入）=================
+// 运行时：env 键值对 + system 条目（from 文本 | file 读文件）→ system 消息数组，
+// 写入 state[system_context]（kSystemContextKey）。model 节点装配请求时拼在系统提示
+// 之后、历史之前；**不进 messages 通道/会话日志** —— 上下文只对本 run 生效，replay 不回溯。
+inline constexpr std::size_t kContextFileCap = 64u * 1024;  // system[].file 的读入上限（字节）
+
+// UTF-8 安全截断（不切断多字节字符；上限近似按字节）
+std::string utf8_cut(std::string const& s, std::size_t max_bytes) {
+  if (s.size() <= max_bytes) return s;
+  std::size_t end = max_bytes;
+  while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) --end;
+  return s.substr(0, end) + "…";
+}
+
+std::vector<std::string> t_context(NodeIR const& n) {
+  std::vector<std::string> out;
+  if (n.context_env.is_object())
+    for (auto it = n.context_env.begin(); it != n.context_env.end(); ++it)
+      if (it.value().is_string()) out.push_back(it.value().get<std::string>());
+  if (n.context_system.is_array())
+    for (Json const& e : n.context_system) {
+      if (!e.is_object()) continue;
+      if (e.contains("from") && e["from"].is_string()) out.push_back(e["from"].get<std::string>());
+      if (e.contains("file") && e["file"].is_string()) out.push_back(e["file"].get<std::string>());
+    }
+  return out;
+}
+
+void v_context(NodeIR const& n, NodeType::ValidateContext const&, NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN11", "context 节点 '" + n.id + "' 缺少 next");
+  if (n.context_env.is_object()) {
+    for (auto it = n.context_env.begin(); it != n.context_env.end(); ++it)
+      if (!it.value().is_string())
+        err("VN11", "context 节点 '" + n.id + "' 的 env['" + it.key() +
+                        "'] 必须是字符串（可为 @config.* 引用）");
+  }
+  if (n.context_system.is_array()) {
+    for (Json const& e : n.context_system) {
+      if (!e.is_object()) {
+        err("VN11", "context 节点 '" + n.id + "' 的 system 条目必须是对象 {from|file}");
+        continue;
+      }
+      bool const has_from = e.contains("from") && e["from"].is_string();
+      bool const has_file = e.contains("file") && e["file"].is_string();
+      if (!has_from && !has_file)
+        err("VN11", "context 节点 '" + n.id + "' 的 system 条目需含 from（字符串）或 file（字符串）");
+    }
+  }
+}
+
+void c_context(NodeIR const& n, NodeType::CompileContext& ctx) {
+  Json const env = n.context_env;
+  Json const sys = n.context_system;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [env, sys, sink_p](Json const& state, NodeContext& nc) {
+    Json arr = Json::array();
+    auto add_sys = [&arr](std::string const& text) {
+      if (!text.empty()) arr.push_back(message::system_message(text));
+    };
+    // 1) 环境块：逐条 `key: value` 聚成一场「环境」system 消息
+    if (env.is_object() && !env.empty()) {
+      std::string block;
+      for (auto it = env.begin(); it != env.end(); ++it) {
+        if (!it.value().is_string()) continue;
+        Json const v = resolve_parameter(it.value(), state);
+        if (v.is_null()) continue;  // @config 缺键 → 跳过（不把 "null" 喂给模型）
+        std::string const val = v.is_string() ? v.get<std::string>() : message::utf8_safe_dump(v);
+        block += "- " + it.key() + ": " + val + "\n";
+      }
+      if (!block.empty()) add_sys("【当前环境】\n" + block);
+    }
+    // 2) system 条目：from = 文本引用（@config 等）；file = 读文件内容（宿主侧可信读）
+    if (sys.is_array()) {
+      for (Json const& entry : sys) {
+        if (!entry.is_object()) continue;
+        if (entry.contains("from") && entry["from"].is_string()) {
+          Json const v = resolve_parameter(entry["from"], state);
+          add_sys(v.is_string()   ? v.get<std::string>()
+                  : v.is_null()   ? std::string{}
+                  : message::utf8_safe_dump(v));
+        } else if (entry.contains("file") && entry["file"].is_string()) {
+          Json const v = resolve_parameter(entry["file"], state);
+          std::string const path = v.is_string() ? v.get<std::string>() : "";
+          if (path.empty()) continue;
+          std::error_code ec;
+          auto const canon = std::filesystem::weakly_canonical(path, ec);
+          if (!ec && std::filesystem::is_regular_file(canon)) {
+            std::ifstream in(canon, std::ios::binary);
+            std::string content((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+            content = utf8_cut(content, kContextFileCap);
+            add_sys("【skill: " + canon.filename().string() + "】\n" + content);
+          } else if (sink_p) {
+            sink_p->log_node(nc.node_name, "warn", "context: skill 文件不存在或不可读: " + path);
+          }
+        }
+      }
+    }
+    if (sink_p)
+      sink_p->log_node(nc.node_name, "info",
+                       "context: 注入 " + std::to_string(arr.size()) + " 条 system 消息");
+    if (arr.empty()) return Command{};
+    return Command::with_update(Json{{kSystemContextKey, std::move(arr)}});
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 }  // namespace
 
 std::vector<NodeType> const& builtin_node_types() {
@@ -3232,6 +3357,35 @@ std::vector<NodeType> const& builtin_node_types() {
          if (text.size() > 34) text = text.substr(0, 34) + "…";
          return (text.empty() ? "echo" : text) + " → " + n.next;
        }, v_echo, c_echo, e_next, t_echo},
+
+      // ---------------- context（wfr-context，⑤：环境/skill 上下文注入）----------------
+      // env 键值对 + system 条目（from 文本 | file 读文件）→ system 消息写入
+      // state[system_context]，由 model 节点装配请求时拼在系统提示之后。
+      {NodeKind::Context, "context",
+       [](Json const& n) { return kind_is(n, "context"); },
+       [](NodeIR& out, Json const& node) {
+         if (node.contains("env") && node["env"].is_object()) out.context_env = node["env"];
+         if (node.contains("system") && node["system"].is_array())
+           out.context_system = node["system"];
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "context";
+         if (!n.context_env.empty()) node["env"] = n.context_env;
+         if (!n.context_system.empty()) node["system"] = n.context_system;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         std::string desc;
+         if (n.context_env.is_object() && !n.context_env.empty())
+           desc += std::to_string(n.context_env.size()) + " env";
+         if (n.context_system.is_array() && !n.context_system.empty()) {
+           if (!desc.empty()) desc += " + ";
+           desc += std::to_string(n.context_system.size()) + " sys";
+         }
+         if (desc.empty()) desc = "-";
+         return "context (" + desc + ") → " + n.next;
+       }, v_context, c_context, e_next, t_context},
 
       // ---------------- plan（wfr-㊹）：产出/校验 state.plan ----------------
       {NodeKind::Plan, "plan",

@@ -49,6 +49,7 @@ add_library(cppchain_tool STATIC
   tool/fetch_url.cpp
   tool/calculator.cpp
   tool/file_tools.cpp
+  tool/skill_tools.cpp
   tool/probe.cpp
   tool/exec_guard.cpp
   tool/command_classify.cpp
