@@ -1,6 +1,10 @@
 # 源码入口。自底向上逐步加入：message → model → tool → state → graph → agent ...
 # 每个模块一个 static lib，demo 与问题验证在顶层 examples/。
 
+# qplugin（geo-server 动态插件 .so）需要把 cppchain 静态库链进共享对象——必须 PIC。
+# 对静态可执行无副作用（PIC 静态库照样链进 exe），仅体积略增。
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # ---- M1: cppchain_message ----
 add_library(cppchain_message STATIC
   message/message.cpp)
