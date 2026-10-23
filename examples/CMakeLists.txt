@@ -20,7 +20,8 @@ set(HTTP_EXAMPLE_TARGETS chat_live)
 set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
                          tools_frontline tools_files tools_arxiv m9_hybrid
                          bash_sidefx_analysis
-                         mcp_provider)  # MCP 二期：三路发现 + provider 节点（离线）
+                         mcp_provider      # MCP 二期：三路发现 + provider 节点（离线）
+                         vision_agent)     # 看图→调工具→回答 组合 demo（离线）
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
 # MCP 全链路验证对：mock server（自包含 HTTP MCP，零凭证）+ driver（真 curl 传输层全链断言）
@@ -56,6 +57,7 @@ list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basic
                             m9_hybrid m9_approval m9_artifact bash_sidefx_analysis
                             mcp_provider  # MCP 二期离线 demo（三路发现 + provider）
                             mcp_mock      # 自包含 mock MCP server（HTTP/JSON-RPC + SSE 推送）
+                            vision_agent   # 多模态 agent 组合（看图→工具→回答）
                             m10_streaming m10_interrupt m10_send m10_send_parallel m10_fork)
 list(APPEND EXAMPLE_TARGETS approve_interrupt)
 if(CPPCHAIN_BUILD_HTTP)
