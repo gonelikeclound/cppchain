@@ -1,0 +1,11 @@
+{
+  "mcpServers": [
+    {
+      "name": "everything",
+      "type": "remote",
+      "url": "http://127.0.0.1:3001/mcp",
+      "transport": "http",
+      "description": "官方 Everything 参考 server（streamableHttp，2.0.0）。零凭证、真机验证可用（MCP P1~P3 全链路）；需先起服务：./share/mcp/start-default.sh"
+    }
+  ]
+}
