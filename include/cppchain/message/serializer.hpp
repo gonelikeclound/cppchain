@@ -95,11 +95,17 @@ inline void to_json(nlohmann::json& j, ContentBlock const& b) {
           detail::put_opt(j, "id", v.id);
         } else if constexpr (std::same_as<T, ToolCall>) {
           j = {{"type", "tool_call"}, {"id", v.id}, {"name", v.name}, {"args", v.args}};
-        } else {
+        } else if constexpr (std::same_as<T, InvalidToolCall>) {
           j = {{"type", "invalid_tool_call"},
                {"id", v.id},
                {"name", v.name},
                {"error", v.error}};
+        } else if constexpr (std::same_as<T, ImageBlock>) {
+          j = {{"type", "image"}};
+          detail::put_opt(j, "media_type", v.media_type);
+          detail::put_opt(j, "data", v.data);
+          detail::put_opt(j, "url", v.url);
+          detail::put_opt(j, "id", v.id);
         }
       },
       b);
@@ -117,6 +123,13 @@ inline void from_json(nlohmann::json const& j, ContentBlock& b) {
   } else if (type == "invalid_tool_call") {
     b = InvalidToolCall{j.at("id").get<std::string>(), j.at("name").get<std::string>(),
                         detail::opt_str(j, "error").value_or("")};
+  } else if (type == "image") {
+    ImageBlock img;
+    img.media_type = detail::opt_str(j, "media_type");
+    img.data = detail::opt_str(j, "data");
+    img.url = detail::opt_str(j, "url");
+    img.id = detail::opt_str(j, "id");
+    b = std::move(img);
   } else {
     throw std::invalid_argument("cppchain::message: unknown content block type: " + type);
   }

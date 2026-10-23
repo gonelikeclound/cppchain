@@ -73,6 +73,12 @@ struct Message {
 
   bool has_tool_calls() const { return !tool_calls.empty(); }
   bool is_tool() const { return type == Role::Tool; }
+  // 是否含图片块（视觉输入）——wire 据此把 content 升为数组（见 model/openai/wire.hpp）。
+  bool has_images() const {
+    for (auto const& b : content)
+      if (std::holds_alternative<ImageBlock>(b)) return true;
+    return false;
+  }
 
   // 拼接文本内容（text 块的连接）；无文本 → 空串
   std::string text() const {

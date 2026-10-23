@@ -30,8 +30,15 @@ inline void show(std::string_view label, cppchain::message::Message const& m) {
           else if constexpr (std::same_as<std::decay_t<decltype(v)>,
                                           cppchain::message::ToolCall>)
             std::println("  content/tool  : {}({}) args={}", v.name, v.id, v.args.dump());
-          else
+          else if constexpr (std::same_as<std::decay_t<decltype(v)>,
+                                          cppchain::message::InvalidToolCall>)
             std::println("  content/inv   : {} err={}", v.name, v.error);
+          else
+            std::println("  content/image : media={} {}",
+                         v.media_type.value_or("?"),
+                         v.data.has_value()
+                             ? ("data " + std::to_string(v.data->size()) + "B base64")
+                             : ("url " + v.url.value_or("")));
         },
         b);
   }

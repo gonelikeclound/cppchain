@@ -309,3 +309,40 @@ TEST(Wire, build_request_wires_the_reasoning_echo_option) {
                                            cfg, /*stream=*/false);
   EXPECT_FALSE(plain.at("messages").at(0).contains("reasoning_content"));
 }
+
+// ---- 视觉（ImageBlock → content parts 数组 / image_url）----
+TEST(Wire, message_to_openai_image_inline_base64) {
+  message::Message m;
+  m.type = message::Role::Human;
+  m.content = {message::TextBlock{"看图说话"},
+               message::ImageBlock{.media_type = "image/png",
+                                   .data = "iVBORw0KAAABBB", .url = std::nullopt, .id = std::nullopt}};
+  auto const j = openai::message_to_openai(m);
+  ASSERT_TRUE(j["content"].is_array());
+  ASSERT_EQ(j["content"].size(), 2u);
+  EXPECT_EQ(j["content"][0]["type"], "text");
+  EXPECT_EQ(j["content"][0]["text"], "看图说话");
+  EXPECT_EQ(j["content"][1]["type"], "image_url");
+  EXPECT_EQ(j["content"][1]["image_url"]["url"], "data:image/png;base64,iVBORw0KAAABBB");
+}
+
+TEST(Wire, message_to_openai_image_external_url_and_no_media_type) {
+  message::Message m;
+  m.type = message::Role::Human;
+  m.content = {message::ImageBlock{.media_type = std::nullopt,
+                                   .data = std::nullopt,
+                                   .url = "https://example.com/x.png", .id = std::nullopt}};
+  auto const j = openai::message_to_openai(m);
+  ASSERT_TRUE(j["content"].is_array());
+  ASSERT_EQ(j["content"].size(), 1u);
+  EXPECT_EQ(j["content"][0]["image_url"]["url"], "https://example.com/x.png");
+}
+
+TEST(Wire, message_to_openai_no_image_keeps_string_content) {
+  message::Message m;
+  m.type = message::Role::Human;
+  m.content = {message::TextBlock{"纯文本"}};
+  auto const j = openai::message_to_openai(m);
+  ASSERT_TRUE(j["content"].is_string());  // 兼容路径：无图仍发字符串
+  EXPECT_EQ(j["content"], "纯文本");
+}

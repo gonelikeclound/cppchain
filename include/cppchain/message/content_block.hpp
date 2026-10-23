@@ -1,7 +1,7 @@
 // cppchain_message —— content_block.hpp
 // M1: ContentBlock 判别联合。参照 langchain_core/messages/content.py。
-// v1 只做 text / reasoning / tool_call / invalid_tool_call 四族；
-// 多模态(text-plain/image/video/audio/file)、server_tool_* 延后。
+// 文本 / 推理 / 工具调用 四族 + ImageBlock（视觉/多模态：图片识别）。
+// server_tool_* 仍延后。
 #pragma once
 
 #include <nlohmann/json.hpp>
@@ -51,8 +51,23 @@ struct InvalidToolCall {
   bool operator==(InvalidToolCall const&) const = default;
 };
 
+// 图片块（视觉/多模态输入，OpenAI 兼容的 image_url 部件）。
+// 两种来源二选一：
+//   · data       —— base64 内联像素（wire 时拼成 data:<media_type>;base64,<data> 的 data URL）
+//   · url        —— 外链 / 完整 data URL（端点自行拉取）
+// media_type 形如 "image/png"；内联时给全，外链可缺省。
+struct ImageBlock {
+  std::optional<std::string> media_type = std::nullopt;
+  std::optional<std::string> data = std::nullopt;
+  std::optional<std::string> url = std::nullopt;
+  std::optional<std::string> id = std::nullopt;
+
+  bool operator==(ImageBlock const&) const = default;
+};
+
 // ContentBlock 判别联合。判别键 = variant index ↔ 字符串 "type"。
-using ContentBlock = std::variant<TextBlock, ReasoningBlock, ToolCall, InvalidToolCall>;
+// ImageBlock 追加在末位 → 既有 index 0..3（text/reasoning/tool_call/invalid）语义不动。
+using ContentBlock = std::variant<TextBlock, ReasoningBlock, ToolCall, InvalidToolCall, ImageBlock>;
 
 // 块 → 判别字符串
 inline std::string_view content_block_type(ContentBlock const& block) {
@@ -64,8 +79,10 @@ inline std::string_view content_block_type(ContentBlock const& block) {
           return "reasoning";
         else if constexpr (std::same_as<T, ToolCall>)
           return "tool_call";
-        else
+        else if constexpr (std::same_as<T, InvalidToolCall>)
           return "invalid_tool_call";
+        else
+          return "image";
       },
       block);
 }

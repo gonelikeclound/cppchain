@@ -17,6 +17,7 @@
 
 namespace cppchain::model::openai {
 
+using cppchain::message::ImageBlock;
 using cppchain::message::InvalidToolCall;
 using cppchain::message::Message;
 using cppchain::message::MessageChunk;
@@ -66,9 +67,26 @@ inline nlohmann::json message_to_openai(Message const& m,
     case Role::Tool: j["role"] = "tool"; break;
     case Role::Chat: j["role"] = m.custom_role.value_or("user"); break;
   }
-  // 出站只发文本块（多模态暂不外发）；文本块拼为字符串，兼容性最好。
-  // reasoning 单独走 reasoning_content（见下）——DeepSeek 方言的非标准字段。
-  j["content"] = m.text();
+  // 出站：无图片 → content 拼成字符串（兼容性最好）；含图片 → 升为 parts 数组
+  //（{"type":"text"} + {"type":"image_url","image_url":{"url": "data:image/png;base64,…"}}，
+  //  OpenAI 视觉规范）。外链则直接放 url。
+  if (m.has_images()) {
+    auto parts = nlohmann::json::array();
+    std::string const text = m.text();
+    if (!text.empty()) parts.push_back({{"type", "text"}, {"text", text}});
+    for (auto const& b : m.content)
+      if (auto const* img = std::get_if<ImageBlock>(&b)) {
+        std::string const url =
+            img->data.has_value()
+                ? "data:" + img->media_type.value_or("application/octet-stream") + ";base64," +
+                      *img->data
+                : img->url.value_or("");
+        parts.push_back({{"type", "image_url"}, {"image_url", {{"url", url}}}});
+      }
+    j["content"] = std::move(parts);
+  } else {
+    j["content"] = m.text();
+  }
 
   if (echoes_reasoning(m, echo)) {
     std::string const r = reasoning_text(m);

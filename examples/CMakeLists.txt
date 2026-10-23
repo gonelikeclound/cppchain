@@ -9,10 +9,11 @@ set(EXAMPLE_TARGETS
   messages_stream_chunk   # 流式 chunk 合并 → 收敛
   chat_invoke             # M2: ChatModel 同步/协程调用（离线仿真）
   chat_stream             # M2: 流式增量 + 回调 + 取消（离线仿真）
+  vision_basic            # 多模态：ImageBlock → image_url，离线识别演示
 )
 
 # 需要模型库的 demo
-set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream structured_output)
+set(MODEL_EXAMPLE_TARGETS chat_invoke chat_stream structured_output vision_basic)
 # 需要真实 HTTP 传输的 demo（CPPCHAIN_BUILD_HTTP=ON 时才存在）
 set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo

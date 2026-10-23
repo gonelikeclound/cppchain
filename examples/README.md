@@ -66,6 +66,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `mcp_provider` | **MCP 二期（P1 client → P2 发现/连接/provider 全链路，离线）**：三路发现（so:// file:// url://）产**同一**列表；`MCPConnectionManager` 懒建握手复用池（`meta.token`→Bearer 头）；provider 两段式装配进 `tool_registry`（全名 `weather_get_weather`，发布面 strip_meta 无 token）；handler 直调 MCP server 返回 `{"text":"[上海] 晴，23°C，微风"}` | MCP · 发现源 / 连接管理 / 工具装配 |
 | `mcp_mock` | **自包含 mock MCP server（真实 HTTP 网络服务，零凭证/零外部依赖）**：POST /mcp 走 JSON-RPC（initialize 发会话 / tools/list / tools/call / resources/list），GET /mcp 是 SSE 通知长连（工具集变更推 `notifications/tools/list_changed`），GET /mcp.json 供 url:// 发现；内置 `add_tool`/`remove_tool` 运行时改工具集并**主动推送**——Everything 的本地替身（node 都不需要） | MCP · 参考测试 server 替身 |
 | `mcp_mock_driver` | **MCP 全链路验证器（真实 curl 传输层，真网络回环）**：url:// 发现→握手/会话→list→provider 注册→watch 长连监听→调 `add_tool` 等 server 推 `list_changed`→worker 重建注册表（新增 4→5、删除 5→4）→运行时新工具可调、旧工具不伤；13 项断言逐条 PASS。一键：`./examples/mcp_mock/verify.sh` | MCP · 全链路验证 |
+| `vision_basic` | **多模态/图像识别（离线）**：`ImageBlock`（base64 内联 / 外链）→ wire 把 content 升为 parts 数组（`{"type":"text"}` + `{"type":"image_url","image_url":{url}}`，OpenAI 视觉规范）；FakeTransport 脚本化回复走真 `ChatModel::invoke` 路径，从抓到的请求体回读**真实发出的 image_url**（`data:image/png;base64,…`）。真机需视觉端点（qwen-vl 等，DeepSeek 不支持） | 多模态（images） |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。

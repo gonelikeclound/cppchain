@@ -85,3 +85,25 @@ TEST(MessageInvariant, tool_tool_calls_require_tool_message) {
   std::vector<Message> ok{ai, tool_message("done", "call_9")};
   EXPECT_FALSE(validate_sequence(ok).has_value());
 }
+TEST(MessageRoundTrip, image_block_roundtrip_and_discriminator) {
+  ImageBlock img{.media_type = "image/png", .data = "iVBORw0KAAABBB",
+                 .url = std::nullopt, .id = "i1"};
+  Message m = with_blocks({TextBlock{"看图"}, img});
+  auto const j = nlohmann::json(m);
+  EXPECT_EQ(j.at("content")[0].at("type").get<std::string>(), "text");
+  EXPECT_EQ(j.at("content")[1].at("type").get<std::string>(), "image");
+  EXPECT_EQ(j.at("content")[1].at("media_type").get<std::string>(), "image/png");
+  EXPECT_EQ(j.at("content")[1].at("data").get<std::string>(), "iVBORw0KAAABBB");
+  EXPECT_EQ(j.at("content")[1].at("id").get<std::string>(), "i1");
+  EXPECT_TRUE(m.has_images());
+  EXPECT_EQ(j.get<Message>(), m);
+
+  // 外链变体（无 base64）：url 保留、media_type/data 缺席。
+  Message m2 = with_blocks({ImageBlock{.media_type = std::nullopt, .data = std::nullopt,
+                                       .url = "https://example.com/x.png", .id = std::nullopt}});
+  auto const j2 = nlohmann::json(m2);
+  EXPECT_EQ(j2.at("content")[0].at("type").get<std::string>(), "image");
+  EXPECT_EQ(j2.at("content")[0].at("url").get<std::string>(), "https://example.com/x.png");
+  EXPECT_TRUE(m2.has_images());
+  EXPECT_EQ(j2.get<Message>(), m2);
+}
