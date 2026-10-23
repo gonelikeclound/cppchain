@@ -55,6 +55,7 @@ add_library(cppchain_tool STATIC
   tool/exec_guard.cpp
   tool/command_classify.cpp
   tool/tool_plugin.cpp  # wfr-㊹：动态工具库加载（load_dynamic_tools）
+  mcp/client.cpp       # MCP（Model Context Protocol）客户端（P1：HTTP/SSE 同步）
   tool/spawn_executor.cpp
   tool/spawn_runner.cpp
   tool/sandbox.cpp

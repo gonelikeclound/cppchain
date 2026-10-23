@@ -54,7 +54,8 @@ add_executable(tool_tests
   tool/sandbox_test.cpp
   tool/arxiv_test.cpp
   tool/hybrid_selector_test.cpp
-  tool/effect_class_test.cpp)
+  tool/effect_class_test.cpp
+  tool/mcp_client_test.cpp)
 
 target_link_libraries(tool_tests PRIVATE
   cppchain_tool
