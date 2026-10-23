@@ -37,6 +37,7 @@ struct Request {
   std::string url;
   long status = 0;
   bool status_sent = false;
+  std::vector<std::string> resp_headers;  // 当前响应块的头行（不含状态行），空行处上浮
 };
 
 void release_request(Request& r) {
@@ -58,20 +59,33 @@ size_t header_cb(char* buffer, size_t size, size_t nitems, void* userdata) {
   auto* req = static_cast<Request*>(userdata);
   std::size_t n = size * nitems;
   std::string_view line(buffer, n);
-  if (line.rfind("HTTP/", 0) == 0 && !req->status_sent) {
-    auto sp = line.find(' ');
-    if (sp != std::string_view::npos) {
-      long code = 0;
-      auto first = line.data() + sp + 1;
-      auto last = line.data() + line.size();
-      if (std::from_chars(first, last, code).ec == std::errc{}) {
-        if (code >= 200) {  // 跳过 1xx 中间响应
-          req->status = code;
-          req->status_sent = true;
-          if (req->cbs.on_status) req->cbs.on_status(code);
+  // 去掉行尾 CRLF，入列前统一成方便比对的行文本
+  while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.remove_suffix(1);
+  if (line.rfind("HTTP/", 0) == 0) {
+    // 新响应块：上一条块已由空行 flush；复位（重定向/分段时防止块内容混串）
+    req->resp_headers.clear();
+    if (!req->status_sent) {
+      auto sp = line.find(' ');
+      if (sp != std::string_view::npos) {
+        long code = 0;
+        auto first = line.data() + sp + 1;
+        auto last = line.data() + line.size();
+        if (std::from_chars(first, last, code).ec == std::errc{}) {
+          if (code >= 200) {  // 跳过 1xx 中间响应
+            req->status = code;
+            req->status_sent = true;
+            if (req->cbs.on_status) req->cbs.on_status(code);
+          }
         }
       }
     }
+  } else if (line.empty()) {
+    // 空行 = 当前响应块头结束 → 整组上浮
+    if (!req->resp_headers.empty() && req->cbs.on_response_headers)
+      req->cbs.on_response_headers(req->resp_headers);
+    req->resp_headers.clear();
+  } else if (req->status_sent) {
+    req->resp_headers.emplace_back(std::string(line));
   }
   return n;
 }

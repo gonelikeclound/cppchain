@@ -1,7 +1,12 @@
 // cppchain —— mcp/client.cpp
 // MCP 客户端实现：JSON-RPC 2.0 over HTTP（同步，复用 tool::http_json 桥接异步 Transport）。
+// P3 批①：SSE 单发响应解析（真实 streamable-http 服务器连单发结果也用 text/event-stream 帧
+// 包裹）+ mcp-session-id 会话头回带（initialize 握手响应头里取，后续请求自动带上）。
 #include "cppchain/mcp/client.hpp"
 
+#include <cctype>
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "cppchain/core/cancel.hpp"
@@ -15,6 +20,61 @@ namespace {
 // MCP 协议版本（2025-03-26 稳定版）。每次请求都要带在头里（服务端校验）。
 constexpr char kMcpProtocolVersion[] = "2025-03-26";
 std::atomic<int64_t> g_id{0};  // JSON-RPC id（单调）
+
+// 从响应体抽 MCP 消息：纯 JSON 对象直接用；SSE 帧（event: message / data: {…}，data 可多行）
+// 按行抽 data 拼接后解析。拿不到合法 JSON 对象 → nullopt（fail-closed 交回调用方报错）。
+std::optional<Json> parse_sse_or_json(std::string_view raw) {
+  Json direct = Json::parse(raw, nullptr, /*allow_exceptions=*/false);
+  if (!direct.is_discarded() && direct.is_object()) return direct;
+
+  std::string data;
+  std::optional<Json> out;
+  auto try_flush = [&] {
+    if (!data.empty() && !out) {
+      Json j = Json::parse(data, nullptr, /*allow_exceptions=*/false);
+      if (!j.is_discarded() && j.is_object()) out = std::move(j);
+    }
+    data.clear();
+  };
+  std::size_t pos = 0;
+  while (pos < raw.size()) {
+    std::size_t const nl = raw.find('\n', pos);
+    std::string_view line = raw.substr(pos, nl == std::string_view::npos ? raw.size() - pos
+                                                                        : nl - pos);
+    pos = nl == std::string_view::npos ? raw.size() : nl + 1;
+    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    if (line.starts_with("data:")) {
+      auto v = line.substr(5);
+      if (!v.empty() && v.front() == ' ') v.remove_prefix(1);
+      if (!data.empty()) data += '\n';
+      data.append(v);
+    } else if (line.empty()) {
+      try_flush();  // 事件边界
+      if (out) break;
+    }
+  }
+  try_flush();  // 末尾无空行的事件
+  return out;
+}
+
+// 从响应头取 mcp-session-id（键名大小写不敏感）。
+std::string session_id_from_headers(std::vector<std::string> const& headers) {
+  for (std::string const& h : headers) {
+    auto const colon = h.find(':');
+    if (colon == std::string::npos) continue;
+    std::string key;
+    key.reserve(colon);
+    for (char c : std::string_view(h).substr(0, colon))
+      if (c != ' ' && c != '\t') key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (key != "mcp-session-id") continue;
+    std::string_view v(h.data() + colon + 1, h.size() - colon - 1);
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r'))
+      v.remove_suffix(1);
+    return std::string(v);
+  }
+  return {};
+}
 }  // namespace
 
 McpResult MCPClient::call(std::string_view method, Json params) {
@@ -27,27 +87,37 @@ McpResult MCPClient::call(std::string_view method, Json params) {
   hreq.body = req.dump();
   hreq.headers = {"Content-Type: application/json", "Accept: application/json, text/event-stream",
                   std::string("MCP-Protocol-Version: ") + kMcpProtocolVersion};
+  if (!session_id_.empty()) hreq.headers.push_back("mcp-session-id: " + session_id_);
   hreq.headers.insert(hreq.headers.end(), headers_.begin(), headers_.end());
 
   auto resp = tool::http_json(*transport_, hreq, core::CancelToken{});
-  if (!resp) return McpResult{.error = resp.error().message};
-  if (resp->status != 0 && (resp->status < 200 || resp->status >= 300))
-    return McpResult{.error = "MCP HTTP " + std::to_string(resp->status),
-                     .http_status = resp->status};
-  if (resp->body.is_discarded() || !resp->body.is_object())
-    return McpResult{.error = "MCP 响应非 JSON 对象", .http_status = resp->status};
-  // JSON-RPC：result 或 error。
-  if (resp->body.contains("error") && resp->body["error"].is_object()) {
-    auto const& e = resp->body["error"];
-    return McpResult{.error = "MCP error "
-                              + (e.contains("code") ? std::to_string(e["code"].get<int64_t>())
-                                                    : std::string("?"))
-                              + ": " + e.value("message", "（无消息）"),
-                     .http_status = resp->status};
-  }
-  if (!resp->body.contains("result"))
-    return McpResult{.error = "MCP 响应缺 result", .http_status = resp->status};
-  return McpResult{.http_status = resp->status, .result = resp->body["result"]};
+  if (!resp) return McpResult{.error = resp.error().message, .http_status = 0, .result = {}};
+
+  // 会话回带：任何响应头带 mcp-session-id 就记下（initialize 握手一般首发）。
+  if (auto const sid = session_id_from_headers(resp->headers); !sid.empty()) session_id_ = sid;
+
+  // 消息体可能是纯 JSON，也可能 SSE 帧包裹 —— 统一抽成 JSON 对象。
+  auto const payload = parse_sse_or_json(resp->raw);
+  if (!payload)
+    return McpResult{.error = "MCP 响应非 JSON 对象/SSE 帧", .http_status = resp->status, .result = {}};
+  Json const& body = *payload;
+
+  long const status = resp->status;
+  bool const non_2xx = status != 0 && (status < 200 || status >= 300);
+  auto const rpc_err = [&]() -> std::string {
+    auto const& e = body["error"];
+    return std::string("MCP error ")
+           + (e.contains("code") ? std::to_string(e["code"].get<int64_t>()) : std::string("?"))
+           + ": " + e.value("message", "（无消息）");
+  };
+
+  if (body.contains("error") && body["error"].is_object())
+    return McpResult{.error = rpc_err(), .http_status = status, .result = {}};  // 400+ 的 RPC 错误更可读
+  if (non_2xx) return McpResult{.error = "MCP HTTP " + std::to_string(status), .http_status = status, .result = {}};
+  if (!body.contains("result"))
+    return McpResult{.error = "MCP 响应缺 result", .http_status = status, .result = {}};
+  // 成功：result 原样返回（error 缺省空 = ok）。
+  return McpResult{.error = {}, .http_status = status, .result = body["result"]};
 }
 
 McpResult MCPClient::initialize() {
@@ -57,7 +127,8 @@ McpResult MCPClient::initialize() {
 }
 
 std::expected<std::vector<McpToolInfo>, std::string> MCPClient::list_tools() {
-  auto r = call("tools/list", Json{{"cursor", Json(nullptr)}});
+  // cursor 可选，**缺省省略**——显式 null 会被严格校验的 server（官方 Everything）拒掉。
+  auto r = call("tools/list", Json::object());
   if (!r.ok()) return std::unexpected(r.error);
   auto const tools_it = r.result.find("tools");
   if (tools_it == r.result.end() || !tools_it->is_array())
@@ -80,7 +151,7 @@ McpResult MCPClient::call_tool(std::string const& name, Json args) {
 }
 
 McpResult MCPClient::list_resources() {
-  return call("resources/list", Json{{"cursor", Json(nullptr)}});
+  return call("resources/list", Json::object());  // 同 tools/list：cursor 省略
 }
 
 // MCP 工具的 result 形如 {content:[{type:"text",text}], structuredContent:{...}, isError}。

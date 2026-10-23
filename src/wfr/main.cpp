@@ -446,8 +446,11 @@ int main(int argc, char** argv) {
                                      "--set", "task=" + T, "--set", "approve_policy=allow"};
       if (!G.empty()) { av.push_back("--set"); av.push_back("goal=" + G); }
       av.push_back("cron 定时批");
-      cppchain::tool::detail::run_argv(av, std::nullopt, cppchain::tool::detail::SpawnLimits{},
-                                        std::chrono::minutes(30), 1u << 20);
+      auto const spawned = cppchain::tool::detail::run_argv(
+          av, std::nullopt, cppchain::tool::detail::SpawnLimits{}, std::chrono::minutes(30), 1u << 20);
+      if (spawned.exit_code != 0)  // 拉起失败不丢现场，但视为已触发（沿用原语义）
+        std::println("⚠ cron ➜ 批次拉起失败（exit={}）{}", spawned.exit_code,
+                     spawned.note.empty() ? spawned.output : spawned.note);
       job["last_run"] = now;
       fired = true;
     }

@@ -32,10 +32,13 @@ struct HttpError {
 };
 
 struct HttpCallbacks {
-  std::function<void(long status)> on_status;              // 收到响应头（HTTP 状态码）
-  std::function<void(std::string_view)> on_body_chunk;     // 增量响应字节
-  std::function<void(HttpError)> on_error;                 // 传输层错误（网络/超时）
-  std::function<void()> on_complete;                       // 响应结束（含非 2xx）
+  std::function<void(long status)> on_status;                    // 收到响应头（HTTP 状态码）
+  std::function<void(std::string_view)> on_body_chunk;           // 增量响应字节
+  std::function<void(HttpError)> on_error;                       // 传输层错误（网络/超时）
+  std::function<void()> on_complete;                             // 响应结束（含非 2xx）
+  // 响应头整组回调（不含状态行与空行；形如 "Name: value"，保序原样）。MCP 会话头等靠它上浮。
+  // 交给 on_status 后、首个空行处触发一次；可选 —— 实现方不提供则调用方拿不到响应头。
+  std::function<void(std::vector<std::string> const&)> on_response_headers;
 };
 
 class Transport {

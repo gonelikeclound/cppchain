@@ -23,6 +23,7 @@ std::expected<JsonResponse, ToolError> http_json(http::Transport& transport,
   struct Sync {
     long status = 0;
     std::string body;
+    std::vector<std::string> headers;
     std::optional<ToolError> err;
     std::counting_semaphore<> done{0};
   };
@@ -30,6 +31,7 @@ std::expected<JsonResponse, ToolError> http_json(http::Transport& transport,
 
   http::HttpCallbacks cbs;
   cbs.on_status = [st](long s) { st->status = s; };
+  cbs.on_response_headers = [st](std::vector<std::string> const& hs) { st->headers = hs; };
   cbs.on_body_chunk = [st](std::string_view b) {
     if (st->body.size() < kBodyLimit) {
       auto n = std::min(kBodyLimit - st->body.size(), b.size());
@@ -57,6 +59,7 @@ std::expected<JsonResponse, ToolError> http_json(http::Transport& transport,
   JsonResponse out;
   out.status = st->status;
   out.raw = st->body;
+  out.headers = std::move(st->headers);
   out.body = nlohmann::json::parse(st->body, nullptr, /*allow_exceptions=*/false);
   return out;
 }

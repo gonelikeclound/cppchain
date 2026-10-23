@@ -19,6 +19,7 @@ class FakeTransport final : public Transport {
   struct Script {
     long status = 200;
     std::vector<std::string> chunks;  // 依次投递的响应字节
+    std::vector<std::string> headers; // 响应头（形如 "mcp-session-id: abc"；on_response_headers 上浮）
     std::string error;                // 非空 → 走 on_error
     bool timeout = false;             // error 是否应归类为超时
     int delay_ms = 0;                 // >0 → 后台线程分片延迟投递（用于测试取消/异步）
@@ -54,6 +55,7 @@ class FakeTransport final : public Transport {
       return;
     }
     if (cbs.on_status) cbs.on_status(s.status);
+    if (cbs.on_response_headers && !s.headers.empty()) cbs.on_response_headers(s.headers);
 
     for (auto const& c : s.chunks) {
       if (!alive()) return;

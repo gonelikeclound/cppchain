@@ -65,7 +65,8 @@ int main() {
   std::println("[协程 ainvoke] {}", ask_async(model, "再来一次").wait());
 
   // ---- 3. 错误是常态：expected 承载 ----
-  transport->push(http::FakeTransport::Script{401, {R"({"error":"invalid api key"})"}, "", 0});
+  transport->push(http::FakeTransport::Script{.status = 401, .chunks = {R"({"error":"invalid api key"})"},
+                                              .headers = {}, .error = {}, .timeout = false, .delay_ms = 0});
   auto bad = model->invoke(msgs, CallOptions{});
   if (!bad)
     std::println("[错误处理] kind={} http={} msg={}", kind_str(bad.error().kind),

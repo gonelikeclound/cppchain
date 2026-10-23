@@ -67,11 +67,15 @@ class MCPClient {
   // resources/list：列出资源（首期打通方法，消费端后续接）。
   [[nodiscard]] McpResult list_resources();
 
+  // 已建立的 MCP 会话 id（initialize 握手响应头的 mcp-session-id；空 = 尚未握手成功）。
+  [[nodiscard]] std::string const& session_id() const { return session_id_; }
+
  private:
   http::Transport* transport_;
   std::string base_url_;
   std::vector<std::string> headers_;
   std::string server_name_;
+  std::string session_id_;  // streamable-http 会话：握手后回带 mcp-session-id 头
 };
 
 // MCP 工具 → ToolSpec。handler 里 client->call_tool(name,args)，返回 result 的 content 文本

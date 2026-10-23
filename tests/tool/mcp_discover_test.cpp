@@ -45,16 +45,16 @@ struct McpP2Harness {
 
 // ---- FakeTransport::Script 构造：字段显式给全，零告警（-Wmissing-field-initializers）----
 FakeTransport::Script script_ok(Json body) {
-  return FakeTransport::Script{.status = 200, .chunks = {body.dump()}, .error = {},
-                               .timeout = false, .delay_ms = 0};
+  return FakeTransport::Script{.status = 200, .chunks = {body.dump()}, .headers = {},
+                               .error = {}, .timeout = false, .delay_ms = 0};
 }
 FakeTransport::Script script_ok_raw(std::string raw) {
-  return FakeTransport::Script{.status = 200, .chunks = {std::move(raw)}, .error = {},
-                               .timeout = false, .delay_ms = 0};
+  return FakeTransport::Script{.status = 200, .chunks = {std::move(raw)}, .headers = {},
+                               .error = {}, .timeout = false, .delay_ms = 0};
 }
 FakeTransport::Script script_fail(std::string message) {
-  return FakeTransport::Script{.status = 0, .chunks = {}, .error = std::move(message),
-                               .timeout = false, .delay_ms = 0};
+  return FakeTransport::Script{.status = 0, .chunks = {}, .headers = {},
+                               .error = std::move(message), .timeout = false, .delay_ms = 0};
 }
 
 // —— MCP JSON-RPC 响应构造（沿用 P1 mcp_client_test 的形状）——

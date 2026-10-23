@@ -25,6 +25,8 @@ struct JsonResponse {
   long status = 0;     // HTTP 状态码（0 = 未收到响应头）
   nlohmann::json body; // 解析后的 JSON（解析失败或空响应 → null）
   std::string raw;     // 原始响应体（完整保留；错误诊断处另行截断）
+  // 响应头（不含状态行/空行；实现方提供 on_response_headers 才非空）。SSE/会话类协议取头用。
+  std::vector<std::string> headers;
 };
 
 // 发起请求并阻塞到完成（信号量桥接，模式同 DashScopeEmbeddings）。

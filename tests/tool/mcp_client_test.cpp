@@ -4,6 +4,7 @@
 // 纪律：断言请求内容（MCP-Protocol-Version 头、JSON-RPC body、id 单调）与响应解析。
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -48,12 +49,12 @@ Json ok_call_text(std::string text) {
 
 // ---- FakeTransport::Script 构造：字段显式给全，零告警（-Wmissing-field-initializers）----
 FakeTransport::Script script_raw(long status, std::string raw) {
-  return FakeTransport::Script{.status = status, .chunks = {std::move(raw)}, .error = {},
-                               .timeout = false, .delay_ms = 0};
+  return FakeTransport::Script{.status = status, .chunks = {std::move(raw)}, .headers = {},
+                               .error = {}, .timeout = false, .delay_ms = 0};
 }
 FakeTransport::Script script_fail(std::string message) {
-  return FakeTransport::Script{.status = 0, .chunks = {}, .error = std::move(message),
-                               .timeout = false, .delay_ms = 0};
+  return FakeTransport::Script{.status = 0, .chunks = {}, .headers = {},
+                               .error = std::move(message), .timeout = false, .delay_ms = 0};
 }
 }  // namespace
 
@@ -100,6 +101,8 @@ TEST(McpClient, list_tools_parses_schema) {
   EXPECT_EQ((*tools)[0].description, "查天气");
   EXPECT_EQ((*tools)[0].input_schema["properties"]["city"]["type"], "string");
   EXPECT_EQ((*tools)[1].name, "no_desc");
+  // 真机发现（P3 批① · Everything）：显式 cursor:null 会被严格校验的 server 拒 —— 必须省略。
+  EXPECT_EQ(h.tx.requests()[0].body.find("\"cursor\""), std::string::npos);
 }
 
 // call_tool：调用返回 content text。
@@ -188,4 +191,92 @@ TEST(McpClient, make_mcp_tool_structured_content) {
   auto r = spec.handler(Json::object(), ctx);
   ASSERT_TRUE(r.has_value()) << r.error().message;
   EXPECT_EQ((*r)["price"], 799);
+}
+
+// ================= P3 批①：SSE 单发响应解析 + 会话头回带 =================
+// 帧格式以真实 Everything server（streamableHttp）的实测为准：event: message / id: / data: 行。
+
+// SSE 单发消息（非纯 JSON 体）→ 正常解出 result。
+TEST(McpClient, sse_single_message_response_parsed) {
+  McpHarness h;
+  h.tx.push(script_raw(
+      200, "event: message\n"
+           "id: 87fc36cc-bac1-47b1-9bc8-ad7dbbd17ad7\n"
+           "data: " + std::string(ok_initialize().dump()) + "\n\n"));
+  auto r = h.client.initialize();
+  ASSERT_TRUE(r.ok()) << r.error;
+  EXPECT_TRUE(r.result["capabilities"]["tools"].is_object());
+}
+
+// SSE 帧里的 JSON-RPC error → error 上浮带 code+message。
+TEST(McpClient, sse_error_frame_surfaces) {
+  McpHarness h;
+  h.tx.push(script_raw(
+      200, "event: message\n"
+           "data: " + std::string(rpc_error(-32601, "method not found").dump()) + "\n"));
+  auto r = h.client.initialize();
+  ASSERT_FALSE(r.ok());
+  EXPECT_NE(r.error.find("-32601"), std::string::npos);
+  EXPECT_NE(r.error.find("method not found"), std::string::npos);
+}
+
+// initialize 响应头带会话 id（大小写不敏感的键名）→ 记入 client，后续请求自动回带会话头。
+TEST(McpClient, session_id_roundtrip_sent_on_subsequent_requests) {
+  McpHarness h;
+  h.tx.push(FakeTransport::Script{.status = 200, .chunks = {ok_initialize().dump()},
+                                  .headers = {"mcp-session-id: sess-abc-123"},
+                                  .error = {}, .timeout = false, .delay_ms = 0});
+  auto r = h.client.initialize();
+  ASSERT_TRUE(r.ok()) << r.error;
+  EXPECT_EQ(h.client.session_id(), "sess-abc-123");
+
+  // 二次请求（tools/list）必须回带 mcp-session-id 头。
+  h.tx.push(script_raw(200, ok_tools_list(
+      Json::array({Json{{"name", "get_weather"},
+                        {"description", "查天气"},
+                        {"inputSchema", Json{{"type", "object"}}}}}))
+      .dump()));
+  auto tools = h.client.list_tools();
+  ASSERT_TRUE(tools.has_value()) << tools.error();
+  ASSERT_EQ(h.tx.requests().size(), 2u);
+  bool const saw_session = std::any_of(
+      h.tx.requests()[1].headers.begin(), h.tx.requests()[1].headers.end(),
+      [](std::string const& hdr) { return hdr.starts_with("mcp-session-id: sess-abc-123"); });
+  EXPECT_TRUE(saw_session);
+  EXPECT_EQ(tools->size(), 1u);
+}
+
+// 服务端用大写变体键名（Mcp-Session-Id）→ 客户端大小写不敏感地取到。
+TEST(McpClient, session_id_key_case_insensitive) {
+  McpHarness h;
+  h.tx.push(FakeTransport::Script{.status = 200, .chunks = {ok_initialize().dump()},
+                                  .headers = {"Mcp-Session-Id: sess-ABC"}, .error = {},
+                                  .timeout = false, .delay_ms = 0});
+  ASSERT_TRUE(h.client.initialize().ok());
+  EXPECT_EQ(h.client.session_id(), "sess-ABC");
+}
+
+// 没有会话头 → 请求不额外带 mcp-session-id。
+TEST(McpClient, no_session_header_when_none) {
+  McpHarness h;
+  h.tx.push(script_raw(200, ok_initialize().dump()));
+  ASSERT_TRUE(h.client.initialize().ok());
+  EXPECT_TRUE(h.client.session_id().empty());
+
+  h.tx.push(script_raw(200, ok_tools_list(Json::array()).dump()));
+  ASSERT_TRUE(h.client.list_tools().has_value());
+  for (std::string const& hdr : h.tx.requests()[1].headers)
+    EXPECT_EQ(hdr.find("mcp-session-id"), std::string::npos);
+}
+
+// 无会话被拒（HTTP 400 + JSON-RPC error 体）→ 上浮可读的 RPC 错误，而非笼统 "HTTP 400"。
+TEST(McpClient, session_required_400_reports_rpc_error) {
+  McpHarness h;
+  h.tx.push(script_raw(200, ok_initialize().dump()));
+  ASSERT_TRUE(h.client.initialize().ok());
+  h.tx.push(script_raw(400, R"({"jsonrpc":"2.0","error":{"code":-32000,"message":"Server not initialized"},"id":null})"));
+  auto r = h.client.list_tools();
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().find("Server not initialized"), std::string::npos);
+  EXPECT_NE(r.error().find("-32000"), std::string::npos);
 }
