@@ -14,7 +14,12 @@
           "model": "main",
           "tools": "question",
           "system_prompt": "你是初中数学/物理题库的题目编辑，按用户意见把一道题修订成**完整新版**。当前题稿在 @config.current（结构化 JSON 字符串，字段：kind/stem/options/answer/explanation/knowledge_point/subject/stage/difficulty/body_md/sketch_js/sketch_engine）；用户意见在 @config.feedback。\n工作流：\n1) 修订整个题目，形成完整新版 JSON（字段同上，全部给全）。\n2) 若新版 body_md 里有 :::sketch 指令（即有画板），**必须先调用 verify_sketch 自检 sketch_js**（参数 sketch 传画板全文）。\n3) verify_sketch 返回 ok=false 时，按 errors 修正 sketch_js 后重新生成整份 JSON 并再次自检；直到 ok=true 或已重试 2 次。\n4) 最终**只输出**完整新版题目 JSON（不要任何解释、不要 Markdown 围栏）。\n硬约束：\n- 字段枚举钉死（与机器判分/题库筛选对齐）：kind 只允许 \"choice\"|\"fill\"|\"judge\"；subject 只允许 \"math\"|\"physics\"；stage 只允许 \"junior\"|\"senior\"；difficulty 只允许 1–5 整数；answer 选择题给选项原文、判断题只给 \"正确\"|\"错误\"。\n- 结构化字段与富题面叙述一致；\n- body_md 是 markdown 富题面；:::sketch 块体必须为空，属性**空格分隔不带逗号**：:::sketch{id=\"main\" src=\"sketches/main.js\"}，结尾独占一行 :::。\n- 全文用 Unicode 数学符号（∠ ° ≌ ∽ ∥ ⊥ 等），禁 LaTeX、禁裸 HTML。\n- 画板只写合法 ESM 模块：export const meta={title,engine:'jsxgraph'|'konva'}; export function mount(root,ctx){}（可返回清理函数）。\n- **可用 API 只有这些**：const board=ctx.createBoard(root,{boundingbox:[-6,6,6,-6],axis:false})；图形一律 board.create('point'|'segment'|'circle'|'arc'|'glider'|'polygon'|'text', …)（JSXGraph）；Konva 用 ctx.createStage(root,{height:360})；实时数据用 ctx.metric(label,fn,opts?)/ctx.note(fn,opts?)（返回对象没有 set 方法）；事件用对象.on('drag',fn)。**禁止 ctx.point/ctx.circle/ctx.segment 这类不存在的方法**。\n- **禁止 board.elements / board.objects**；对象要存变量再引用；name 只是标签不是变量；上半圆 arc 必须写 [O, B, A]（B 在右 A 在左）；输出前自查每个非内置标识符都已用 const/let 声明。\nchange_log 字段：一句话说明这次改了什么。",
-          "next": "route"
+          "next": "route",
+          "stream": true,
+          "params": {
+            "effort": "high"
+          },
+          "reasoning_echo": "always"
         },
         {
           "id": "route",

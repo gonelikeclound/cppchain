@@ -837,10 +837,11 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const model_name = n.model;
   Json const params = n.model_params;          // wfr-㉙：运行期解析后并入 CallOptions.extra
   std::string const echo_spec = n.reasoning_echo;
+  bool const stream_on = n.stream;
   auto sink_p = ctx.sink;  // 触发期注入的 NodeLog（docs/12 §6.4：source=node 的诊断日志）
 
   ctx.graph.add_node(
-      n.id, [m, tools_json, toolset_names, sys, model_name, params, echo_spec, sink_p,
+      n.id, [m, tools_json, toolset_names, sys, model_name, params, echo_spec, stream_on, sink_p,
              node_id = n.id, reg = ctx.registry](Json const& state, NodeContext& nc) {
     std::vector<message::Message> msgs = messages_from_state(state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
@@ -904,7 +905,27 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     }
     std::string const echo_text = resolve_text_parameter(echo_spec, state);
     co.reasoning_echo = parse_reasoning_echo(echo_text, node_id);
-    auto r = m->invoke(msgs, co);
+    std::expected<model::Message, model::ModelError> r;
+    if (stream_on) {
+      // 流式：请求体带 stream:true（走真实 token 流）；逐 delta 经 nc.emit("token") 发布，
+      // 累积后 finalize_chunk 成完整消息。空流给一个空 Ai 消息（route 依 last_ai_outcome 兜底）。
+      message::MessageChunk acc;
+      bool has_acc = false;
+      for (auto const& c : m->stream(msgs, co)) {
+        for (auto const& blk : c.content) {
+          if (auto const* t = std::get_if<message::TextBlock>(&blk)) {
+            nc.emit("token", Json{{"text", t->text}});
+          } else if (auto const* rb = std::get_if<message::ReasoningBlock>(&blk)) {
+            nc.emit("token", Json{{"reasoning", rb->reasoning}});
+          }
+        }
+        if (!has_acc) { acc = c; has_acc = true; } else { acc = acc + c; }
+      }
+      r = std::expected<model::Message, model::ModelError>(
+          has_acc ? model::Message{message::finalize_chunk(acc)} : model::Message{});
+    } else {
+      r = m->invoke(msgs, co);
+    }
     if (!r) throw tool::ToolException("model 节点调用失败：" + r.error().message);
     // **只发一次**：回复追加进 messages，循环由 route + 回边负责
     sink_p->log_node(nc.node_name, "info", "model '" + model_name + "' 完成一次调用",
@@ -3333,6 +3354,7 @@ std::vector<NodeType> const& builtin_node_types() {
          get_str(out, node, "system_prompt", out.system_prompt);
          get_str(out, node, "next", out.next);
          get_str(out, node, "reasoning_echo", out.reasoning_echo);
+         if (node.contains("stream") && node["stream"].is_boolean()) out.stream = node["stream"].get<bool>();
          // 原样收下（含非对象）：让 VN13 报错，而不是这里静默丢掉。
          if (node.contains("params") && !node["params"].is_null()) out.model_params = node["params"];
        },
@@ -3343,6 +3365,7 @@ std::vector<NodeType> const& builtin_node_types() {
          if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
          if (!n.model_params.empty()) node["params"] = n.model_params;
          if (!n.reasoning_echo.empty()) node["reasoning_echo"] = n.reasoning_echo;
+         if (n.stream) node["stream"] = true;
          node["next"] = n.next;
        },
        [](NodeIR const& n) {

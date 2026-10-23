@@ -148,6 +148,9 @@ struct NodeIR {
   Json model_params = Json::object();
   // wfr-㉙：出站是否回传 reasoning_content（drop / tool_calls / always，可写 `@config.*`）。
   std::string reasoning_echo;
+  // 逐 token 流式：模型节点用 stream() 走真实请求流（请求体 stream:true），
+  // 每个 delta 经 NodeContext::emit("token") 发布（--stream 时透出）。缺省 false = 非流式 invoke。
+  bool stream = false;
 
   // Route 节点（M12）：match 分派。判别式与 outcome 都是**封闭词表**
   std::string on;                            // 判别式名，初版只有 "last_ai_outcome"
