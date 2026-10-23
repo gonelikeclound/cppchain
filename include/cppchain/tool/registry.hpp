@@ -29,6 +29,17 @@ class ToolRegistry {
   [[nodiscard]] std::size_t size() const { return tools_.size(); }
   [[nodiscard]] bool empty() const { return tools_.empty(); }
 
+  // MCP P3 批②：运行期移除一把工具（变化监听刷新要"删掉下架的 server 工具"）。
+  // 中段擦除会让后续下标位移 —— 直接整表重建索引（集合小，O(n) 可接受）。
+  // 注意 find() 返回的指针在移除/再注册期间会失效（沿用既有"先注册后使用"纪律）。
+  void remove(std::string_view name) {
+    auto it = index_.find(std::string(name));
+    if (it == index_.end()) return;
+    tools_.erase(tools_.begin() + it->second);
+    index_.erase(it);
+    for (std::size_t i = 0; i < tools_.size(); ++i) index_[tools_[i].name] = i;
+  }
+
   // 导出给定子集为 OpenAI tools 数组（检索后只发子集 → 省 prompt）
   [[nodiscard]] nlohmann::json to_openai_tools(std::span<ToolSpec const* const> subset) const {
     auto arr = nlohmann::json::array();

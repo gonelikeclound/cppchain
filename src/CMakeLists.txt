@@ -59,6 +59,7 @@ add_library(cppchain_tool STATIC
   mcp/list_schema.cpp  # MCP 二期：三路发现源（so:// file:// url://）统一列表 schema + strip_meta
   mcp/manager.cpp      # MCP 二期：连接管理器（discover + 懒建/复用客户池）
   mcp/provider.cpp     # MCP 二期：provider 节点（发现→建连→list→注册进 tool_registry）
+  mcp/listen.cpp       # MCP 三期批②：变化监听（长连接收 notifications/tools/list_changed）
   tool/spawn_executor.cpp
   tool/spawn_runner.cpp
   tool/sandbox.cpp

@@ -7,11 +7,12 @@
 
 #include <memory>
 
+#include "cppchain/http/stream.hpp"
 #include "cppchain/http/transport.hpp"
 
 namespace cppchain::http {
 
-class CurlMultiTransport final : public Transport {
+class CurlMultiTransport final : public Transport, public StreamProvider {
  public:
   CurlMultiTransport();
   ~CurlMultiTransport() override;
@@ -21,6 +22,10 @@ class CurlMultiTransport final : public Transport {
 
   // 线程安全：可从任意线程调用；回调在 IO 线程触发。
   void send(HttpRequest const& req, HttpCallbacks cbs, core::CancelToken token) override;
+
+  // 长连接流（StreamProvider）：把流 handle 挂进现有单 IO 线程的事件循环 —— 0 新增线程。
+  void open_stream(StreamRequest const& req, StreamCallbacks cbs,
+                   core::CancelToken token) override;
 
  private:
   struct Impl;

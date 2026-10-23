@@ -121,9 +121,29 @@ McpResult MCPClient::call(std::string_view method, Json params) {
 }
 
 McpResult MCPClient::initialize() {
-  return call("initialize", Json{{"protocolVersion", kMcpProtocolVersion},
+  auto r = call("initialize", Json{{"protocolVersion", kMcpProtocolVersion},
                                  {"capabilities", Json::object()},
                                  {"clientInfo", Json{{"name", "cppchain"}, {"version", "0.1.0"}}}});
+  // 失败即清空 capabilities（fail-closed：别拿上一个会话的能力当这次用）。
+  auto const cap = r.result.find("capabilities");
+  capabilities_ = (r.ok() && cap != r.result.end() && cap->is_object())
+                      ? *cap
+                      : Json::object();
+  return r;
+}
+
+std::expected<void, std::string> MCPClient::listen(http::StreamCallbacks scbs,
+                                                    core::CancelToken token) {
+  auto* sp = dynamic_cast<http::StreamProvider*>(transport_);
+  if (sp == nullptr)
+    return std::unexpected("传输层不支持长连接（未实现 StreamProvider）");
+  http::StreamRequest req;
+  req.url = base_url_;
+  req.method = "GET";
+  req.headers = {"Accept: text/event-stream"};
+  if (!session_id_.empty()) req.headers.push_back("mcp-session-id: " + session_id_);
+  sp->open_stream(req, std::move(scbs), std::move(token));
+  return {};
 }
 
 std::expected<std::vector<McpToolInfo>, std::string> MCPClient::list_tools() {

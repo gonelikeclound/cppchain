@@ -37,6 +37,8 @@ struct Request {
   std::string url;
   long status = 0;
   bool status_sent = false;
+  bool stream = false;                            // 长连接流（非一收一忘）
+  std::shared_ptr<StreamCallbacks> scbs;          // 流专用回调（stream==true 时有效）
   std::vector<std::string> resp_headers;  // 当前响应块的头行（不含状态行），空行处上浮
 };
 
@@ -203,7 +205,20 @@ struct CurlMultiTransport::Impl {
         Request* r = it->second.get();
         CURLcode rc = msg->data.result;
 
-        if (!r->token.cancelled()) {
+        if (r->stream) {
+          // 长连接流：CURLE_OK = 对端关流（on_complete），否则传输错误（on_error）；
+          // 两者之后都 on_close。取消 → 本循环更早摘除、无回调。
+          if (!r->token.cancelled()) {
+            if (rc != CURLE_OK) {
+              if (r->scbs && r->scbs->on_error)
+                r->scbs->on_error(HttpError{std::string(curl_easy_strerror(rc)),
+                                            rc == CURLE_OPERATION_TIMEDOUT});
+            } else if (r->scbs && r->scbs->on_complete) {
+              r->scbs->on_complete();
+            }
+            if (r->scbs && r->scbs->on_close) r->scbs->on_close();
+          }
+        } else if (!r->token.cancelled()) {
           if (rc != CURLE_OK) {
             bool timeout = (rc == CURLE_OPERATION_TIMEDOUT);
             if (r->cbs.on_error) r->cbs.on_error(HttpError{curl_easy_strerror(rc), timeout});
@@ -235,6 +250,39 @@ void CurlMultiTransport::send(HttpRequest const& req, HttpCallbacks cbs, core::C
     return;
   }
   Request* raw = impl_->make_request(req, easy, std::move(cbs), std::move(token));
+  {
+    std::lock_guard g(impl_->mutex);
+    impl_->incoming.emplace_back(raw);
+  }
+  curl_multi_wakeup(impl_->multi);
+}
+
+void CurlMultiTransport::open_stream(StreamRequest const& req, StreamCallbacks cbs,
+                                      core::CancelToken token) {
+  CURL* easy = curl_easy_init();
+  if (easy == nullptr) {
+    if (cbs.on_error) cbs.on_error(HttpError{"curl_easy_init failed", false});
+    if (cbs.on_close) cbs.on_close();
+    return;
+  }
+  // 流与单发共用同一“Request + 事件循环”结构：用 bridge 把 on_status/on_body_chunk
+  // 转发进 scbs（生命周期随 scbs 共享），loop 里按 stream 分支处理流语义的结束。
+  auto scbs = std::make_shared<StreamCallbacks>(std::move(cbs));
+  http::HttpCallbacks bridge;
+  bridge.on_status = [scbs](long s) {
+    if (scbs->on_status) scbs->on_status(s);
+  };
+  bridge.on_body_chunk = [scbs](std::string_view b) {
+    if (scbs->on_body_chunk) scbs->on_body_chunk(b);
+  };
+  http::HttpRequest hr;
+  hr.url = req.url;
+  hr.method = req.method;
+  hr.headers = req.headers;
+  hr.timeout_ms = 0;  // 长连接：不限时（服务端心跳保活；断连由对端关流/网络错误触发）
+  Request* raw = impl_->make_request(hr, easy, std::move(bridge), std::move(token));
+  raw->scbs = std::move(scbs);
+  raw->stream = true;
   {
     std::lock_guard g(impl_->mutex);
     impl_->incoming.emplace_back(raw);

@@ -22,6 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cppchain/http/stream.hpp"
 #include "cppchain/http/transport.hpp"
 #include "cppchain/tool/tool.hpp"
 
@@ -70,12 +71,22 @@ class MCPClient {
   // 已建立的 MCP 会话 id（initialize 握手响应头的 mcp-session-id；空 = 尚未握手成功）。
   [[nodiscard]] std::string const& session_id() const { return session_id_; }
 
+  // initialize 握手返回的 server capabilities（tools.listChanged 等；未握手 = 空对象）。
+  [[nodiscard]] nlohmann::json const& capabilities() const { return capabilities_; }
+
+  // P3 批②：挂上 notifications 长连接（收 tools.list_changed 这类推送）。
+  // 依赖 transport 实现 StreamProvider（curl 有、测试 Fake 有）；不支持 → error。
+  // 成功后投递持续到 token 取消 / 对端关流 / 出错（回调契约见 http/stream.hpp）。
+  [[nodiscard]] std::expected<void, std::string> listen(http::StreamCallbacks scbs,
+                                                        core::CancelToken token);
+
  private:
   http::Transport* transport_;
   std::string base_url_;
   std::vector<std::string> headers_;
   std::string server_name_;
   std::string session_id_;  // streamable-http 会话：握手后回带 mcp-session-id 头
+  nlohmann::json capabilities_ = nlohmann::json::object();  // initialize 的 capabilities
 };
 
 // MCP 工具 → ToolSpec。handler 里 client->call_tool(name,args)，返回 result 的 content 文本

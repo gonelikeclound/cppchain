@@ -81,7 +81,7 @@ everything_echo(你好 MCP) → {"text":"Echo: 你好 MCP"}
 
 ## 六、边界与遗留
 
-- **SSE 只认单发消息**：长连收 `notifications`（`tools/changed` 事件驱动刷新）是 P3 批③。
-- **会话 400 只报错不重握手**：`Server not initialized` 上浮给调用方；自动重握手留待变化监听批处理。
-- **P3 批② = tools/list 轮询 diff**（新增/变更/删除 → provider 刷新注册表）——42 号"接口变化监听"
-  的本意，尚未做。
+- **SSE 单发 vs 长连接**：本档只做单发消息解析；收 `notifications`（tools/changed 推送）的
+  长连接 + 变化监听已是 **P3 批②**（见 problems/46，事件驱动而非轮询，P3 全齐）。
+- **会话 400 只报错不重握手**：`Server not initialized` 上浮给调用方；自动重握手留待后续。
+- 后续押后项：`tools/call isError` 特判、`resources/list` 消费端、P5 local stdio、SSE 心跳重连。
