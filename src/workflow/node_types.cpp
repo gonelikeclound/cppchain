@@ -833,7 +833,7 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
           tools_json.push_back(sp->to_openai());
       }
     }
-  std::string const sys = n.system_prompt;
+  std::string const sys_spec = n.system_prompt;  // 运行期解析（@config.* 在节点体内替换）
   std::string const model_name = n.model;
   Json const params = n.model_params;          // wfr-㉙：运行期解析后并入 CallOptions.extra
   std::string const echo_spec = n.reasoning_echo;
@@ -841,9 +841,11 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
   auto sink_p = ctx.sink;  // 触发期注入的 NodeLog（docs/12 §6.4：source=node 的诊断日志）
 
   ctx.graph.add_node(
-      n.id, [m, tools_json, toolset_names, sys, model_name, params, echo_spec, stream_on, sink_p,
+      n.id, [m, tools_json, toolset_names, sys_spec, model_name, params, echo_spec, stream_on, sink_p,
              node_id = n.id, reg = ctx.registry](Json const& state, NodeContext& nc) {
     std::vector<message::Message> msgs = messages_from_state(state);
+    // 运行期解析 system_prompt 里的 @config.* / @env.* 引用（否则模型看到的是字面量占位符）
+    std::string const sys = resolve_text_parameter(sys_spec, state);
     if (!sys.empty()) msgs.insert(msgs.begin(), message::system_message(sys));
     // wfr-context（⑤）：节点注入的 system 上下文（env + skill 等），装配时统一拼在
     // 系统提示之后、对话历史之前。来源 state[system_context]（context 节点写入；不进

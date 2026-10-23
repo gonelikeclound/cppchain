@@ -1,0 +1,48 @@
+{
+  "id": "question_execute",
+  "description": "题目修订阶段③④：执行器。按已确认计划只重写目标区，其余区（尤其题干）原样带过；改动画则 verify_sketch 自检，不过修正重试（loop 封顶 3 轮）。最终输出完整新版题目 JSON。",
+  "nodes": [
+    {
+      "id": "exec_loop",
+      "kind": "loop",
+      "max": 3,
+      "next": "_turn_end",
+      "body": [
+        {
+          "id": "execute",
+          "kind": "model",
+          "model": "main",
+          "tools": "question",
+          "stream": true,
+          "params": {
+            "effort": "high"
+          },
+          "reasoning_echo": "always",
+          "system_prompt": "你是初中数学/物理题库的题目修订**执行器**。用户已确认了一个修改计划，你按它执行，**只改计划声明的目标区**。\n当前题稿在 @config.current（结构化 JSON 字符串，字段：kind/stem/options/answer/explanation/knowledge_point/subject/stage/difficulty/body_md/sketch_js/sketch_engine）；已确认的计划在 @config.plan（{intent, zone, scope, proposed, impact}）；用户确认意见在 @config.confirm（「确认」或调整意见）。\n题目按「区」组织：stem 题干（**只读：必须与 @config.current.stem 完全一致、原样带过，一字不改**）；options 选项；sketch 动图区；metrics 动图数量展示区；proof 证明区；conclusion 结论区；meta 元数据。\n执行要求：\n1) 只改 plan.zone 对应的区；**其余所有区从 @config.current 原样带过**（尤其 stem）。\n2) 若改 sketch 区，body_md 里 :::sketch 块体为空、属性空格分隔不带逗号：:::sketch{id=\"main\" src=\"sketches/main.js\"}；并调 verify_sketch 自检 sketch_js，ok=false 就按 errors 修正后再给整份 JSON（自检 ≤2 次）。\n3) 输出完整新版题目 JSON（字段同 current，另加 change_log 一句话说明改了什么）；不要任何解释。\n硬约束：kind 只允许 \"choice\"|\"fill\"|\"judge\"；subject 只允许 \"math\"|\"physics\"；stage 只允许 \"junior\"|\"senior\"；difficulty 1–5；选择题 answer 给选项原文、判断题只给 \"正确\"|\"错误\"；结构化字段与 body_md 叙述一致。\n画板硬约束：只用 ctx 原语（ctx.createBoard / board.create('point'|'segment'|'circle'|'arc'|'glider'|'polygon'|'text') / ctx.metric / ctx.note / ctx.createStage）；禁 board.elements / board.objects；对象存变量再引用；name 只是标签不是变量；上半圆 arc 写 [O, B, A]；输出前自查所有非内置标识符已用 const/let 声明。\n全文 Unicode 数学符号（∠ ° ≌ ∽ ∥ ⊥），禁 LaTeX、禁裸 HTML。",
+          "next": "route_exec"
+        },
+        {
+          "id": "route_exec",
+          "kind": "route",
+          "on": "last_ai_outcome",
+          "cases": {
+            "tool_calls": "verify",
+            "text": "_turn_end"
+          },
+          "default": "_turn_end"
+        },
+        {
+          "id": "verify",
+          "kind": "run_tools",
+          "next": "echo_verify"
+        },
+        {
+          "id": "echo_verify",
+          "kind": "echo",
+          "text": "🔧 $verify.result.summary",
+          "next": "_continue"
+        }
+      ]
+    }
+  ]
+}
