@@ -22,6 +22,8 @@ set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
                          mcp_provider)  # MCP 二期：三路发现 + provider 节点（离线）
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
+# MCP 全链路验证对：mock server（自包含 HTTP MCP，零凭证）+ driver（真 curl 传输层全链断言）
+set(MCP_MOCK_TARGETS mcp_mock mcp_mock_driver)
 
 # MCP 二期离线 demo 的 so:// 发现插件（dlsym `mcp_list_<fn>` → 列表 JSON，纯 C ABI）：
 # 与 tests/plugin_mcp 同纪律，不链 cppchain 静态库。产物落 examples 构建目录供 demo dlopen。
@@ -52,6 +54,7 @@ list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basic
                             tools_frontline tools_files tools_arxiv tools_approval
                             m9_hybrid m9_approval m9_artifact bash_sidefx_analysis
                             mcp_provider  # MCP 二期离线 demo（三路发现 + provider）
+                            mcp_mock      # 自包含 mock MCP server（HTTP/JSON-RPC + SSE 推送）
                             m10_streaming m10_interrupt m10_send m10_send_parallel m10_fork)
 list(APPEND EXAMPLE_TARGETS approve_interrupt)
 if(CPPCHAIN_BUILD_HTTP)
@@ -74,6 +77,9 @@ if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS chat_live)
   list(APPEND EXAMPLE_TARGETS structured_output)
   list(APPEND EXAMPLE_TARGETS ${WF_EXAMPLE_TARGETS})
+  # MCP 全链路验证 driver：需要真实传输层（真 curl 连 mock server）
+  list(APPEND EXAMPLE_TARGETS mcp_mock_driver)
+  list(APPEND HTTP_NEEDED_EXAMPLES mcp_mock_driver)
 endif()
 
 foreach(t IN LISTS EXAMPLE_TARGETS)
@@ -111,6 +117,9 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_message)
   endif()
 endforeach()
+
+# mcp_mock（纯 server）：零 cppchain 库依赖，只用 nlohmann（SYSTEM 压三方告警）
+target_include_directories(mcp_mock SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
 
 # mcp_provider demo：注入 so:// 发现插件目录（编译期绝对路径，同测试的 MCP_TEST_SO_DIR 做法）
 target_compile_definitions(mcp_provider PRIVATE
