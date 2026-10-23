@@ -5,10 +5,14 @@
 #include "cppchain/workflow/node_type.hpp"
 
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <print>
@@ -18,6 +22,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+#include <unistd.h>
 
 #include "cppchain/agent/agent.hpp"
 #include "cppchain/agent/history.hpp"
@@ -3168,6 +3174,36 @@ void c_tool_registry(NodeIR const& n, NodeType::CompileContext& ctx) {
 // 之后、历史之前；**不进 messages 通道/会话日志** —— 上下文只对本 run 生效，replay 不回溯。
 inline constexpr std::size_t kContextFileCap = 64u * 1024;  // system[].file 的读入上限（字节）
 
+// ---- 环境块默认键：当前时间（日期+时间+时区）与简约主机名 ----
+// "env 中默认加入当前日期+时间+时区 / 当前设备的名称（简约版）"：
+//   每次 context 运行都求一次值（now 是"此时此刻"）；workflow 在 env 里显式写同名键 →
+//   覆盖默认。取名 now / host（模型 直觉，Feed 给模型直接可用）。
+std::string current_datetime_tz() {
+  std::time_t const t = std::time(nullptr);
+  std::tm ltm{}, gtm{};
+  ::localtime_r(&t, &ltm);
+  ::gmtime_r(&t, &gtm);
+  // 时区偏移用 mktime 差值求（可移植；严格 -std=c++26 下 tm_gmtoff 会被特性宏藏起）。
+  std::tm const lsrc = ltm, gsrc = gtm;
+  long const off = static_cast<long>(::mktime(const_cast<std::tm*>(&lsrc))) -
+                   static_cast<long>(::mktime(const_cast<std::tm*>(&gsrc)));
+  char date[32];
+  std::strftime(date, sizeof date, "%Y-%m-%d %H:%M:%S", &ltm);
+  char tz[16];
+  std::snprintf(tz, sizeof tz, "%+03d:%02d", static_cast<int>(off / 3600),
+                static_cast<int>(std::abs(off % 3600) / 60));
+  return std::string(date) + " " + tz;
+}
+
+std::string short_hostname() {
+  char buf[256] = {};
+  if (::gethostname(buf, sizeof buf) != 0) return "localhost";
+  buf[sizeof buf - 1] = '\0';
+  std::string const h(buf);
+  auto const dot = h.find('.');   // 简约版：只留主机名段，丢域名后缀
+  return dot == std::string::npos ? h : h.substr(0, dot);
+}
+
 // UTF-8 安全截断（不切断多字节字符；上限近似按字节）
 std::string utf8_cut(std::string const& s, std::size_t max_bytes) {
   if (s.size() <= max_bytes) return s;
@@ -3221,17 +3257,24 @@ void c_context(NodeIR const& n, NodeType::CompileContext& ctx) {
     auto add_sys = [&arr](std::string const& text) {
       if (!text.empty()) arr.push_back(message::system_message(text));
     };
-    // 1) 环境块：逐条 `key: value` 聚成一场「环境」system 消息
-    if (env.is_object() && !env.empty()) {
-      std::string block;
-      for (auto it = env.begin(); it != env.end(); ++it) {
-        if (!it.value().is_string()) continue;
-        Json const v = resolve_parameter(it.value(), state);
-        if (v.is_null()) continue;  // @config 缺键 → 跳过（不把 "null" 喂给模型）
-        std::string const val = v.is_string() ? v.get<std::string>() : message::utf8_safe_dump(v);
-        block += "- " + it.key() + ": " + val + "\n";
+    // 1) 环境块：默认键（当前时间/主机名）先占位，workflow 显式 env 键覆盖（同键），
+    //    再逐条 `key: value` 聚成一场「环境」system 消息。
+    {
+      std::map<std::string, std::string> pairs{{"now", current_datetime_tz()},
+                                               {"host", short_hostname()}};
+      if (env.is_object())
+        for (auto it = env.begin(); it != env.end(); ++it) {
+          if (!it.value().is_string()) continue;
+          Json const v = resolve_parameter(it.value(), state);
+          if (v.is_null()) continue;  // @config 缺键 → 跳过（不把 "null" 喂给模型）
+          std::string const val = v.is_string() ? v.get<std::string>() : message::utf8_safe_dump(v);
+          pairs[it.key()] = val;      // 显式配置覆盖默认（含同名 now/host）
+        }
+      if (!pairs.empty()) {
+        std::string block;
+        for (auto const& [k, v] : pairs) block += "- " + k + ": " + v + "\n";
+        add_sys("【当前环境】\n" + block);
       }
-      if (!block.empty()) add_sys("【当前环境】\n" + block);
     }
     // 2) system 条目：from = 文本引用（@config 等）；file = 读文件内容（宿主侧可信读）
     if (sys.is_array()) {

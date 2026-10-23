@@ -182,5 +182,27 @@ TEST(WfContext, missing_skill_file_warns_and_fires) {
   f.model.replies.push_back(cppchain::message::ai_message("没事"));
   auto st = f.run(ir, Json{{"skill_dir", "/tmp/definitely_missing_dir_ctx_test"}});
   ASSERT_TRUE(st) << st.error().message;  // 缺文件只是少注入，不影响流程
-  EXPECT_FALSE((*st).contains("system_context"));
+  // 默认 env 键（now/host）总会注入 —— "env 默认加入当前日期+时间+时区 / 设备名（简约版）"
+  auto const& ctx_arr = (*st)["system_context"];
+  ASSERT_TRUE(ctx_arr.is_array() && !ctx_arr.empty());
+  std::string const env_text = ctx_arr[0]["content"][0].value("text", "");
+  EXPECT_NE(env_text.find("【当前环境】"), std::string::npos);
+  EXPECT_NE(env_text.find("now: "), std::string::npos);   // 日期+时间+时区（默认键）
+  EXPECT_NE(env_text.find("host: "), std::string::npos);  // 设备名（简约版，默认键）
+}
+
+// 默认 env 键可被 workflow 显式覆盖（同名即顶替）；普通键照旧。
+TEST(WfContext, env_defaults_now_host_overridable) {
+  Json ir = wf_ctx(Json{{"project", "demo"}, {"now", "BY-HAND"}, {"host", "my-box"}},
+                   Json::array());
+  Fixture f;
+  f.model.replies.push_back(cppchain::message::ai_message("欧"));
+  auto st = f.run(ir, Json::object());
+  ASSERT_TRUE(st);
+  auto const& ctx_arr = (*st)["system_context"];
+  ASSERT_TRUE(ctx_arr.is_array() && !ctx_arr.empty());
+  std::string const env_text = ctx_arr[0]["content"][0].value("text", "");
+  EXPECT_NE(env_text.find("now: BY-HAND"), std::string::npos);  // 显式覆盖默认 now
+  EXPECT_NE(env_text.find("host: my-box"), std::string::npos);  // 显式覆盖默认 host
+  EXPECT_NE(env_text.find("project: demo"), std::string::npos); // 普通键照旧
 }
