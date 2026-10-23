@@ -18,9 +18,19 @@ set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo
 set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
                          tools_frontline tools_files tools_arxiv m9_hybrid
-                         bash_sidefx_analysis)
+                         bash_sidefx_analysis
+                         mcp_provider)  # MCP 二期：三路发现 + provider 节点（离线）
 # 需要状态库的 demo
 set(STATE_EXAMPLE_TARGETS state_basics)
+
+# MCP 二期离线 demo 的 so:// 发现插件（dlsym `mcp_list_<fn>` → 列表 JSON，纯 C ABI）：
+# 与 tests/plugin_mcp 同纪律，不链 cppchain 静态库。产物落 examples 构建目录供 demo dlopen。
+add_library(mcp_weather_list SHARED mcp_provider/list_plugin.cpp)
+target_include_directories(mcp_weather_list PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(mcp_weather_list SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(mcp_weather_list PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(mcp_weather_list PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 # 需要 graph 库的 demo
 set(GRAPH_EXAMPLE_TARGETS graph_basics m10_streaming m10_interrupt m10_send m10_send_parallel m10_fork)
 # wfr-㊸ @②：workflow 级人工审批 HITL（interrupt 悬挂/恢复）demo —— 只需 workflow 本体
@@ -41,6 +51,7 @@ set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop con
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard
                             tools_frontline tools_files tools_arxiv tools_approval
                             m9_hybrid m9_approval m9_artifact bash_sidefx_analysis
+                            mcp_provider  # MCP 二期离线 demo（三路发现 + provider）
                             m10_streaming m10_interrupt m10_send m10_send_parallel m10_fork)
 list(APPEND EXAMPLE_TARGETS approve_interrupt)
 if(CPPCHAIN_BUILD_HTTP)
@@ -100,5 +111,9 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_message)
   endif()
 endforeach()
+
+# mcp_provider demo：注入 so:// 发现插件目录（编译期绝对路径，同测试的 MCP_TEST_SO_DIR 做法）
+target_compile_definitions(mcp_provider PRIVATE
+  MCP_DEMO_SO_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 # ---- CGI WebUI（wfr_cgi）已移入 src/CMakeLists.txt（发布构建同 wfr 规格）----

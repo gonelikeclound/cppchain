@@ -55,12 +55,17 @@ add_executable(tool_tests
   tool/arxiv_test.cpp
   tool/hybrid_selector_test.cpp
   tool/effect_class_test.cpp
-  tool/mcp_client_test.cpp)
+  tool/mcp_client_test.cpp
+  tool/mcp_discover_test.cpp)
 
 target_link_libraries(tool_tests PRIVATE
   cppchain_tool
   GTest::gtest_main
   Threads::Threads)
+
+# so:// 发现路线的测试插件落点（见上方 mcp_list_plugin target）
+target_compile_definitions(tool_tests PRIVATE
+  MCP_TEST_SO_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 target_compile_options(tool_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(tool_tests)
@@ -144,6 +149,15 @@ add_library(mock_tools SHARED plugin_demo/mock_tools.cpp)
 target_include_directories(mock_tools PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(mock_tools SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
 target_compile_options(mock_tools PRIVATE -Wall -Wextra -Wpedantic)
+
+# MCP 二期：so:// 发现路线的测试插件（dlsym `mcp_list_<fn>` → 列表 JSON 字符串）。纯 C ABI，
+# 不链 cppchain（同 mock_tools 纪律）。MCP_TEST_SO_DIR 注入 tool_tests，运行时 dlopen 用。
+add_library(mcp_list_plugin SHARED plugin_mcp/mcp_list_plugin.cpp)
+target_include_directories(mcp_list_plugin PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(mcp_list_plugin SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(mcp_list_plugin PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(mcp_list_plugin PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # wfr-㊹：副作用场景 mock 库（订单/微信可撤/短信不可撤/电话可关 + 模拟时钟），副作用测试专属
 add_library(sidefx_notify SHARED plugin_demo/sidefx_notify.cpp)

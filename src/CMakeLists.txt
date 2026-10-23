@@ -56,6 +56,9 @@ add_library(cppchain_tool STATIC
   tool/command_classify.cpp
   tool/tool_plugin.cpp  # wfr-㊹：动态工具库加载（load_dynamic_tools）
   mcp/client.cpp       # MCP（Model Context Protocol）客户端（P1：HTTP/SSE 同步）
+  mcp/list_schema.cpp  # MCP 二期：三路发现源（so:// file:// url://）统一列表 schema + strip_meta
+  mcp/manager.cpp      # MCP 二期：连接管理器（discover + 懒建/复用客户池）
+  mcp/provider.cpp     # MCP 二期：provider 节点（发现→建连→list→注册进 tool_registry）
   tool/spawn_executor.cpp
   tool/spawn_runner.cpp
   tool/sandbox.cpp
