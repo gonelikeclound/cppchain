@@ -70,8 +70,11 @@ MCP 工具是**动态 schema**（tools/list 才知道），不像 file_write/bas
 ## 四、边界
 
 - **url:// 只发现不建连**：列表用一次 GET 拉取；连 server 以后续 `client_for`（base_url 在其列表项里）。
-- **provider 是库函数，尚非 workflow 节点**：本档交付"一个 server → 一串工具进注册表"的装配函数；
-  把它包成 workflow 节点 / import 语法让用户在 workflow 里声明 `mcp_` 工具，留给 **P3**（变化监听对齐 QQ）。
+- **provider 即"type:mcp 源"闭环，无需再包 workflow 节点**：装配进 `tool_registry` 就是 42 号
+  文档说的"provider 节点（tool_registry 扩展）"本身——workflow 消费动态工具的机制在 wfr-㊹
+  （`load_dynamic_tools` → 宿主注册表）已就位，`mcp_provider` 注册进同一注册表后走同一条既有
+  流水线直达模型，**不需要**为 MCP 再造 workflow 节点 / import 语法。后续期只做连接升级：
+  tools/list 变化监听（轮询 diff 区新增/变更，P3）与 SSE 长连（P3/P4）。
 - **SSE transport**：列表里 `transport:"sse"` 合法但连接仍是 http 同步（P1 现状），SSE 长连是后续期。
 - **local（stdio）**：词表里收着（`type:"local"`），真正拉起子进程是 P5 stdio transport 的事。
 - **名称清洗是字节级**：非 ASCII 多字节字符会被逐字节换成多个 `_`——确定性优先，美观其次。
