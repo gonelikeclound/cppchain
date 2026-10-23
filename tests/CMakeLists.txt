@@ -57,7 +57,8 @@ add_executable(tool_tests
   tool/effect_class_test.cpp
   tool/mcp_client_test.cpp
   tool/mcp_discover_test.cpp
-  tool/mcp_listen_test.cpp)
+  tool/mcp_listen_test.cpp
+  tool/image_test.cpp)
 
 target_link_libraries(tool_tests PRIVATE
   cppchain_tool

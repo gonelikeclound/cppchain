@@ -66,7 +66,8 @@ add_library(cppchain_tool STATIC
   tool/bash_tool.cpp
   tool/trip_db.cpp
   tool/arxiv.cpp
-  tool/hybrid_selector.cpp)
+  tool/hybrid_selector.cpp
+  tool/image.cpp)         # 取图工具（read_image）：本地/URL → base64 + media_type，供多模态注入
 
 target_include_directories(cppchain_tool PUBLIC
   ${PROJECT_SOURCE_DIR}/include)
