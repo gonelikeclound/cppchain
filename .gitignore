@@ -51,3 +51,6 @@ life.jsonl
 
 # C++ Agent 演讲专题（talk-cxx-agent/ 单独目录，讨论/修改历史供查阅，不进 commit）
 talk-cxx-agent/
+
+# 42 文档以云端为准，本地不推送
+docs/04-problems/42-副作用·防重放·防环·结果可信·可回溯·可恢复*
