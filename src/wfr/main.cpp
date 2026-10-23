@@ -534,6 +534,7 @@ int main(int argc, char** argv) {
   // WFR_WIKI_DIR 指定；未配置 → 工具运行时报错，不影响其它工具）。
   registry.add(make_read_skill_tool());
   registry.add(make_wiki_search_tool());
+  // 编译自检回环：写/改完页面由模型调用，host 跑 hmi 编译管线并把日志回显。
   // wfr-㊸ @①/@②/@③：bash 工具 —— 副作用任意（NeedHuman 人审 + 词面静态门禁）。
   // 执行后端 = SandboxManager 解析的沙箱（Auto：bwrap 可用→bwrap；否则受限子进程兜底）；
   // 无任何可用 provider → bash 以**空执行器**注册，handler 侧 fail-closed 拒跑（绝不裸奔）。
@@ -847,11 +848,14 @@ int main(int argc, char** argv) {
         resume = Json{{"action", "reject"}, {"feedback", t}};
       }
     } else {
-      std::string const fb = cppchain::wfr::trim(policy.substr(5));  // "deny:" 去掉前缀
       std::println("  批准？[approve | reject <理由> | abort]： → mock 审批（approve_policy={}）", policy);
       if (policy == "allow") resume = Json{{"action", "approve"}};
       else if (policy == "deny") resume = Json{{"action", "reject"}};
-      else if (policy.starts_with("deny:")) resume = Json{{"action", "reject"}, {"feedback", fb}};
+      else if (policy.starts_with("deny:")) {
+        // 只在这里对 "deny:" 取后缀——policy 是 allow/deny/空等短串时不可 substr(5)（越界）
+        std::string const fb = cppchain::wfr::trim(policy.substr(5));
+        resume = Json{{"action", "reject"}, {"feedback", fb}};
+      }
       else resume = Json{{"action", "reject"}, {"feedback", "未知 approve_policy: " + policy}};
     }
 
