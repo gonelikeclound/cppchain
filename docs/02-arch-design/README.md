@@ -31,3 +31,4 @@
 | 19 | [19-复杂任务规划执行验证环设计.md](19-复杂任务规划执行验证环设计.md) | **wfr-㊹**（定架构·待实现）：任务级 P-E-V 环（计划=一等公民的 state 数据 / verify 节点 probe 判据 / 步骤边界 interrupt / 两级回退不做命令反做）+ 新节点 plan·verify·plan_review | ✅ ①–④ 全部实现（L1/L2/L3 + 批④ 中断回退；见 problems/24/25；674 全绿） |
 | 22 | [22-长程任务实现全景.md](22-长程任务实现全景.md) | **wfr-㊿ · 实现全景（代码实证）**：档案/会话分工、数据形态、一条批运行时路径、跨批机制五件、调度、自进化接点、与 PEV/mch 位置、批③ 交接件衔接 | ✅ 已建档（2026-10-16） |
 | 23 | [23-治理全链workflow设计.md](23-治理全链workflow设计.md) | **wfr-㊹ 治理（problems/33）**：governed 单 workflow 完整实现治理思想——UNVERIFIED 双档 / _timeout / _cancelled / effect_class+自检，终态四档穷尽 | ✅ 已实现（720 全绿，problems/33） |
+| 24 | [24-proxyNode子workflow调用设计.md](24-proxyNode子workflow调用设计.md) | **wfr-㊿ proxyNode（arch 21 预留原语落地）**：`subworkflow` 节点运行期调用子 workflow（隔离执行）——sync 子结果提升回传 / detach fire-and-forget 落盘审计 / copy_state+input 构造子 state / 编译期装载子 IR（fail-fast）+ 环与深度防护 | ✅ 已实现（851 全绿，problems/47） |
