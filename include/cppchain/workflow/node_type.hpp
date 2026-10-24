@@ -13,8 +13,10 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "cppchain/graph/graph.hpp"
@@ -84,6 +86,22 @@ struct NodeType {
     tool::ToolRegistry* shared_registry = nullptr;
     // wfr-㊹ 治理：动态工具库搜索路径（tool_registry 的 from 在这些目录里找 lib<from>.so）
     std::vector<std::string> const* tool_lib_dirs = nullptr;
+    // wfr-㊿：proxyNode 子 workflow 装载（见 02-arch-design/24；宿主经 CompileOptions 注入）。
+    // spec（子 workflow 名/路径）→ 完整可 parse 的 workflow JSON；nullopt = 找不到。
+    // 空 = 宿主未提供 loader → c_subworkflow 编译报错（fail-closed）。
+    std::function<std::optional<Json>(std::string const& spec)> subworkflow_loader;
+    // 子 workflow 嵌套上限（防环/深链）；编译期在 c_subworkflow 计数。
+    std::size_t max_subflow_depth = 4;
+    // 编译期共用"当前编译链"（嵌套子 workflow 共享同一份；顶层 compile 建，见 compiler.cpp）。
+    // 存 workflow id → 环检测（同一子 workflow 出现在祖辈链上 → 报错）。允许跨节点共享。
+    std::shared_ptr<std::unordered_set<std::string>> subflow_active;
+    // wfr-㊿：子 workflow 编译沿用宿主契约（@config 键）。由 compiler.cpp 填，c_subworkflow 透传
+    // （fail-closed：子 workflow 引用未声明键也在编译期拒）。
+    std::optional<std::vector<std::string>> config_keys;
+    // wfr-㊿：子 workflow 编译沿用引擎兜底参数（steps 上限 / Send 波宽度）。透传给子编译，
+    // 避免"父配了 max_parallel=2、子 workflow 里 parallel 却退化成串行"这类静默错位。
+    std::size_t max_steps = 200;
+    std::size_t max_parallel = 1;
   };
   std::function<void(NodeIR const&, CompileContext&)> compile;
 

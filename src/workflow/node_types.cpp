@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -38,9 +39,10 @@
 #include "cppchain/tool/tool_plugin.hpp"  // wfr-㊹：动态工具描述符/loader（tool_registry 用）
 #include "cppchain/workflow/expr.hpp"
 #include "cppchain/workflow/ir_walk.hpp"
-#include "cppchain/workflow/compiler.hpp"  // B2：next_artifact_version（产物版本单调源）
+#include "cppchain/workflow/compiler.hpp"   // B2：next_artifact_version（产物版本单调源）
 #include "cppchain/workflow/refs.hpp"
 #include "cppchain/workflow/session_log.hpp"
+#include "cppchain/workflow/validator.hpp"
 
 namespace cppchain::workflow {
 
@@ -2243,6 +2245,168 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ---- subworkflow（wfr-㊿ proxyNode，见 02-arch-design/24）：运行期调用子 workflow ----
+// 编译期：通过 subworkflow_loader 读子 workflow JSON → parse → validate → compile_workflow
+// （fail-fast：找不到/校验不过/编译失败 → 主编译即报错）。子 workflow 编译复用宿主全套契约
+// （registry/components/config_keys/guard/shared_registry/max_steps/max_parallel），并共享
+// subflow_active 编译链（环/深度可检出——深度上限经 cctx.max_subflow_depth）。
+// 运行期：sync = 同步跑完子图，子最终 state 的 results 通道键提升为 results.<nodeId> 顶层键
+//        + _proxy 元信息；detach = fire-and-forget（后台线程跑子图，结果落盘审计）。
+void v_subworkflow(NodeIR const& n, NodeType::ValidateContext const&,
+                   NodeType::ErrorSink const& err) {
+  if (n.sub_workflow.empty())
+    err("VN24", "subworkflow 节点 '" + n.id + "' 缺 workflow（子 workflow 名/路径）");
+  if (!n.subflow_mode.empty() && n.subflow_mode != "sync" && n.subflow_mode != "detach")
+    err("VN24", "subworkflow 节点 '" + n.id + "' 的 mode 必须是 sync|detach（缺省 sync）");
+  for (std::string const& k : n.copy_state)
+    if (k.empty()) err("VN24", "subworkflow 节点 '" + n.id + "' 的 copy_state 含空键");
+  if (!n.sub_input.is_object())
+    err("VN24", "subworkflow 节点 '" + n.id + "' 的 input 必须是对象");
+  if (n.next.empty()) err("VN24", "subworkflow 节点 '" + n.id + "' 缺少 next");
+}
+
+// 子 workflow 引用文本（input 里可含 $ / @config 引用，与 tool.parameters 同套路）
+std::vector<std::string> t_subworkflow(NodeIR const& n) {
+  std::vector<std::string> out;
+  collect_strings(n.sub_input, out);
+  return out;
+}
+
+void c_subworkflow(NodeIR const& n, NodeType::CompileContext& ctx) {
+  if (ctx.subworkflow_loader == nullptr) {
+    ctx.error = "subworkflow 节点 '" + n.id +
+                "'：宿主未提供 subworkflow_loader（CompileOptions.subworkflow_loader），子 workflow 无法编译";
+    return;
+  }
+  if (ctx.registry == nullptr) {
+    ctx.error = "subworkflow 节点 '" + n.id + "'：宿主未提供注册表（子 workflow 编译需要 registry）";
+    return;
+  }
+  // 编译子 workflow（fail-fast：编译期读 JSON + 校验 + 编译，找不到/坏 IR 都在此处炸）。
+  // 用 cctx 的 ctor 参数之外：loader 返回完整可 parse 的 JSON（宿主负责路径解析/import 展开）。
+  std::optional<Json> raw = ctx.subworkflow_loader(n.sub_workflow);
+  if (!raw) {
+    ctx.error = "subworkflow 节点 '" + n.id + "'：找不到子 workflow '" + n.sub_workflow + "'";
+    return;
+  }
+  auto sub_ir = WorkflowIR::parse(*raw);
+  if (!sub_ir) {
+    ctx.error = "subworkflow 节点 '" + n.id + "' 子 workflow '" + n.sub_workflow +
+                "' IR 解析失败: " + sub_ir.error();
+    return;
+  }
+  // 校验子 IR：复用宿主契约（@config / 组件 / 工具注册表）。空则跳过（校验器允许）。
+  if (ctx.registry != nullptr || ctx.components != nullptr || ctx.config_keys.has_value()) {
+    ValidationResult const vr = validate(*sub_ir, ValidatorOptions{ctx.registry, ctx.config_keys, ctx.components});
+    if (!vr.ok()) {
+      ctx.error = "subworkflow 节点 '" + n.id + "' 子 workflow '" + n.sub_workflow +
+                  "' 校验未过：" + vr.describe();
+      return;
+    }
+  }
+  // 深度上限（编译链现有成员 = 祖辈深度；顶层 workflow 也占一位，见 compiler.cpp 的 chain guard）。
+  if (ctx.subflow_active != nullptr && ctx.subflow_active->size() >= ctx.max_subflow_depth) {
+    ctx.error = "subworkflow 节点 '" + n.id + "' 嵌套过深（>= " +
+                std::to_string(ctx.max_subflow_depth) + " 层，疑似循环引用）";
+    return;
+  }
+  // 编译子 workflow：复用宿主组件/工具/guard/并行度；loader 与编译链继续下发（子内可再嵌子）。
+  CompileOptions sub_opts;
+  sub_opts.components = ctx.components;
+  sub_opts.max_steps = ctx.max_steps;
+  sub_opts.max_parallel = ctx.max_parallel;
+  sub_opts.config_keys = ctx.config_keys;
+  sub_opts.tool_policy = ctx.guard;
+  sub_opts.shared_registry = ctx.shared_registry;
+  sub_opts.tool_lib_dirs = ctx.tool_lib_dirs;
+  sub_opts.subworkflow_loader = ctx.subworkflow_loader;
+  sub_opts.max_subflow_depth = ctx.max_subflow_depth;
+  sub_opts.subflow_active = ctx.subflow_active;
+  auto sub_wf = compile_workflow(*sub_ir, *ctx.registry, /*cp=*/nullptr, sub_opts);
+  if (!sub_wf) {
+    ctx.error = "subworkflow 节点 '" + n.id + "' 子 workflow 编译失败: " + sub_wf.error().message;
+    return;
+  }
+  auto child = std::make_shared<CompiledWorkflow>(std::move(*sub_wf));
+  std::string const mode = n.subflow_mode.empty() ? "sync" : n.subflow_mode;
+  ctx.graph.add_node(
+      n.id, [child, mode, copy_state = n.copy_state, input = n.sub_input, spec = n.sub_workflow,
+             node_id = n.id](Json const& state, NodeContext&) -> Command {
+        // 子初始 state：config 继承（主 config 原样给子）→ copy_state 拷贝 → input 解析（右胜覆盖）。
+        Json sub_state{{kConfigKey, state.value(kConfigKey, Json::object())}};
+        for (std::string const& k : copy_state)
+          if (state.contains(k)) sub_state[k] = state[k];
+        Json const inp = resolve_parameter(input, state);
+        if (inp.is_object())
+          for (auto it = inp.begin(); it != inp.end(); ++it) sub_state[it.key()] = it.value();
+
+        if (mode == "detach") {
+          // fire-and-forget：立即返回 detached；后台线程跑子图并落盘审计（workspace 缺失则跳过）。
+          std::string const workdir = [&] {
+            Json const cfg = sub_state.value(kConfigKey, Json::object());
+            return cfg.is_object() && cfg.contains("workspace") && cfg["workspace"].is_string()
+                       ? cfg["workspace"].get<std::string>()
+                       : std::string{};
+          }();
+          std::thread t([child, sub_state = std::move(sub_state), spec, node_id, workdir]() {
+            try {
+              CompiledWorkflow run = *child;  // 每个 detach 独立拷贝 → 并发调用互不干扰
+              std::vector<graph::StreamEvent> events;
+              graph::InvokeOptions iopts;
+              iopts.mode = graph::EventMode::All;
+              iopts.sink = [&events](graph::StreamEvent const& ev) { events.push_back(ev); };
+              auto const r = run.graph.invoke(sub_state, "", iopts);
+              if (!workdir.empty()) {
+                Json audit = r ? Json{{"ok", true}, {"flow", spec},
+                                      {"response", *r}, {"state", *r}, {"events", Json::array()}}
+                               : Json{{"ok", false}, {"flow", spec}, {"error", r.error().message}};
+                if (audit.contains("events")) {
+                  Json evs = Json::array();
+                  for (graph::StreamEvent const& e : events)
+                    evs.push_back(Json{{"node", e.node}, {"kind", e.type}, {"step", e.step}});
+                  audit["events"] = std::move(evs);
+                }
+                write_json_file(std::filesystem::path(workdir) / ".wfr" / "subflows" /
+                                    (spec + ".json"),
+                                audit);
+              }
+            } catch (...) {  // 后台线程 panic/异常不得拉垮主流程（fire-and-forget 也要可观测）
+              if (!workdir.empty()) {
+                Json audit{{"ok", false}, {"flow", spec}, {"error", "detached thread threw"}};
+                write_json_file(std::filesystem::path(workdir) / ".wfr" / "subflows" /
+                                    (spec + ".json"),
+                                audit);
+              }
+            }
+          });
+          t.detach();
+          Json update{{kResultsKey,
+                       Json{{node_id, Json{{"detached", true},
+                                          {"_proxy", Json{{"mode", "detach"}, {"workflow", spec}}}}}}},
+                      {kLastExecKey, node_id}};
+          return Command::with_update(std::move(update));
+        }
+
+        // sync：同步跑完，把子最终 state 的 results 通道键提升为帧顶层键。
+        CompiledWorkflow run = *child;
+        auto const r = run.graph.invoke(sub_state, "", graph::InvokeOptions{});
+        if (!r)
+          throw tool::ToolException("subworkflow 节点 '" + node_id + "' 子 workflow '" + spec +
+                                    "' 执行失败: " + r.error().message);
+        Json frame;
+        if (r->contains("results") && (*r)["results"].is_object())
+          frame = (*r)["results"];  // 子 workflow 各节点结果 → 帧顶层键（$<id>.result.<子节点id>）
+        else
+          frame = Json::object();
+        frame["_proxy"] = Json{{"mode", "sync"}, {"workflow", spec},
+                               {"ok", true}, {"state", *r}};
+        Json update{{kResultsKey, Json{{node_id, std::move(frame)}}}, {kLastExecKey, node_id}};
+        return Command::with_update(std::move(update));
+      });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 // ---- plan：产出/校验 state.plan（default_plan 预置 或 模型生成）----
 void v_plan(NodeIR const& n, NodeType::ValidateContext const&,
             NodeType::ErrorSink const& err) {
@@ -3755,6 +3919,40 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) { return std::string("task ") + n.phase +
                                     (n.task.empty() ? "" : " task=" + n.task) + " → " + n.next; },
        v_task, c_task, e_next, t_none},
+      // ---------------- subworkflow（wfr-㊿ proxyNode，arch 24）：运行期调用子 workflow ----------------
+      {NodeKind::SubWorkflow, "subworkflow",
+       [](Json const& n) { return kind_is(n, "subworkflow"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "workflow", out.sub_workflow);
+         get_str(out, node, "mode", out.subflow_mode);
+         if (node.contains("copy_state") && node["copy_state"].is_array())
+           for (auto const& k : node["copy_state"])
+             if (k.is_string()) out.copy_state.push_back(k.get<std::string>());
+         // input 原样收下（含非对象：让 VN24 报错，而不是 parse 静默丢掉）
+         if (node.contains("input") && !node["input"].is_null()) out.sub_input = node["input"];
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "subworkflow";
+         node["workflow"] = n.sub_workflow;
+         if (!n.subflow_mode.empty()) node["mode"] = n.subflow_mode;
+         if (!n.copy_state.empty()) {
+           Json arr = Json::array();
+           for (std::string const& k : n.copy_state) arr.push_back(k);
+           node["copy_state"] = std::move(arr);
+         }
+         if (!n.sub_input.empty()) node["input"] = n.sub_input;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) {
+         return "subworkflow " + n.sub_workflow +
+                (n.subflow_mode.empty() || n.subflow_mode == "sync" ? "" : " (" + n.subflow_mode + ")") +
+                (n.copy_state.empty() ? "" : " copy=(" + [&] {
+                   std::string s;
+                   for (std::string const& k : n.copy_state) s += (s.empty() ? "" : ",") + k;
+                   return s;
+                 }() + ")") + " → " + n.next;
+       }, v_subworkflow, c_subworkflow, e_next, t_subworkflow},
       // ---------------- executor（wfr-㊾ 批③）：复合 worker，parallel 的 Send 目标 ----------------
       {NodeKind::Executor, "executor",
        [](Json const& n) { return kind_is(n, "executor"); },

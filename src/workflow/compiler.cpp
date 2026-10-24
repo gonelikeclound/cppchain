@@ -111,6 +111,22 @@ constexpr char kTimeoutTarget[] = "__timeout__";
 constexpr char kCancelTarget[] = "__cancelled__";
 constexpr char kImpossibleTarget[] = "__impossible__";
 
+// wfr-㊿：编译期"当前编译链"的 RAII 守卫。compile_workflow 进入时把自己的 workflow id 放进
+// subflow_active 集合（同一子 workflow 出现在祖辈链 = 循环引用），出作用域移除。
+// 与"嵌套子 workflow 编译经 child CompileOptions 传递"配合：整棵编译树共享同一集合。
+// 注意：必须是带构造函数的类型（emplace 不会对聚合做成员初始化后副作用，需在 ctor 里 insert）。
+struct SubflowChainGuard {
+  std::shared_ptr<std::unordered_set<std::string>> active;
+  std::string id;
+  SubflowChainGuard(std::shared_ptr<std::unordered_set<std::string>> a, std::string i)
+      : active(std::move(a)), id(std::move(i)) {
+    if (active) active->insert(id);
+  }
+  ~SubflowChainGuard() {
+    if (active) active->erase(id);
+  }
+};
+
 }  // namespace
 
 // B2（problems/39）：产物版本单调源（公开，节点层取号）。定义放匿名块外，
@@ -191,6 +207,28 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   cctx.guard = opts.tool_policy;              // wfr-㊷：副作用执行点防护（null = 不防护）
   cctx.shared_registry = opts.shared_registry;  // wfr-㊹：共享工具注册表（tool_registry 用）
   cctx.tool_lib_dirs = opts.tool_lib_dirs;      // wfr-㊹：动态工具库搜索路径（from 定位用）
+  cctx.subworkflow_loader = opts.subworkflow_loader;  // wfr-㊿：proxyNode 子 workflow 装载
+  cctx.max_subflow_depth = opts.max_subflow_depth;    // wfr-㊿：子 workflow 嵌套上限
+  cctx.config_keys = opts.config_keys;                // wfr-㊿：@config 契约透传（子编译同源）
+  cctx.max_steps = opts.max_steps;                    // wfr-㊿：steps/Send 兜底透传（子编译同源）
+  cctx.max_parallel = opts.max_parallel;
+  // wfr-㊿：子 workflow 编译期共用"当前编译链"（嵌套编译共享同一份 → 环/深度可检出）。
+  // 宿主可经 opts 传入（一般不传）→ 顶层 compile 建一份（放进局部 opts，嵌套编译经
+  // c_subworkflow 的 child CompileOptions 传递，见 node_types.cpp c_subworkflow）。
+  if (opts.subworkflow_loader != nullptr) {
+    cctx.subflow_active =
+        opts.subflow_active != nullptr ? opts.subflow_active
+                                       : std::make_shared<std::unordered_set<std::string>>();
+  }
+  // 把自己放进编译链（RAII：无论成功/失败都在出作用域时移除；同一子 workflow 出现在祖辈链 =
+  // 循环引用，编译期 fail-closed。顶层 workflow 也占一个深度单位）。
+  std::optional<SubflowChainGuard> chain_guard;
+  if (cctx.subflow_active != nullptr) {
+    if (cctx.subflow_active->count(ir.id) != 0)
+      return invalid("子 workflow 环引用：workflow '" + ir.id +
+                     "' 已在其祖先的编译链上（同一子 workflow 被循环引用）");
+    chain_guard.emplace(cctx.subflow_active, ir.id);
+  }
   std::function<void(std::vector<NodeIR> const&, LoopScope const*)> compile_list =
       [&](std::vector<NodeIR> const& nodes, LoopScope const* scope) {
         for (NodeIR const& n : nodes) {

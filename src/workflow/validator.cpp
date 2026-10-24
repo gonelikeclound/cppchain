@@ -607,12 +607,15 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                                    // wfr-㊹ 治理（problems/33）：verify 发布 verdict/outcome、
                                    // plan_review 发布裁决 —— expr 门（jgate/rgate）要引用它们
                                    target.kind == NodeKind::Verify ||
-                                   target.kind == NodeKind::PlanReview;
+                                   target.kind == NodeKind::PlanReview ||
+                                   // wfr-㊿ proxyNode：subworkflow 发布结果帧（子节点产物 →
+                                   // 帧顶层键，`$<id>.result.<子节点id>` 直接可用，见 arch 24 §3.1）
+                                   target.kind == NodeKind::SubWorkflow;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
                                "' 指向非 result 节点（仅 tool / model / run_tools / "
                                "load_history / route / summarize / refine_history / "
-                               "approve_tools / verify / plan_review 发布 result）");
+                               "approve_tools / verify / plan_review / subworkflow 发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");

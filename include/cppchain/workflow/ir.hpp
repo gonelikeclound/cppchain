@@ -96,6 +96,10 @@ enum class NodeKind {
   // ---- wfr-㊹ 治理：动态工具源（见 02-arch-design/24，problems/34）----
   ToolRegistry, // 声明一组工具源（{from,type,load}），运行期加载进共享 ToolRegistry →
                 // NodeContext.shared_tools；think/run_tools 从 context 取（共享优先、内置兜底）
+  // ---- wfr-㊿：proxyNode —— 运行期调用子 workflow（见 02-arch-design/24）----
+  SubWorkflow, // 编译期装载子 workflow（隔离 CompiledGraph），运行期按 mode 执行：
+               //   sync  = 同步跑完，子最终 state 平铺回 results.<id>；
+               //   detach = fire-and-forget（后台线程），子结果落盘 .wfr/subflows/ 审计。
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -224,6 +228,13 @@ struct NodeIR {
   // model/run_tools 从 context 取（共享优先、内置兜底）。from/type/load 结构二者共用。
   struct ToolSource { std::string from; std::string type; std::vector<std::string> load; };
   std::vector<ToolSource> tool_sources;
+
+  // ---- wfr-㊿：proxyNode（见 02-arch-design/24）----
+  // 编译期装载子 workflow（loader 由 CompileOptions 注入）；运行期隔离执行。
+  std::string sub_workflow;              // 子 workflow 名/路径（字面量，编译期 loader 解析）
+  std::string subflow_mode;              // "sync"（缺省）| "detach"（fire-and-forget）
+  std::vector<std::string> copy_state;   // 从主 state 拷贝给子 state 的键（缺省只给 config）
+  Json sub_input = Json::object();       // 字面量入参（可含 $ / @config 引用；右胜覆盖）
 
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };

@@ -14,9 +14,12 @@
 #include <nlohmann/json.hpp>
 
 #include <expected>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "cppchain/graph/graph.hpp"
@@ -79,6 +82,17 @@ struct CompileOptions {
   // wfr-㊹ 治理（problems/34）：动态工具库搜索路径（非拥有；null = 默认空 → 只按相对/绝对路径）。
   // tool_registry 的 from 是纯库名，宿主在这些目录里找 `lib<from>.so`（通用机制，不指向具体库）。
   std::vector<std::string> const* tool_lib_dirs = nullptr;
+
+  // wfr-㊿：proxyNode（子 workflow 调用，见 02-arch-design/24）
+  // 子 workflow 装载器：spec（子 workflow 名/路径）→ 完整可 parse 的 workflow JSON
+  // （宿主负责按名/路径读文件 + 展开其静态 import；缺省空 = 未提供 → subworkflow 节点编译失败，
+  // fail-closed——编译期就拒，不是运行期才发现）。返回 nullopt = 找不到。
+  std::function<std::optional<Json>(std::string const& spec)> subworkflow_loader = nullptr;
+  // 子 workflow 嵌套上限（防 A→B→A 环 / 病态深链）。编译期在 c_subworkflow 里计数。
+  std::size_t max_subflow_depth = 4;
+  // 编译期共用的"当前编译链"集合（嵌套子 workflow 时共享；宿主无需关心，顶层 compile 自动建）。
+  // 存 workflow id → 编译期环检测（同一子 workflow 出现在自己/祖辈链上 → 报错）。
+  std::shared_ptr<std::unordered_set<std::string>> subflow_active = nullptr;
 };
 
 struct CompiledWorkflow {
