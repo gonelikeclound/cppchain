@@ -660,6 +660,26 @@ int main(int argc, char** argv) {
   opts.shared_registry = &shared_registry;  // wfr-㊹：tool_registry 加载目标（可空则 workflow 里该节点报错）
   if (!tool_lib_dirs.empty()) opts.tool_lib_dirs = &tool_lib_dirs;  // wfr-㊹：`lib<from>.so` 搜索目录
   opts.max_parallel = max_parallel;  // wfr-㊾ 批③：Send 并行波宽度（>1 时 parallel/executor 生效）
+  // wfr-㊿：subworkflow（proxyNode）子 workflow 装载器 —— 按名/路径定位 + 静态 import 展开。
+  // 与主 workflow 的装载同路径（locate + expand_workflow_imports），只多一层"子"语义。
+  opts.subworkflow_loader = [&settings, &workdir](std::string const& spec) -> std::optional<Json> {
+    auto const p = locate(workdir, spec, settings);
+    if (!p) return std::nullopt;
+    std::ifstream in(*p);
+    if (!in) return std::nullopt;
+    Json j;
+    try {
+      in >> j;
+    } catch (...) {
+      return std::nullopt;
+    }
+    if (j.contains("import")) {  // 静态展开（base_dir = 子文件所在目录），动态库 import 同主流程约定
+      auto const base = std::filesystem::path(*p).parent_path().string();
+      auto e = expand_workflow_imports(j, base);
+      if (!e) return std::nullopt;
+    }
+    return j;
+  };
   // 不做 config_keys 白名单（生成器侧防护；wfr 跑手写/内置 workflow 由 --set 提供键）
   // wfr-㊸ @②：人审悬挂（interrupt）需要 checkpointer + thread_id。用**进程内**
   // MemoryCheckpointer：悬挂↔恢复只发生在同一次 wfr 调用内；跨进程续聊仍走会话
