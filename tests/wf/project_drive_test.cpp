@@ -634,3 +634,161 @@ TEST(WfProjectDrive, loop_runs_seedless_task_without_starvation) {
   Json const& d = (*st)["results"]["drive"];
   EXPECT_TRUE(d["done"] == true);               // 末轮停机（不是 blocked）
 }
+// ---- 评审 fail 专线重跑路由（arch 27 第五刀）----
+
+// 项目终审 fail + 模型点名 rework → project end 写 completion.rework（供 drive 重跑路由消费）
+TEST(WfProjectDrive, review_fail_writes_rework_to_completion) {
+  DriveFixture fx;
+  ScriptedDrive mdl;
+  mdl.replies.push_back(message::ai_message(
+      R"({"pass":false,"feedback":"数字前后不一致","rework":["weekly","monthly"]})"));
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  auto review_wf = Json::parse(R"json({
+    "id": "wf_rework_review",
+    "nodes": [
+      {"id":"p_begin","kind":"project","project":"monthly_ops","phase":"begin","next":"p_review"},
+      {"id":"p_review","kind":"verify","phase":"review","project":"monthly_ops","model":"m",
+       "criteria":"C","next":"p_end"},
+      {"id":"p_end","kind":"project","project":"monthly_ops","phase":"end","next":"_turn_end"}
+    ]
+  })json");
+  auto parsed = WorkflowIR::parse(review_wf);
+  ASSERT_TRUE(parsed);
+  auto v = validate(*parsed, ValidatorOptions{});
+  ASSERT_TRUE(v.ok());
+  tool::ToolRegistry reg;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto wf = compile_workflow(*parsed, reg, nullptr, copts);
+  ASSERT_TRUE(wf) << wf.error().message;
+  auto r = fire_once(*wf, Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"},
+                               {"task", "weekly"}});
+  ASSERT_TRUE(r) << r.error().message;
+  // completion 落档：fail + rework 清单
+  Json po = [&] {
+    std::ifstream in(fx.proj_dir / "project.json");
+    Json j; in >> j; return j;
+  }();
+  EXPECT_EQ(po["completion"]["verdict"], "fail");
+  ASSERT_EQ(po["completion"]["rework"].size(), 2u);
+  EXPECT_EQ(po["completion"]["rework"][0], "weekly");
+  EXPECT_EQ(po["completion"]["rework"][1], "monthly");
+}
+
+// drive 返工路由：completion.fail + rework 点名 → 选已 done 的任务重跑（progress 不作门槛）
+TEST(WfProjectDrive, drive_reroutes_rework_task_even_if_done) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("weekly", "周报", Json::array()),
+                                    probe_task("monthly", "月报", Json::array())}),
+                       Json{{"completion",
+                             Json{{"verdict", "fail"}, {"rework", Json::array({"weekly"})}}}});
+  fx.seed_progress(Json{{"weekly", "done"}, {"monthly", "done"}});
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");   // 即使 progress=done 也返工重跑
+  EXPECT_EQ(d["done"], false);
+  EXPECT_EQ(d["rework"], 1L);
+  EXPECT_NE(d["reason"].get<std::string>().find("返工重跑"), std::string::npos);
+}
+
+// 返工候选仍受依赖门约束：rework 里的任务依赖未就绪 → 选就绪的
+TEST(WfProjectDrive, drive_rework_respects_dependency_ready) {
+  DriveFixture fx;
+  fx.set_project_tasks(
+      Json::array({probe_task("weekly", "周报", Json::array({"monthly"})),
+                   probe_task("review", "复盘", Json::array())}),
+      Json{{"completion",
+            Json{{"verdict", "fail"}, {"rework", Json::array({"weekly", "review"})}}}});
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "review");   // weekly dep monthly 未 done → 不可返工；review 就绪
+  EXPECT_NE(d["reason"].get<std::string>().find("返工重跑"), std::string::npos);
+}
+
+// 返工候选无一依赖就绪 → 阻塞停机（fail-closed）
+TEST(WfProjectDrive, drive_rework_blocked_when_none_ready) {
+  DriveFixture fx;
+  fx.set_project_tasks(
+      Json::array({probe_task("weekly", "周报", Json::array({"ghost"}))}),
+      Json{{"completion", Json{{"verdict", "fail"}, {"rework", Json::array({"weekly"})}}}});
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_TRUE(d["next_task"].is_null());
+  EXPECT_EQ(d["done"], false);
+  EXPECT_EQ(d["blocked"], true);
+}
+
+// 集成闭环：终审 fail → drive 返工重跑 weekly → 子 workflow 内 review 判 done → 正常收尾
+TEST(WfProjectDrive, loop_rework_resolves_after_rerun) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("weekly", "周报", Json::array())}),
+                       Json{{"completion",
+                             Json{{"verdict", "fail"}, {"rework", Json::array({"weekly"})}}}});
+  fx.seed_progress(Json{{"weekly", "done"}});
+  fx.mark_product("weekly");
+  // 子 workflow 带项目级终审（返工跑完后再 review 判 done）
+  ScriptedDrive mdl;
+  mdl.replies.push_back(message::ai_message(R"({"pass":true,"feedback":"返工后达标"})"));
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  auto loop_ir = Json::parse(R"json({
+    "id": "wf_drive_loop_rework",
+    "nodes": [
+      {"id": "loop", "kind": "loop", "max": 5, "next": "_turn_end", "on_max": "_turn_end",
+       "body": [
+         {"id": "drive", "kind": "project_drive", "project": "monthly_ops", "next": "gate"},
+         {"id": "gate", "kind": "expr", "expr": "$drive.result.next_task != null",
+          "then": "run", "else": "_break"},
+         {"id": "run", "kind": "subworkflow", "workflow": "wf_drive_child_review", "mode": "sync",
+          "input": {"config": {"task": "$drive.result.next_task",
+                               "project": "monthly_ops",
+                               "plan_steps": "$drive.result.plan_steps",
+                               "goal": "$drive.result.goal"}},
+          "next": "_continue"}
+       ]}
+    ]
+  })json");
+  CompileOptions copts;
+  copts.components = &comps;
+  copts.subworkflow_loader = [](std::string const& spec) -> std::optional<Json> {
+    if (spec == "wf_drive_child_review") {
+      return Json::parse(R"json({
+        "id": "wf_drive_child_review",
+        "nodes": [
+          {"id":"p_begin","kind":"project","project":"@config.project","phase":"begin","next":"t_begin"},
+          {"id":"t_begin","kind":"task","task":"@config.task","phase":"begin","next":"loop"},
+          {"id":"loop","kind":"loop","max":1,"next":"t_end","on_max":"t_end",
+           "body":[{"id":"ann","kind":"verify","phase":"announce","next":"judge"},
+                   {"id":"judge","kind":"verify","phase":"judge","next":"_continue"}]},
+          {"id":"t_end","kind":"task","task":"@config.task","phase":"end","next":"p_review"},
+          {"id":"p_review","kind":"verify","phase":"review","project":"@config.project","model":"m",
+           "criteria":"C","next":"p_end"},
+          {"id":"p_end","kind":"project","project":"@config.project","phase":"end","next":"_turn_end"}
+        ]
+      })json");
+    }
+    return std::nullopt;
+  };
+  auto st = fire_parsed(loop_ir,
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  // 返工后 review 判 done → completion 更新为 done（重跑路由闭环）
+  Json po = [&] {
+    std::ifstream in(fx.proj_dir / "project.json");
+    Json j; in >> j; return j;
+  }();
+  EXPECT_EQ(po["completion"]["verdict"], "done");
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_TRUE(d["done"] == true);   // 末轮正常停机（不是 blocked/返工）
+}

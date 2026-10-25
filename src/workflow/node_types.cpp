@@ -4,6 +4,7 @@
 // 集中到一处后，加一种节点只需在这里加一个 NodeType。
 #include "cppchain/workflow/node_type.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -1985,7 +1986,8 @@ bool judge_batch_review(Json const& plan, Json const& plan_log, std::string cons
 // 不盲从执行者自述）。criteria 为空 → 用 project.json.completion_criteria。
 std::optional<Json> read_json_file(std::filesystem::path const& p);  // 定义在 task_archive_path 附近
 bool judge_project_review(std::filesystem::path const& pdir, std::string const& criteria,
-                          model::ChatModel* m, std::string const& rev_sys, std::string& why) {
+                          model::ChatModel* m, std::string const& rev_sys, std::string& why,
+                          std::vector<std::string>* rework_out = nullptr) {
   if (m == nullptr) {
     why = "review 模型未配置（verify review 项目模式缺 model）";
     return false;
@@ -2033,7 +2035,9 @@ bool judge_project_review(std::filesystem::path const& pdir, std::string const& 
       rev_sys.empty()
           ? "你是项目级独立审查员。依据【验收标准】对【项目目标】在整个项目的【任务进展】上做独立判断，"
             "不盲从任何执行者自述，只依据任务档案里的事实。验收标准未全部满足必须 pass=false。"
-            "只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。"
+            "判 fail 时，如能指出需返工的具体任务，输出 \"rework\":[\"任务id\",…]（只列需要返工的，"
+            "不要列全部；不指明则省略）。"
+            "只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\",\"rework\":[\"任务id\"]可选}，不要输出别的。"
           : rev_sys);
   message::Message const usr = message::human_message(brief);
   auto resp = m->invoke({sys, usr}, {});
@@ -2051,6 +2055,22 @@ bool judge_project_review(std::filesystem::path const& pdir, std::string const& 
     return false;
   }
   bool const pass = j->value("pass", false);
+  // arch 27 第五刀：模型可点名"需返工的任务"（rework 数组；判 fail 时给出，供 project_drive 重跑路由）。
+  // 只收存在于 project.json tasks 的 id（未知 id 忽略，fail-closed）。
+  if (rework_out != nullptr && j->contains("rework") && (*j)["rework"].is_array() &&
+      !pass) {
+    for (Json const& r : (*j)["rework"])
+      if (r.is_string() && !r.get<std::string>().empty()) {
+        bool known = false;
+        if (po.contains("tasks") && po["tasks"].is_array())
+          for (Json const& t : po["tasks"])
+            if (t.is_object() && t.value("id", "") == r.get<std::string>()) {
+              known = true;
+              break;
+            }
+        if (known) rework_out->push_back(r.get<std::string>());
+      }
+  }
   why = std::string(pass ? "项目级终审通过" : "项目级终审不通过") +
         (j->contains("feedback") && (*j)["feedback"].is_string()
              ? std::string("：") + (*j)["feedback"].get<std::string>()
@@ -2498,10 +2518,14 @@ void c_project(NodeIR const& n, NodeType::CompileContext& ctx) {
         // 与 progress[task]（任务级）分开：completion 是项目整体验收档（Reviewer 独立判）。
         if (state.contains("project_review") && state["project_review"].is_object()) {
           Json const& rv = state["project_review"];
-          po["completion"] = Json{{"verdict", rv.value("verdict", "")},
-                                  {"when", today_str()},
-                                  {"by", rv.value("project", "")},
-                                  {"why", rv.value("why", "")}};
+          Json comp = Json{{"verdict", rv.value("verdict", "")},
+                           {"when", today_str()},
+                           {"by", rv.value("project", "")},
+                           {"why", rv.value("why", "")}};
+          // arch 27 第五刀：终审 fail 时模型点名的返工任务 → completion.rework（project_drive 重跑路由）
+          if (rv.contains("rework") && rv["rework"].is_array() && !rv["rework"].empty())
+            comp["rework"] = rv["rework"];
+          po["completion"] = std::move(comp);
           results[node_id]["project_review"] = rv.value("verdict", "");
         }
         write_json_file(pj, po);
@@ -2621,10 +2645,35 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
                                  {"goal", goal.empty() ? ("任务" + tid) : goal}}}).dump();
     };
 
+    // arch 27 第五刀：评审 fail 专线重跑 —— completion.verdict=fail 且 completion.rework 点名 →
+    // 重跑清单里的任务（即使 progress=done 也重跑：整体不达标点名返工）。依赖仍须就绪。
+    Json const completion = po.value("completion", Json::object());
+    std::vector<std::string> rework;
+    if (completion.value("verdict", "") == "fail" && completion.contains("rework") &&
+        completion["rework"].is_array())
+      for (Json const& r : completion["rework"])
+        if (r.is_string() && !r.get<std::string>().empty())
+          rework.push_back(r.get<std::string>());
+    bool const rework_mode = !rework.empty();
+    auto is_rework_ready = [&](std::string const& tid) {
+      Json const deps = task_deps(tid);
+      if (deps.is_array())
+        for (Json const& d : deps)
+          if (!dep_met(d)) return false;
+      return true;  // 忽略 progress（done 也重跑）
+    };
+
     // 简报（模型档决策依据；与项目终审简报同格式）
     std::string brief;
     brief += "【项目目标】" + po.value("goal", std::string{}) + "\n";
     brief += "【验收标准】" + po.value("completion_criteria", std::string{}) + "\n";
+    // 终审状态：fail + 返工清单（meta 模型据此优先重跑清单任务）
+    if (completion.value("verdict", "") == "fail") {
+      std::string rwl;
+      for (std::string const& r : rework) rwl += (rwl.empty() ? "" : ",") + r;
+      brief += "【项目终审】verdict=fail" +
+               (rwl.empty() ? "（未点名返工）\n" : " · 返工清单:[" + rwl + "]\n");
+    }
     if (tasks.is_array()) {
       brief += "【任务进展】\n";
       for (Json const& t : tasks) {
@@ -2668,8 +2717,8 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
       return std::nullopt;
     };
-    // 规则档：未完成（文件序）→ 就绪子集（deps 全 done）→ **经验加权**排序后选首个。
-    //      阻塞停机 = 有未完成但无就绪（依赖未满足：疑环 / 缺失依赖 / 依赖任务在途）。
+    // 规则档：候选 = 就绪未完成（普通）或 rework 清单（返工模式），再做**经验加权**排序选首个。
+    //      阻塞停机 = 有候选需求但无一就绪（依赖未满足：疑环 / 缺失依赖 / 在途）。
     std::vector<std::string> unfinished;
     if (tasks.is_array())
       for (Json const& t : tasks)
@@ -2681,22 +2730,38 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
     std::vector<std::string> ready;
     for (std::string const& tid : unfinished)
       if (is_ready(tid)) ready.push_back(tid);
-    bool const blocked = !unfinished.empty() && ready.empty();
     std::vector<std::string> candidates;
-    auto append_ready = [&](std::vector<std::string>& out, bool pref) {
-      for (std::string const& tid : ready)
-        if (pref == (pref_tasks.count(tid) != 0)) out.push_back(tid);
-    };
-    append_ready(candidates, true);   // 经验命中者优先（就绪内）
-    append_ready(candidates, false);  // 其余按文件序
+    if (rework_mode) {
+      // 返工路由：只跑 rework 清单里的任务（依赖就绪；progress 状态不作门槛，done 也重跑）
+      if (tasks.is_array())
+        for (Json const& t : tasks)
+          if (t.is_object()) {
+            std::string const tid = t.value("id", "");
+            if (tid.empty() || std::find(rework.begin(), rework.end(), tid) == rework.end())
+              continue;
+            if (is_rework_ready(tid)) candidates.push_back(tid);
+          }
+    } else {
+      auto append_ready = [&](std::vector<std::string>& out, bool pref) {
+        for (std::string const& tid : ready)
+          if (pref == (pref_tasks.count(tid) != 0)) out.push_back(tid);
+      };
+      append_ready(candidates, true);   // 经验命中者优先（就绪内）
+      append_ready(candidates, false);  // 其余按文件序
+    }
+    bool const blocked = rework_mode ? candidates.empty()
+                                     : (!unfinished.empty() && ready.empty());
     std::string next_task;   // 空 = 停机
     std::string next_goal;
     std::string next_seed;
     std::string plan_source = "preset";  // preset（预置 steps）| model（模型产 plan）| fallback（单步兜底）
     std::string reason;
     if (blocked) {
-      reason = "任务依赖未就绪（阻塞停机）：" + std::to_string(unfinished.size()) +
-               " 个未完成任务，但无任何任务依赖已满足（疑环/缺失依赖/在途）";
+      reason = rework_mode
+                   ? "返工候选无一依赖就绪（阻塞停机）：终审 fail 点名 " +
+                         std::to_string(rework.size()) + " 个任务但依赖未满足（疑环/缺失/在途）"
+                   : "任务依赖未就绪（阻塞停机）：" + std::to_string(unfinished.size()) +
+                         " 个未完成任务，但无任何任务依赖已满足（疑环/缺失依赖/在途）";
     } else if (!candidates.empty()) {
       next_task = candidates[0];
       auto const info = task_info(next_task);
@@ -2708,9 +2773,12 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
       bool const used_fallback = (next_seed.empty() || next_seed == "[]");
       ensure_plan_seed(next_seed, next_goal, next_task);
       if (used_fallback) plan_source = "fallback";
-      reason = std::string(pref_tasks.count(next_task) != 0 ? "经验优先（规则档）："
-                                                       : "顺序推进（规则档）：") +
-               "未完成任务 " + next_task;
+      if (rework_mode)
+        reason = "项目终审 fail → 返工重跑：" + next_task;
+      else
+        reason = std::string(pref_tasks.count(next_task) != 0 ? "经验优先（规则档）："
+                                                         : "顺序推进（规则档）：") +
+                 "未完成任务 " + next_task;
       if (used_fallback) reason += "（无预置 steps → 自适应单步兜底）";
     } else {
       reason = "项目全部任务 done（规则档停机）";
@@ -2729,6 +2797,9 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
                 "只能选依赖已就绪（deps 全部 done）的任务；【任务进展】中标有 依赖:[…] 且前置未完成的"
                 "任务不可选；若存在未完成任务但无一就绪（依赖堵塞/环）返回 task=null 且 done=false、"
                 "reason 说明『依赖未就绪』。"
+                // arch 27 第五刀：返工路由 —— 终审 fail 且有返工清单时优先重跑清单任务（done 也重跑）
+                "若【项目终审】为 verdict=fail 且给出返工清单（rework:[…]），优先选清单里的任务重跑"
+                "（即使进度标了 done）；没有清单则按正常未完成任务挑。"
                 "若你选中的任务【任务进展】里未标注计划/产物证据（无预置 steps），可同时输出 "
                 "\"plan_steps\":[{\"id\":\"s1\",\"goal\":\"本批第一步（一句话，可含验证方式）\"}] "
                 "给出该任务的首版计划；有预置 steps 则不输出。"
@@ -2744,8 +2815,15 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
           bool const model_done = j->contains("done") && (*j)["done"].is_boolean() &&
                                   (*j)["done"].get<bool>();
           if (tv.is_string() && !tv.get<std::string>().empty() && !model_done) {
-            // 模型选的任务必须**就绪**：存在、未 done、依赖已满足（arch 27 第三刀；选未就绪 → 拒绝回落）
-            if (is_ready(tv.get<std::string>())) {
+            // 模型选的任务必须**就绪**：普通=未 done 且依赖满足；返工模式=在 rework 清单且依赖满足
+            // （done 也重跑）。选未就绪 → 拒绝回落规则档。
+            bool const pick_ok =
+                rework_mode
+                    ? (std::find(rework.begin(), rework.end(), tv.get<std::string>()) !=
+                           rework.end() &&
+                       is_rework_ready(tv.get<std::string>()))
+                    : is_ready(tv.get<std::string>());
+            if (pick_ok) {
               next_task = tv.get<std::string>();
               auto const info = task_info(next_task);
               if (info) {
@@ -2803,6 +2881,7 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
                        {"goal", next_goal},
                        {"plan_steps", next_seed},
                        {"plan_source", plan_source},
+                       {"rework", static_cast<long>(rework.size())},  // 终审 fail 点名的返工任务数
                        {"lessons_used", static_cast<long>(related.size())}};
     if (sink_p)
       sink_p->log_node(nc.node_name, "info",
@@ -3175,10 +3254,11 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
       std::string why;
       bool ok;
       std::string project;
+      std::vector<std::string> rework;  // arch 27 第五刀：项目终审 fail 时模型点名的返工任务
       if (!proj_spec.empty()) {
         project = resolve_text_parameter(proj_spec, state);
         std::filesystem::path const pdir = project_dir_path(state, project);
-        ok = judge_project_review(pdir, criteria, judge, judge_sys, why);
+        ok = judge_project_review(pdir, criteria, judge, judge_sys, why, &rework);
       } else {
         ok = judge_batch_review(plan, plan_log, criteria, judge, judge_sys, why);
       }
@@ -3191,9 +3271,11 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
       Json update{{kPlanLogStateKey, std::move(plan_log)},
                   {kResultsKey, Json{{node_id, Json{{"phase", "review"},
                                                     {"verdict", ok ? "done" : "fail"}}}}}};
-      if (!project.empty())
-        update["project_review"] =
-            Json{{"project", project}, {"verdict", ok ? "done" : "fail"}, {"why", why}};
+      if (!project.empty()) {
+        Json pr = Json{{"project", project}, {"verdict", ok ? "done" : "fail"}, {"why", why}};
+        if (!rework.empty()) pr["rework"] = rework;  // 返工清单 → project end 落 completion.rework
+        update["project_review"] = std::move(pr);
+      }
       return Command::with_update(std::move(update));
     }
 
