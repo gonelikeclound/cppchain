@@ -32,3 +32,4 @@
 | 22 | [22-长程任务实现全景.md](22-长程任务实现全景.md) | **wfr-㊿ · 实现全景（代码实证）**：档案/会话分工、数据形态、一条批运行时路径、跨批机制五件、调度、自进化接点、与 PEV/mch 位置、批③ 交接件衔接 | ✅ 已建档（2026-10-16） |
 | 23 | [23-治理全链workflow设计.md](23-治理全链workflow设计.md) | **wfr-㊹ 治理（problems/33）**：governed 单 workflow 完整实现治理思想——UNVERIFIED 双档 / _timeout / _cancelled / effect_class+自检，终态四档穷尽 | ✅ 已实现（720 全绿，problems/33） |
 | 24 | [24-proxyNode子workflow调用设计.md](24-proxyNode子workflow调用设计.md) | **wfr-㊿ proxyNode（arch 21 预留原语落地）**：`subworkflow` 节点运行期调用子 workflow（隔离执行）——sync 子结果提升回传 / detach fire-and-forget 落盘审计 / copy_state+input 构造子 state / 编译期装载子 IR（fail-fast）+ 环与深度防护 | ✅ 已实现（851 全绿，problems/47） |
+| 25 | [25-声明式配置三形态设计.md](25-声明式配置三形态设计.md) | **P1.5（借鉴 miclaw-rs `crates/config`）**：`declarations.configs` 声明式配置——命名空间点分引用（仅声明名导航）/ target 平铺 / `${workdir}` 运行变量 / 编译期启动即炸；在**全局 config 表**上生根（不做逐节点 config 对象） | ✅ 已实现（861 全绿，problems/48） |
