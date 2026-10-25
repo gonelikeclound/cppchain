@@ -112,6 +112,11 @@ enum class NodeKind {
                 //   的任务；模型档（可选 judge 模型）= 简报 + system_prompt 决策（选已 done → 拒绝回落）。
                 //   产出 results.<id> = {next_task|null, done, plan_steps(该任务 steps 种子), goal}，
                 //   由 expr 门（next_task != null）决定跑任务还是 _break 收尾。
+  // ---- arch 28：longdoc —— 应对超长内容的通用方法（结构骨架 + 倒排 + 按需深读）----
+  LongdocIngest,   // 单遍扫描目录（每文件=一个结构单元）→ 每单元产骨架 {blurb, keys}（模型档/
+                   //   规则档）→ 落 `longdoc.index.json`（units + keys 倒排）。与语料无关（见 arch 28）。
+  LongdocRetrieve, // 按需检索：query 分词 → keys 倒排命中 top-k 单元 → 加载命中单元原文切片（预算
+                   //   截断）→ 写 state[system_context]（供 model 自动带上）+ results.hits。
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -229,6 +234,12 @@ struct NodeIR {
   std::string task;       // task（㊿）：任务名（可 @config.*）
   std::string project;    // 项目绑定（arch 26）：project 节点 = 项目名（可 @config.*；空 = 走 @config.project）；
                           // verify phase=review 复用 = 启动"项目级终审"（判 project 整体是否达标，见 arch 26 第二刀）
+  // arch 28：longdoc 三件字段（可 @config.* / 字面量；数值字段运行期解析）
+  std::string longdoc_root;     // ingest：单元原文目录（每文件=一个单元）
+  std::string longdoc_index;    // ingest/retrieve：索引文件路径（ingest 缺省 <root>/../longdoc.index.json）
+  std::string longdoc_query;    // retrieve：查询串
+  std::string longdoc_topk;     // retrieve：返回命中单元数（缺省 3）
+  std::string longdoc_slice_chars;  // retrieve：单单元原文切片预算字符（缺省 8000，UTF-8 安全）
   std::string confirm;   // plan_review（批④）："true/false"（假 = 关确认门直接过）；可 @config.*
   std::string role;      // verify（wfr-㊾）：审计角色名（如 "executor"/"reviewer"），plan_log 落行时带
   std::string criteria;  // verify phase=review（wfr-㊾）：批级判据（可 @config.*，缺省空 = 用 plan.goal）

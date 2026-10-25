@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -4167,6 +4168,253 @@ void c_context(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ---- longdoc（arch 28）：应对超长内容的通用方法（结构骨架 + 倒排 + 按需深读）----
+// 索引格式 longdoc.index.json：{meta{root,unit_of,built}, units[{id,title,blurb,keys,path,bytes}],
+//   keys{<键>:[unit 下标]}}。分块策略第一版=文件（目录下每个常规文件=一个单元）。与语料无关。
+
+// 查询/原文分词：空白 + 常见标点分隔；中文无空格连续段整体成一个 token（key 双向子串命中即可）。
+std::vector<std::string> longdoc_tokenize(std::string const& s) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (char c : s) {
+    if (std::isspace(static_cast<unsigned char>(c)) || c == '，' || c == '。' || c == '；' ||
+        c == '：' || c == '！' || c == '？' || c == '、' || c == '…' || c == '"' || c == '\'' ||
+        c == '(' || c == ')' || c == '[' || c == ']' || c == ',' || c == '.' || c == '?' ||
+        c == '!' || c == '\n' || c == '\t') {
+      if (!cur.empty()) out.push_back(cur);
+      cur.clear();
+    } else {
+      cur += c;
+    }
+  }
+  if (!cur.empty()) out.push_back(cur);
+  return out;
+}
+
+// 一个查询 token 与索引键匹配：双向子串（token 含键 或 键含 token）。
+bool longdoc_key_match(std::string const& token, std::string const& key) {
+  if (key.empty() || token.empty()) return false;
+  return token.find(key) != std::string::npos || key.find(token) != std::string::npos;
+}
+
+// 骨架规则兜底：blurb = 首行（截 120 字）；keys = ASCII 词（中文无空格 → 空 keys，倒排留模型档）。
+std::string longdoc_rule_blurb(std::string const& text) {
+  std::size_t e = text.find('\n');
+  std::string const first = e == std::string::npos ? text : text.substr(0, e);
+  return utf8_cut(first, 120);
+}
+std::vector<std::string> longdoc_rule_keys(std::string const& text) {
+  std::vector<std::string> out;
+  for (std::string const& t : longdoc_tokenize(text))
+    if (std::all_of(t.begin(), t.end(), [](unsigned char c) { return c <= 0x7F; }) && !t.empty())
+      out.push_back(t);
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
+// 解析正整数配置（字面量或 @config.*；空/"null"/非法 → 缺省）。
+long longdoc_int_param(std::string const& spec, Json const& state, long def) {
+  if (spec.empty()) return def;
+  std::string const v = resolve_text_parameter(spec, state);
+  if (v.empty() || v == "null") return def;
+  try {
+    long const n = std::stol(v);
+    return n > 0 ? n : def;
+  } catch (std::exception const&) {
+    return def;
+  }
+}
+
+void v_longdoc_ingest(NodeIR const& n, NodeType::ValidateContext const&,
+                      NodeType::ErrorSink const& err) {  if (n.next.empty()) err("VN27", "longdoc_ingest 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const root_spec = n.longdoc_root;
+  std::string const index_spec = n.longdoc_index;
+  std::string const skel_sys = n.system_prompt;
+  model::ChatModel* judge =
+      (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [node_id, root_spec, index_spec, skel_sys, judge, sink_p](
+                               Json const& state, NodeContext& nc) {
+    std::string const root = resolve_text_parameter(
+        root_spec.empty() ? "@config.longdoc_root" : root_spec, state);
+    if (root.empty() || root == "null")
+      throw tool::ToolException("longdoc_ingest 节点 '" + node_id +
+                                "' 缺 longdoc_root（单元原文目录）");
+    std::filesystem::path const r(std::filesystem::absolute(root));
+    std::error_code ec;
+    if (!std::filesystem::is_directory(r, ec))
+      throw tool::ToolException("longdoc_ingest 节点 '" + node_id + "' 目录不存在: " + root);
+    std::string index_path = resolve_text_parameter(
+        index_spec.empty() ? "@config.longdoc_index" : index_spec, state);
+    if (index_path.empty() || index_path == "null")
+      index_path = (r.parent_path() / "longdoc.index.json").string();
+
+    // 单遍扫描：目录下常规文件 = 单元（排序稳定 → 块号顺序）
+    std::vector<std::string> files;
+    for (std::filesystem::directory_iterator it(r, ec), end; it != end; it.increment(ec)) {
+      if (ec) break;
+      if (!it->is_regular_file(ec)) continue;
+      files.push_back(it->path().filename().string());
+    }
+    std::sort(files.begin(), files.end());
+
+    Json units = Json::array();
+    Json keys_map = Json::object();
+    std::size_t unit_idx = 0;
+    for (std::string const& fname : files) {
+      std::ifstream in(r / fname, std::ios::binary);
+      if (!in) continue;
+      std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      // 骨架：模型档（可选）→ 规则兜底
+      Json sk = Json::object();
+      if (judge != nullptr) {
+        message::Message const sys = message::system_message(
+            skel_sys.empty()
+                ? "你是超长文档的结构提取器。给这段文本产出结构骨架：一句话 blurb（≤60字，概括本段讲什么）、"
+                  "keys（这段出现的专名/主题，字符串数组）。只输出 JSON：{\"blurb\":\"…\",\"keys\":[\"…\"]}，"
+                  "不要输出别的。"
+                : skel_sys);
+        message::Message const usr = message::human_message("【文本片段】\n" + utf8_cut(text, 6000));
+        auto resp = judge->invoke({sys, usr}, {});
+        if (resp)
+          if (auto j = json_block_of(resp->text()); j.has_value() && j->is_object()) sk = *j;
+      }
+      std::string blurb = sk.value("blurb", std::string{});
+      std::vector<std::string> keys;
+      if (sk.contains("keys") && sk["keys"].is_array())
+        for (Json const& k : sk["keys"])
+          if (k.is_string() && !k.get<std::string>().empty()) keys.push_back(k.get<std::string>());
+      if (blurb.empty()) blurb = longdoc_rule_blurb(text);
+      if (keys.empty()) keys = longdoc_rule_keys(text);
+      std::sort(keys.begin(), keys.end());
+      keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+      units.push_back(Json{{"id", fname}, {"title", fname},
+                           {"blurb", blurb}, {"keys", keys},
+                           {"path", fname}, {"bytes", static_cast<long long>(text.size())}});
+      for (std::string const& k : keys) {
+        if (!keys_map.contains(k)) keys_map[k] = Json::array();
+        keys_map[k].push_back(unit_idx);
+      }
+      ++unit_idx;
+    }
+    Json const index =
+        Json{{"meta", Json{{"root", r.string()}, {"unit_of", "file"}, {"built", today_str()}}},
+             {"units", std::move(units)}, {"keys", std::move(keys_map)}};
+    write_json_file(std::filesystem::path(index_path), index);
+    if (sink_p)
+      sink_p->log_node(nc.node_name, "info",
+                       "longdoc_ingest: " + std::to_string(unit_idx) + " units → " + index_path);
+    return Command::with_update(Json{{kResultsKey,
+                                      Json{{node_id, Json{{"action", "ingest"},
+                                                          {"units", static_cast<long>(unit_idx)},
+                                                          {"index", index_path}}}}}});
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+void v_longdoc_retrieve(NodeIR const& n, NodeType::ValidateContext const&,
+                        NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN27", "longdoc_retrieve 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const index_spec = n.longdoc_index;
+  std::string const query_spec = n.longdoc_query;
+  std::string const topk_spec = n.longdoc_topk;
+  std::string const slice_spec = n.longdoc_slice_chars;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [node_id, index_spec, query_spec, topk_spec, slice_spec, sink_p](
+                               Json const& state, NodeContext& nc) {
+    std::string const index_path = resolve_text_parameter(
+        index_spec.empty() ? "@config.longdoc_index" : index_spec, state);
+    if (index_path.empty() || index_path == "null")
+      throw tool::ToolException("longdoc_retrieve 节点 '" + node_id +
+                                "' 缺 longdoc_index（索引路径）");
+    auto idx = read_json_file(std::filesystem::path(index_path));
+    if (!idx || !idx->is_object())
+      throw tool::ToolException("longdoc_retrieve 节点 '" + node_id + "' 索引缺失/损坏: " +
+                                index_path);
+    Json const& index = *idx;
+    std::string const query = resolve_text_parameter(
+        query_spec.empty() ? "@config.query" : query_spec, state);
+    long const topk = longdoc_int_param(topk_spec.empty() ? "@config.longdoc_topk" : topk_spec,
+                                        state, 3);
+    long const slice = longdoc_int_param(
+        slice_spec.empty() ? "@config.longdoc_slice_chars" : slice_spec, state, 8000);
+    Json const units = index.value("units", Json::array());
+    Json const keys_map = index.value("keys", Json::object());
+    std::string const root =
+        index.value("meta", Json::object()).value("root", std::string{});
+
+    // 打分：query token × 命中键 → IDF 加权
+    std::map<long, double> score;
+    for (std::string const& t : longdoc_tokenize(query))
+      for (auto it = keys_map.begin(); it != keys_map.end(); ++it)
+        if (longdoc_key_match(t, it.key()) && it.value().is_array()) {
+          double const idf =
+              std::log(static_cast<double>(units.size() + 1) /
+                       (static_cast<double>(it.value().size()) + 1.0));
+          for (Json const& u : it.value())
+            if (u.is_number_unsigned()) score[u.get<long>()] += idf;
+        }
+    // top-k（按分降序，同分按单元序）
+    std::vector<long> ranked;
+    for (auto const& [u, s] : score) ranked.push_back(u);
+    std::stable_sort(ranked.begin(), ranked.end(),
+                     [&score](long a, long b) { return score[a] > score[b]; });
+    long const take = std::min<long>(topk, static_cast<long>(ranked.size()));
+    Json hits = Json::array();
+    Json sys = Json::array();
+    if (take > 0) {
+      // 用户问题 + 检索片段一并进 system_context（model 自动带上；无需 load_history 也能答）
+      sys.push_back(message::system_message(
+          "【用户问题】" + query + "\n【检索片段（按需加载；回答请引用 [单元id]，不要臆造未给的内容）】"));
+      for (long i = 0; i < take; ++i) {
+        long const u = ranked[static_cast<std::size_t>(i)];
+        if (u < 0 || u >= static_cast<long>(units.size())) continue;
+        Json const& unit = units[static_cast<std::size_t>(u)];
+        std::string const id = unit.value("id", "unit_" + std::to_string(u));
+        std::string text;
+        if (!root.empty() && unit.contains("path") && unit["path"].is_string()) {
+          std::ifstream in(std::filesystem::path(root) / unit["path"].get<std::string>(),
+                           std::ios::binary);
+          text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        std::string const sliced = utf8_cut(text, static_cast<std::size_t>(slice));
+        hits.push_back(Json{{"id", id},
+                            {"title", unit.value("title", id)},
+                            {"blurb", unit.value("blurb", "")},
+                            {"keys", unit.value("keys", Json::array())},
+                            {"bytes", static_cast<long long>(text.size())},
+                            {"text", sliced}});
+        sys.push_back(message::system_message(
+            "【" + id + "】" + unit.value("blurb", "") + "\n" + sliced));
+      }
+    }
+    Json update;
+    if (!sys.empty()) update[kSystemContextKey] = std::move(sys);  // model 自动带上检索片段
+    Json result = Json{{"action", "retrieve"},
+                       {"query", query},
+                       {"topk", take},
+                       {"hits", std::move(hits)}};
+    if (take == 0) result["note"] = "索引无命中（query 未匹配任何键）——建议换词或检查索引 keys";
+    update[kResultsKey] = Json{{node_id, std::move(result)}};
+    if (sink_p)
+      sink_p->log_node(nc.node_name, "info",
+                       "longdoc_retrieve: " + query + " → " + std::to_string(take) + " hits");
+    return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 }  // namespace
 
 std::vector<NodeType> const& builtin_node_types() {
@@ -4649,6 +4897,49 @@ std::vector<NodeType> const& builtin_node_types() {
                                     (n.project.empty() ? "" : " project=" + n.project) +
                                     " → " + n.next; },
        v_project_drive, c_project_drive, e_next, t_project_drive},
+      // ---------------- longdoc_ingest / longdoc_retrieve（arch 28，超长内容通用方法）----------------
+      {NodeKind::LongdocIngest, "longdoc_ingest",
+       [](Json const& nn) { return kind_is(nn, "longdoc_ingest"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "longdoc_root", out.longdoc_root);
+         get_str(out, node, "longdoc_index", out.longdoc_index);
+         get_str(out, node, "model", out.model);          // 可选：骨架提取模型（无 = 规则档）
+         get_str(out, node, "system_prompt", out.system_prompt);
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "longdoc_ingest";
+         if (!n.longdoc_root.empty()) node["longdoc_root"] = n.longdoc_root;
+         if (!n.longdoc_index.empty()) node["longdoc_index"] = n.longdoc_index;
+         if (!n.model.empty()) node["model"] = n.model;
+         if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("longdoc_ingest") +
+                                    (n.longdoc_root.empty() ? "" : " root=" + n.longdoc_root) +
+                                    " → " + n.next; },
+       v_longdoc_ingest, c_longdoc_ingest, e_next, t_none},
+      {NodeKind::LongdocRetrieve, "longdoc_retrieve",
+       [](Json const& nn) { return kind_is(nn, "longdoc_retrieve"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "longdoc_index", out.longdoc_index);
+         get_str(out, node, "longdoc_query", out.longdoc_query);
+         get_str(out, node, "longdoc_topk", out.longdoc_topk);
+         get_str(out, node, "longdoc_slice_chars", out.longdoc_slice_chars);
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "longdoc_retrieve";
+         if (!n.longdoc_index.empty()) node["longdoc_index"] = n.longdoc_index;
+         if (!n.longdoc_query.empty()) node["longdoc_query"] = n.longdoc_query;
+         if (!n.longdoc_topk.empty()) node["longdoc_topk"] = n.longdoc_topk;
+         if (!n.longdoc_slice_chars.empty()) node["longdoc_slice_chars"] = n.longdoc_slice_chars;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("longdoc_retrieve") +
+                                    (n.longdoc_query.empty() ? "" : " q=" + n.longdoc_query) +
+                                    " → " + n.next; },
+       v_longdoc_retrieve, c_longdoc_retrieve, e_next, t_none},
       // ---------------- subworkflow（wfr-㊿ proxyNode，arch 24）：运行期调用子 workflow ----------------
       {NodeKind::SubWorkflow, "subworkflow",
        [](Json const& n) { return kind_is(n, "subworkflow"); },

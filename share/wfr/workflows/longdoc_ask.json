@@ -1,0 +1,12 @@
+{
+  "id": "longdoc_ask",
+  "nodes": [
+    { "id": "find", "kind": "longdoc_retrieve",
+      "longdoc_index": "@config.longdoc_index", "longdoc_query": "@config.query",
+      "longdoc_topk": "@config.longdoc_topk", "longdoc_slice_chars": "@config.longdoc_slice_chars",
+      "next": "answer" },
+    { "id": "answer", "kind": "model", "model": "main",
+      "system_prompt": "你是超长文档问答助手。依据【检索片段（按需加载）】回答用户问题：只引用给出的片段，不要臆造；回答里对每个依据标注 [单元id]。",
+      "next": "_turn_end" }
+  ]
+}

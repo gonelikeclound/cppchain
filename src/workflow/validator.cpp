@@ -653,13 +653,17 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                                    // arch 26/27：project / project_drive 发布项目档案/调度结果
                                    //（drive 的 next_task 被 expr 门与 subworkflow input 引用）
                                    target.kind == NodeKind::Project ||
-                                   target.kind == NodeKind::ProjectDrive;
+                                   target.kind == NodeKind::ProjectDrive ||
+                                   // arch 28：longdoc 两节点发布检索 hits / 索引统计
+                                   target.kind == NodeKind::LongdocIngest ||
+                                   target.kind == NodeKind::LongdocRetrieve;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
                                "' 指向非 result 节点（仅 tool / model / run_tools / "
                                "load_history / route / summarize / refine_history / "
                                "approve_tools / verify / plan_review / subworkflow / "
-                               "project / project_drive 发布 result）");
+                               "project / project_drive / longdoc_ingest / longdoc_retrieve "
+                               "发布 result）");
             else if (it->second >= c.index.at(n.id))
               c.err("VR2", "节点 '" + n.id + "' 引用了下游节点 '" + r.node +
                                "'（只能引用上游/更早的节点）");
