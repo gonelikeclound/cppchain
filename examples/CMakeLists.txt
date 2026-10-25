@@ -47,6 +47,8 @@ set(CONFIG_DECL_EXAMPLE_TARGETS config_decl)
 set(PROJECT_EXAMPLE_TARGETS project_run)
 # arch 27 自管理 loop（第一刀）demo：project_drive 调度循环（纯离线）
 set(PROJECT_DRIVE_EXAMPLE_TARGETS project_drive)
+# arch 28 longdoc（超长内容通用方法）demo：结构骨架+倒排+按需深读（离线，蜀山验证）
+set(LONGDOC_EXAMPLE_TARGETS longdoc)
 # 主动智能 workflow 生成端到端验收（真机 LLM）+ wfr 已在 src/wfr（正式 CLI，非 examples）
 set(WF_EXAMPLE_TARGETS wf_eval proactive workflow_cli)
 # 需要 agent 库（真机）的 demo
@@ -72,6 +74,7 @@ list(APPEND EXAMPLE_TARGETS ${PROXY_EXAMPLE_TARGETS})  # proxy_call：wfr-㊿ �
 list(APPEND EXAMPLE_TARGETS ${CONFIG_DECL_EXAMPLE_TARGETS})  # config_decl：P1.5 声明式配置（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_EXAMPLE_TARGETS})  # project_run：arch 26 project 结构（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_DRIVE_EXAMPLE_TARGETS})  # project_drive：arch 27 调度循环（离线）
+list(APPEND EXAMPLE_TARGETS ${LONGDOC_EXAMPLE_TARGETS})  # longdoc：arch 28 超长内容通用方法（离线）
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)
@@ -127,6 +130,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   elseif(t IN_LIST PROJECT_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)
   elseif(t IN_LIST PROJECT_DRIVE_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_workflow)
+  elseif(t IN_LIST LONGDOC_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)
   elseif(t IN_LIST WF_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow cppchain_http_curl)
