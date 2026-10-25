@@ -65,12 +65,27 @@ load_history(@config.session) → project begin → task begin(@config.project �
 ```
 与 lot 只差头尾：project begin/end 包在 task begin/end 外。后续若做项目级 review（完成标准），在 task end 后加一个 `verify phase=review`（独立 Reviewer，判 project.goal）。
 
-## 六、边界
+## 八、第二刀：项目级完成标准自动判定（已在 problems/50 验收）
+
+§六 的第 4 条从"只接语义"落地为完整闭环：
+
+- **复用 `verify phase=review` 为项目终审**：review 节点新增可选 `project` 字段（可 `@config.*`）——
+  非空即启动**项目级终审模式**：Reviewer 输入改为**项目简报**（project.json 的 目标/验收标准/纪律 +
+  各任务进度 + 各任务档案的批数/last_summary，只投事实、不投单任务执行思考，与 judge_batch_review 同纪律）。
+- **判据**：`criteria`（可 `@config.project_criteria`）为空/解析成 `"null"` → 回退 `project.completion_criteria`。
+- **写回**：verdict（done/fail）落 plan_log + `state.project_review`；`project end` 收口写
+  `project.json.completion = {verdict, when, by, why}`（与 `progress[task]` 任务级分层不混）。
+- **fail-closed**：缺裁判模型 → verdict=fail（不伪造 pass）。
+- 模板 `lot_project` 已在 task end 后内置一行项目终审（`p_review`，criteria 走 `@config.project_criteria`）。
+- 单测 `tests/wf/project_review_test.cpp` 5 例；workflow 357→362，全仓 874 全绿。
+
+## 九、边界（更新）
 
 - **自管理 loop 本期不做**；相关性经验挑选押后（一期全量注入）。
 - 不做 agent 间自由对话 / 自协调循环；不迁移旧 `.wfr/tasks/*`。
 - `state.lesson` 目前是"任务内节点可选产出"（模型/规则写），谁产经验的引导（任务结尾的沉淀节点模板）进 demo，不进引擎。
-- 项目级 review（completion_criteria 自动判定）本期只接 verify review 语义，workflow 里怎么编排由用户案例定（demo 可加一个独立 Reviewer 终审行）。
+- **项目级终审已闭环**（第二刀）：但「评审后是否自动重跑未达标任务」的处置语义（fail → 下一批补做）
+  属于自管理 loop 的范畴，仍押后 —— 本期只做判定与落档，不自动调度重做。
 
 ## 七、测试 / demo / 验收
 
