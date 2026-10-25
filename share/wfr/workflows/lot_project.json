@@ -1,0 +1,32 @@
+{
+  "id": "lot_project",
+  "nodes": [
+    { "id": "recall", "kind": "load_history",
+      "path": "@config.workspace", "session": "@config.session", "next": "p_begin" },
+    { "id": "p_begin", "kind": "project", "project": "@config.project",
+      "phase": "begin", "next": "t_begin" },
+    { "id": "t_begin", "kind": "task", "task": "@config.task",
+      "phase": "begin", "next": "loop" },
+    { "id": "loop", "kind": "loop", "max": 3, "next": "final", "on_max": "final",
+      "body": [
+        { "id": "step",   "kind": "verify", "phase": "announce", "next": "think" },
+        { "id": "think",  "kind": "model", "model": "main", "tools": "chat_bash",
+          "system_prompt": "你是项目『@config.project』下任务『@config.task』的执行助手：按每一步指令行事，做当前这一批能完成的部分；写完记得用产物落盘（.out/ 下）。项目目标/纪律/经验已注入本批上下文。",
+          "next": "route" },
+        { "id": "route", "kind": "route", "on": "last_ai_outcome",
+          "cases": { "tool_calls": "approve", "text": "judge", "invalid_tool_calls": "_fail" },
+          "default": "_fail" },
+        { "id": "approve", "kind": "approve_tools", "deny": [], "next": "act" },
+        { "id": "act", "kind": "run_tools", "next": "judge" },
+        { "id": "judge", "kind": "verify", "phase": "judge", "model": "main",
+          "next": "_continue" }
+      ] },
+    { "id": "final", "kind": "model", "model": "main",
+      "system_prompt": "汇总本批完成的情况，给一句批间摘要。",
+      "next": "t_end" },
+    { "id": "t_end", "kind": "task", "task": "@config.task",
+      "phase": "end", "next": "p_end" },
+    { "id": "p_end", "kind": "project", "project": "@config.project",
+      "phase": "end", "next": "_turn_end" }
+  ]
+}

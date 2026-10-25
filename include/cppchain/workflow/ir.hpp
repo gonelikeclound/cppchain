@@ -100,6 +100,12 @@ enum class NodeKind {
   SubWorkflow, // 编译期装载子 workflow（隔离 CompiledGraph），运行期按 mode 执行：
                //   sync  = 同步跑完，子最终 state 平铺回 results.<id>；
                //   detach = fire-and-forget（后台线程），子结果落盘 .wfr/subflows/ 审计。
+  // ---- arch 26：project —— 项目级自管理的容器节点（begin/end 双相位）----
+  Project,   // begin：读 .wfr/projects/<p>/project.json（fail-closed 缺档）→ 校验 @config.task
+             //    ∈ tasks[] → 读 lessons.json → 拼项目级上下文写 state[system_context]
+             //    （目标/完成标准/纪律/经验/本任务，与 Context 节点同形状，model 自动带上）；
+             // end：state.lesson → lessons.json 追加沉淀；project.json.progress[task] 更新。
+             //    任务档案仍归 task 节点（@config.project 非空时路径下沉到项目目录，见 arch 26）。
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
@@ -213,8 +219,9 @@ struct NodeIR {
   //           （wfr-㊾）：只喂计划 + 各步判定 + 判据，不喂执行思考（输入隔离的 Reviewer）。
   nlohmann::json default_plan = Json(nullptr);
   std::string goal;      // plan 节点的目标（可 @config.*）
-  std::string phase;     // verify：announce / judge / review；task：begin/end
+  std::string phase;     // verify: announce / judge / review；task：begin/end；project：begin/end
   std::string task;       // task（㊿）：任务名（可 @config.*）
+  std::string project;    // project（arch 26）：项目名（可 @config.*；空 = 走 @config.project）
   std::string confirm;   // plan_review（批④）："true/false"（假 = 关确认门直接过）；可 @config.*
   std::string role;      // verify（wfr-㊾）：审计角色名（如 "executor"/"reviewer"），plan_log 落行时带
   std::string criteria;  // verify phase=review（wfr-㊾）：批级判据（可 @config.*，缺省空 = 用 plan.goal）

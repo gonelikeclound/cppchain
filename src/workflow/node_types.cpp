@@ -2088,7 +2088,21 @@ std::filesystem::path task_archive_path(Json const& state, std::string const& ta
   std::filesystem::path const base =
       ws.is_string() ? std::filesystem::path(ws.get<std::string>())
                      : std::filesystem::current_path();
+  // arch 26：@config.project 非空 → 任务档案下沉到 .wfr/projects/<p>/tasks/（历史快照同目录，
+  // 由 c_task 的 end 相位按 parent_path 自动跟随）；空 → 旧路径（长程兼容零改动）。
+  std::string const proj = resolve_text_parameter("@config.project", state);
+  if (!proj.empty() && proj != "null")
+    return base / ".wfr" / "projects" / proj / "tasks" / (task + ".json");
   return base / ".wfr" / "tasks" / (task + ".json");
+}
+
+// arch 26：project 目录 = <workspace>/.wfr/projects/<project>/
+std::filesystem::path project_dir_path(Json const& state, std::string const& project) {
+  Json const ws = resolve_parameter(Json("@config.workspace"), state);
+  std::filesystem::path const base =
+      ws.is_string() ? std::filesystem::path(ws.get<std::string>())
+                     : std::filesystem::current_path();
+  return base / ".wfr" / "projects" / project;
 }
 
 std::optional<Json> read_json_file(std::filesystem::path const& p) {
@@ -2240,6 +2254,177 @@ void c_task(NodeIR const& n, NodeType::CompileContext& ctx) {
     results[node_id] = Json{{"action", "end"}, {"cursor", plan2.value("cursor", 0L)},
                            {"batch", plan2.value("batch_no", 1L)}};
     return Command::with_update(Json{{kResultsKey, std::move(results)}});
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+// ---- project（arch 26，长程下一跳）：项目级容器节点 begin/end ----
+// begin：读 .wfr/projects/<p>/project.json（fail-closed 缺档）→ 校验 @config.task ∈ tasks[] →
+//       读 lessons.json → 拼**项目级上下文**写 state[system_context]（目标/完成标准/纪律/经验/
+//       本任务，与 Context 节点同形状，model 装配时自动拼接）→ state.project 全量快照；
+// end：state.lesson（{applicable_if, conclusion}，或宿主 @config.lesson）→ lessons.json 追加
+//     （evidence=本批最后 AI 文本）；project.json.progress[task] 按 plan cursor 标 done/in_progress
+//     （整文件原子写）。
+// 任务档案本身仍归 task 节点——@config.project 非空时路径由 task_archive_path 下沉到项目目录。
+std::vector<std::string> t_project(NodeIR const& n) { return {n.project}; }
+
+void v_project(NodeIR const& n, NodeType::ValidateContext const&,
+               NodeType::ErrorSink const& err) {
+  if (n.phase != "begin" && n.phase != "end")
+    err("VN25", "project 节点 '" + n.id + "' 的 phase 必须为 begin|end");
+  if (n.next.empty()) err("VN25", "project 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_project(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const phase = n.phase;
+  std::string const proj_spec = n.project;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [node_id, phase, proj_spec, sink_p](Json const& state,
+                                                                NodeContext& nc) {
+    std::string const project =
+        resolve_text_parameter(proj_spec.empty() ? "@config.project" : proj_spec, state);
+    if (project.empty() || project == "null")
+      throw tool::ToolException("project 节点 '" + node_id + "' 缺项目名（@config.project 或字段 project）");
+    std::string const task = resolve_text_parameter("@config.task", state);
+    std::filesystem::path const pdir = project_dir_path(state, project);
+    std::filesystem::path const pj = pdir / "project.json";
+    Json results = Json::object();
+
+    if (phase == "begin") {
+      // 1) project.json 必读（fail-closed：错档/缺档都直接终止，不静默当空项目）
+      auto const loaded = read_json_file(pj);
+      if (!loaded || !loaded->is_object())
+        throw tool::ToolException("project 节点 '" + node_id + "' 缺 project 档案: " +
+                                  pj.string() + "（请先建 .wfr/projects/<p>/project.json）");
+      Json const& po = *loaded;
+      // 2) 校验 @config.task 在 tasks 列表
+      bool in_tasks = false;
+      std::string tname;
+      if (po.contains("tasks") && po["tasks"].is_array())
+        for (Json const& t : po["tasks"])
+          if (t.is_object() && t.value("id", "") == task) {
+            in_tasks = true;
+            if (t.contains("name") && t["name"].is_string()) tname = t["name"].get<std::string>();
+            break;
+          }
+      if (!in_tasks)
+        throw tool::ToolException("project 节点 '" + node_id + "' 任务 '" + task +
+                                  "' 不在 project '" + project + "' 的 tasks 列表里");
+      // 3) lessons 读入（缺 → 空）
+      Json lessons = Json::array();
+      if (auto const ls = read_json_file(pdir / "lessons.json"); ls.has_value() && ls->is_array())
+        lessons = *ls;
+      // 4) 拼项目级上下文（system_context；model 装配时拼在系统提示之后、历史之前）
+      Json arr = Json::array();
+      auto add_sys = [&arr](std::string const& text) {
+        if (!text.empty()) arr.push_back(message::system_message(text));
+      };
+      {
+        std::string pj_ctx = "【项目】" + project + "\n目标：" +
+                             po.value("goal", std::string{});
+        if (po.contains("completion_criteria") && po["completion_criteria"].is_string() &&
+            !po["completion_criteria"].empty())
+          pj_ctx += "\n完成标准：" + po["completion_criteria"].get<std::string>();
+        add_sys(pj_ctx);
+      }
+      if (po.contains("discipline") && po["discipline"].is_array()) {
+        std::string d;
+        for (Json const& x : po["discipline"])
+          if (x.is_string()) d += "\n- " + x.get<std::string>();
+        add_sys("【项目纪律（必须遵守）】" + d);
+      }
+      if (po.contains("description") && po["description"].is_string() &&
+          !po["description"].empty())
+        add_sys("【项目说明】" + po["description"].get<std::string>());
+      if (!lessons.empty()) {
+        std::string ls;
+        for (Json const& x : lessons)
+          if (x.is_object())
+            ls += "\n- [" + x.value("when", "") + "] 适用：" +
+                  x.value("applicable_if", "") + " → " + x.value("conclusion", "");
+        add_sys("【项目经验（lessons，酌情套用；适用条件不符就忽略）】" + ls);
+      }
+      add_sys("【本任务】" + task + (tname.empty() ? "" : "（" + tname + "）") +
+              (po.contains("tasks") && po["tasks"].is_array() && !po["tasks"].empty()
+                   ? "\n项目任务清单：" + [&] {
+                       std::string s;
+                       for (Json const& t : po["tasks"])
+                         if (t.is_object()) s += (s.empty() ? "" : " / ") + t.value("id", "");
+                       return s;
+                     }()
+                   : ""));
+      Json update;
+      if (!arr.empty()) update[kSystemContextKey] = std::move(arr);
+      update["project"] = po;  // 全量快照（下游 verify review / 规则可读；模型上下文已走上面的拼装）
+      results[node_id] = Json{{"action", "begin"}, {"project", project},
+                              {"task", task}, {"lessons", static_cast<long>(lessons.size())}};
+      update[kResultsKey] = std::move(results);
+      if (sink_p)
+        sink_p->log_node(nc.node_name, "info",
+                         "project begin: " + project + " task=" + task);
+      return Command::with_update(std::move(update));
+    }
+
+    // ---- end：经验沉淀 + progress 更新 ----
+    {
+      // 1) 经验：state.lesson 约定槽（任务内节点可写 {applicable_if, conclusion}）或宿主
+      //    @config.lesson（Json 对象）→ lessons.json 追加（evidence=本批最后 AI 文本）。
+      Json const lesson = [&] {
+        if (state.contains("lesson") && state["lesson"].is_object()) return state["lesson"];
+        Json const cfg_lesson = resolve_parameter(Json("@config.lesson"), state);
+        if (cfg_lesson.is_object()) return cfg_lesson;
+        return Json(nullptr);
+      }();
+      if (lesson.is_object()) {
+        Json lessons = Json::array();
+        if (auto const ls = read_json_file(pdir / "lessons.json");
+            ls.has_value() && ls->is_array())
+          lessons = *ls;
+        std::string last;
+        auto const msgs = messages_from_state(state);
+        for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
+          if (it->type == message::Role::Ai) {
+            last = it->text();
+            break;
+          }
+        lessons.push_back(Json{{"when", today_str()},
+                               {"applicable_if", lesson.value("applicable_if", "")},
+                               {"conclusion", lesson.value("conclusion", "")},
+                               {"evidence", last}});
+        write_json_file(pdir / "lessons.json", lessons);
+      }
+      // 2) progress[task]：按 plan cursor（>= steps.size() = 全步完成 → done）
+      auto const loaded = read_json_file(pj);
+      if (loaded && loaded->is_object()) {
+        Json po = *loaded;
+        Json const plan = plan_from_state(state);
+        std::string const status = [&] {
+          if (!plan.is_object() || !plan.contains("steps") || !plan["steps"].is_array() ||
+              plan["steps"].empty())
+            return std::string("in_progress");
+          return plan.value("cursor", 0L) >=
+                         static_cast<long>(plan["steps"].size())
+                     ? std::string("done")
+                     : std::string("in_progress");
+        }();
+        if (!po.contains("progress") || !po["progress"].is_object())
+          po["progress"] = Json::object();
+        po["progress"][task] = status;
+        write_json_file(pj, po);
+        results[node_id] = Json{{"action", "end"}, {"project", project}, {"task", task},
+                                {"status", status},
+                                {"lesson_written", lesson.is_object()}};
+      } else {
+        results[node_id] = Json{{"action", "end"}, {"project", project}, {"task", task},
+                                {"status", "skipped_progress"}};
+      }
+      if (sink_p)
+        sink_p->log_node(nc.node_name, "info",
+                         "project end: " + project + " task=" + task);
+      return Command::with_update(Json{{kResultsKey, std::move(results)}});
+    }
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
   ++ctx.registered;
@@ -3927,6 +4112,24 @@ std::vector<NodeType> const& builtin_node_types() {
        [](NodeIR const& n) { return std::string("task ") + n.phase +
                                     (n.task.empty() ? "" : " task=" + n.task) + " → " + n.next; },
        v_task, c_task, e_next, t_none},
+      // ---------------- project（arch 26，长程下一跳）：项目级容器 begin/end ----------------
+      {NodeKind::Project, "project",
+       [](Json const& nn) { return kind_is(nn, "project"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "project", out.project);
+         get_str(out, node, "phase", out.phase);
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "project";
+         if (!n.project.empty()) node["project"] = n.project;
+         node["phase"] = n.phase;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("project ") + n.phase +
+                                    (n.project.empty() ? "" : " project=" + n.project) +
+                                    " → " + n.next; },
+       v_project, c_project, e_next, t_project},
       // ---------------- subworkflow（wfr-㊿ proxyNode，arch 24）：运行期调用子 workflow ----------------
       {NodeKind::SubWorkflow, "subworkflow",
        [](Json const& n) { return kind_is(n, "subworkflow"); },
