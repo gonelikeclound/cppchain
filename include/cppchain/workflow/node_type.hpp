@@ -98,6 +98,9 @@ struct NodeType {
     // wfr-㊿：子 workflow 编译沿用宿主契约（@config 键）。由 compiler.cpp 填，c_subworkflow 透传
     // （fail-closed：子 workflow 引用未声明键也在编译期拒）。
     std::optional<std::vector<std::string>> config_keys;
+    // P1.5（arch 25）：声明式配置基准目录透传（子 workflow 若自带 declarations.configs，
+    // 其 from 相对此目录解析；c_subworkflow 编译子链时透传，父与子共享同一配置根）。
+    std::string config_dir;
     // wfr-㊿：子 workflow 编译沿用引擎兜底参数（steps 上限 / Send 波宽度）。透传给子编译，
     // 避免"父配了 max_parallel=2、子 workflow 里 parallel 却退化成串行"这类静默错位。
     std::size_t max_steps = 200;

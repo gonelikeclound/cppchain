@@ -171,6 +171,7 @@ add_executable(workflow_tests
   wf/expr_test.cpp
   wf/context_node_test.cpp
   wf/refs_test.cpp
+  wf/config_decl_test.cpp
   wf/ir_validator_test.cpp
   wf/compiler_test.cpp
   wf/generator_test.cpp

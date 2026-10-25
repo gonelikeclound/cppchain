@@ -38,7 +38,56 @@ bool match_result_tail(std::string_view s, std::size_t& i, std::string_view node
   return true;
 }
 
+// P1.5（arch 25）：运行变量名 → config 键 的闭词表映射。
+[[nodiscard]] std::string_view run_var_key_of(std::string_view name) {
+  if (name == "workdir") return "workspace";
+  if (name == "sessionId") return "session";
+  if (name == "runId") return "runId";
+  return {};
+}
+
+// 在 cfg 对象（已是 config 映射本身，非包裹）里取字符串值 → 指针；否则 nullptr。
+[[nodiscard]] std::string const* config_string(Json const& obj, std::string_view key) {
+  if (!obj.is_object()) return nullptr;
+  auto it = obj.find(std::string(key));
+  if (it == obj.end() || !it->is_string()) return nullptr;
+  return &it->get_ref<std::string const&>();
+}
+
 }  // namespace
+
+// P1.5（arch 25）：运行变量注入 —— 全树把 `${workdir}`/`${sessionId}`/`${runId}`
+// 子串替换成 config 的 workspace/session/runId；config 里缺该键 → 字面量原样保留。
+void inject_run_vars(Json& tree, Json const& config) {
+  struct RunVar {
+    std::string_view token;
+    std::string_view key;
+  };
+  constexpr RunVar kVars[] = {{"${workdir}", "workspace"},
+                              {"${sessionId}", "session"},
+                              {"${runId}", "runId"}};
+  auto replace_all = [&](std::string& s) {
+    for (RunVar const& v : kVars) {
+      std::string const* val = config_string(config, v.key);
+      if (val == nullptr) continue;  // 宿主没给 → 原地保留
+      std::size_t pos = 0;
+      while ((pos = s.find(v.token, pos)) != std::string::npos) {
+        s.replace(pos, v.token.size(), *val);
+        pos += val->size();
+      }
+    }
+  };
+  auto walk = [&](auto&& self, Json& j) -> void {
+    if (j.is_string()) {
+      replace_all(j.get_ref<std::string&>());
+    } else if (j.is_array()) {
+      for (Json& e : j) self(self, e);
+    } else if (j.is_object()) {
+      for (auto it = j.begin(); it != j.end(); ++it) self(self, it.value());
+    }
+  };
+  walk(walk, tree);
+}
 
 std::vector<RefScan> scan_refs(std::string_view s) {
   std::vector<RefScan> out;
@@ -81,7 +130,22 @@ std::vector<RefScan> scan_refs(std::string_view s) {
         malformed(begin, i, "@config. 后缺少键名");
         continue;
       }
-      sc.ref.field = std::string(key);
+      // P1.5（arch 25）：命名空间点分导航 @config.<name>.<子路径>…；空段（尾点/连续点）→ 损坏
+      std::string field(key);
+      bool broken = false;
+      while (i < s.size() && s[i] == '.') {
+        ++i;
+        std::string_view seg = take_ident(s, i);
+        if (seg.empty()) {
+          malformed(begin, i, "@config 路径含空段（尾点或连续 '.'）");
+          broken = true;
+          break;
+        }
+        field += '.';
+        field += seg;
+      }
+      if (broken) continue;
+      sc.ref.field = std::move(field);
       sc.end = i;
       out.push_back(std::move(sc));
       continue;
@@ -102,6 +166,31 @@ std::vector<RefScan> scan_refs(std::string_view s) {
       sc.end = i;
       sc.ref = std::move(r);
       out.push_back(std::move(sc));
+      continue;
+    }
+
+    // P1.5（arch 25）：运行变量 `${workdir}` / `${sessionId}` / `${runId}` —— 闭词表；
+    // 未知名 / 未闭合 → 语法损坏（编译期 VR1 兜住，防拼错静默穿透）。
+    if (i < s.size() && s[i] == '{') {
+      std::size_t const close = s.find('}', i + 1);
+      if (close == std::string_view::npos) {
+        malformed(begin, i + 1, "'${' 未闭合（缺 '}'）");
+        continue;
+      }
+      std::string_view name = s.substr(i + 1, close - i - 1);
+      if (name != "workdir" && name != "sessionId" && name != "runId") {
+        malformed(begin, close + 1, "未知运行变量 '${" + std::string(name) +
+                                         "}'（仅 workdir/sessionId/runId）");
+        continue;
+      }
+      RefScan sc;
+      sc.begin = begin;
+      sc.end = close + 1;
+      sc.ok = true;
+      sc.ref.kind = RefKind::RunVar;
+      sc.ref.field = std::string(name);
+      out.push_back(std::move(sc));
+      i = close + 1;
       continue;
     }
 
@@ -155,8 +244,53 @@ Json resolve_ref(Ref const& r, Json const& state) {
     case RefKind::Config: {
       auto cfg = state.find(kConfigKey);
       if (cfg == state.end() || !cfg->is_object()) return Json(nullptr);
-      auto it = cfg->find(r.field);
-      return it == cfg->end() ? Json(nullptr) : it.value();
+      std::string const& field = r.field;
+      std::size_t const dot = field.find('.');
+      std::string const first = dot == std::string::npos ? field : field.substr(0, dot);
+      auto it = cfg->find(first);
+      if (it == cfg->end()) return Json(nullptr);
+      if (dot == std::string::npos) return it.value();
+      // 多级路径（P1.5）：**仅当第一段是声明区的 namespace name** 才点分导航；
+      // 否则保持旧模板语义 —— 第一段取整值 + 剩余点分段原样文字（存量 IR 零回归，
+      // 如提示词里的 `@config.current.stem` 本义是"current 的 stem 字段"）。
+      bool const declared_ns = [&] {
+        auto decl = cfg->find(kConfigDeclaredKey);
+        if (decl == cfg->end() || !decl->is_array()) return false;
+        for (Json const& n : *decl)
+          if (n.is_string() && n.get<std::string>() == first) return true;
+        return false;
+      }();
+      if (!declared_ns) {
+        Json const& base = it.value();
+        Json text;
+        if (base.is_string())
+          text = base.get<std::string>() + field.substr(dot);
+        else
+          text = base.dump() + field.substr(dot);
+        return text;
+      }
+      Json const* cur = &it.value();
+      std::size_t seg = dot + 1;
+      while (seg != std::string::npos) {
+        if (!cur->is_object()) return Json(nullptr);  // 命名空间下钻到非对象 → null（宽松）
+        std::size_t const next = field.find('.', seg);
+        std::string const k =
+            field.substr(seg, (next == std::string::npos ? field.size() : next) - seg);
+        auto jt = cur->find(k);
+        if (jt == cur->end()) return Json(nullptr);
+        cur = &jt.value();
+        seg = next == std::string::npos ? std::string::npos : next + 1;
+      }
+      return *cur;
+    }
+    case RefKind::RunVar: {
+      // ${workdir}/${sessionId}/${runId} → state.config 的 workspace/session/runId。
+      // 缺失 → 原样保留字面量（不是合成 null：语义 = 宿主没给，模板保持可见等宿主补）。
+      auto cfg = state.find(kConfigKey);
+      std::string_view const k = run_var_key_of(r.field);
+      if (cfg != state.end() && cfg->is_object() && !k.empty())
+        if (std::string const* v = config_string(*cfg, k)) return Json(*v);
+      return Json(std::string("${") + r.field + "}");
     }
   }
   return Json(nullptr);

@@ -177,6 +177,35 @@ std::expected<WorkflowIR, std::string> WorkflowIR::parse(Json const& j) {
     }
   }
 
+  // P1.5（arch 25）：declarations.configs 声明式配置来源（形状先收一遍：
+  // name/from 必填且 name 为标识符、target 可选标识符；唯一性与命中校验在 validator）。
+  if (j.contains("declarations")) {
+    if (!j["declarations"].is_object())
+      return err("declarations 必须是对象（含 configs 数组）");
+    Json const& dec = j["declarations"];
+    if (dec.contains("configs")) {
+      if (!dec["configs"].is_array())
+        return err("declarations.configs 必须是数组");
+      for (Json const& e : dec["configs"]) {
+        if (!e.is_object())
+          return err("declarations.configs 里的条目不是对象（应为 {name, from, target?}）");
+        ConfigDecl d;
+        if (e.contains("name") && e["name"].is_string()) d.name = e["name"].get<std::string>();
+        if (e.contains("from") && e["from"].is_string()) d.from = e["from"].get<std::string>();
+        if (e.contains("target") && !e["target"].is_null()) {
+          if (!e["target"].is_string())
+            return err("declarations.configs[" + d.name + "].target 必须是字符串");
+          d.target = e["target"].get<std::string>();
+        }
+        if (d.name.empty())
+          return err("declarations.configs 里的条目缺 name");
+        if (d.from.empty())
+          return err("declarations.configs[" + d.name + "] 缺 from（配置来源文件路径）");
+        out.declarations.push_back(std::move(d));
+      }
+    }
+  }
+
   std::string perr;
   auto parsed = parse_node_list(j["nodes"], perr);
   if (!parsed) return err(perr);
@@ -204,6 +233,15 @@ Json WorkflowIR::to_json() const {
       arr.push_back(std::move(entry));
     }
     out["imports"] = std::move(arr);
+  }
+  if (!declarations.empty()) {  // P1.5（arch 25）：声明区回环
+    Json arr = Json::array();
+    for (ConfigDecl const& d : declarations) {
+      Json entry{{"name", d.name}, {"from", d.from}};
+      if (d.target) entry["target"] = *d.target;
+      arr.push_back(std::move(entry));
+    }
+    out["declarations"] = Json{{"configs", std::move(arr)}};
   }
   return out;
 }

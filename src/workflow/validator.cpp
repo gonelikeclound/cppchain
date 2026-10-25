@@ -54,6 +54,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "cppchain/workflow/expr.hpp"
@@ -295,6 +296,33 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
         }
       if (t.contains("enabled") && !t["enabled"].is_boolean())
         c.err("VT7", "trigger.enabled 必须是布尔");
+    }
+  }
+
+  // ---- VC：声明式配置声明区（P1.5，arch 25）----
+  // name 唯一且为标识符；target 必须命中 ≥1 个节点的类型（命中 0 = 声明无谓，fail-closed）。
+  // from 文件的存在性 / JSON 合法性不在 validator 里查（需要 config_dir + 文件系统）——
+  // 由 compile_workflow 的声明装载步骤 fail-closed（见 compiler.cpp）。
+  {
+    std::unordered_set<std::string> seen;
+    for (ConfigDecl const& d : ir.declarations) {
+      if (!is_ident(d.name))
+        c.err("VC1", "declarations.configs[" + d.name + "].name 必须是标识符");
+      if (!seen.insert(d.name).second)
+        c.err("VC2", "declarations.configs 的 name 重复: '" + d.name + "'");
+      if (d.target) {
+        bool hit = false;
+        for (auto const& [np, _scope] : c.flat) {
+          NodeType const* t = node_type_of_ir(*np);
+          if (t != nullptr && t->name == *d.target) {
+            hit = true;
+            break;
+          }
+        }
+        if (!hit)
+          c.err("VC3", "declarations.configs[" + d.name + "].target 未命中任何节点 type（target='" +
+                           *d.target + "'）");
+      }
     }
   }
 
@@ -570,23 +598,34 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
     for (auto const& [_, r] : refs) {
       switch (r.kind) {
         case RefKind::Config: {
-          // VR4：parse 已保证键是标识符；这里再按**宿主声明的 config 契约**核对（B2）。
-          // 未声明契约（nullopt）→ 跳过，保持旧行为。
-          if (opts.config_keys) {
+          // VR4：第一段（P1.5 命名空间）必须在 config 契约里 = 宿主白名单 ∪ 声明区 name
+          // ∪ 编译期装入的 target 平铺键（compile_workflow 已并入 config_keys）。
+          // 声明区 name 自动合法（workflow 自描述，不必进宿主白名单）；未声明契约（nullopt）
+          // → 跳过，保持旧行为。子路径（后续点分段）宽松：拼错 → 运行期 null（cppchain 一贯）。
+          std::size_t const dot = r.field.find('.');
+          std::string const first = dot == std::string::npos ? r.field : r.field.substr(0, dot);
+          bool const declared_ns = [&] {
+            for (ConfigDecl const& d : c.ir.declarations)
+              if (d.name == first) return true;
+            return false;
+          }();
+          if (opts.config_keys && !declared_ns) {
             auto const& keys = *opts.config_keys;
-            if (std::find(keys.begin(), keys.end(), r.field) == keys.end()) {
+            if (std::find(keys.begin(), keys.end(), first) == keys.end()) {
               std::string avail;
               for (std::string const& k : keys) {
                 if (!avail.empty()) avail += ", ";
                 avail += k;
               }
-              c.err("VR4", "节点 '" + n.id + "' 引用了 @config." + r.field +
+              c.err("VR4", "节点 '" + n.id + "' 引用了 @config." + first +
                                "，但宿主未声明该配置键（可用：" +
                                (avail.empty() ? "（无）" : avail) + "）");
             }
           }
           break;
         }
+        case RefKind::RunVar:
+          break;  // ${workdir}/${sessionId}/${runId}：运行变量，不走 config 白名单
         case RefKind::NamedResult: {
           auto it = c.index.find(r.node);
           if (it == c.index.end())

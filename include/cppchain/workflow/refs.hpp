@@ -1,10 +1,18 @@
 // cppchain —— workflow/refs.hpp
 // 数据流引用（规范 11-ir-syntax.md §5）与运行时状态布局。
 //
-// 三种引用（整串或内联在模板字符串里）：
+// 引用（整串或内联在模板字符串里）：
 //   $_.result.<f>        最近一步节点的输出的字段 f
 //   $<id>.result.<f>     点名帧：节点 <id> 的输出的字段 f
 //   @config.<k>          运行前才填的配置占位（fire 时从 state["config"] 取 k）
+//   @config.<name>.<路径>   P1.5（arch 25）声明式配置命名空间引用，点分导航 —— **仅当第一段
+//                        是声明区 `declarations.configs` 里声明的 name 时**才导航（见 resolve_ref）；
+//                        其它多级写法（如历史 IR 提示词里的 `@config.current.stem`）保持旧模板
+//                        语义：第一段取整值、剩余点分段原样文字（"current" 整值 + ".stem"），
+//                        存量 workflow 零回归。
+//   ${workdir}/${sessionId}/${runId}
+//                        运行变量（P1.5）：分别取 state.config 的 workspace/session/runId；
+//                        config 里取不到 → 原样保留字面量（不合成 null）
 //
 // 解析语义（宽松）：
 //   · 目标槽缺失 → json null（不报错；工具按缺失参数走 on_error）
@@ -27,6 +35,10 @@ using Json = nlohmann::json;
 
 // ---- 运行时状态布局（CompiledGraph 的输入/输出）----
 inline constexpr char kConfigKey[] = "config";
+// P1.5（arch 25）：fire 合并时把声明区 `declarations.configs` 的 namespace name 名单写入
+// config["_config_declared"]（内部专用；resolve_ref 据此判定 `@config.<名>.<路径>` 是路径
+// 导航还是旧模板字面量）。不参与 VR4 白名单、不参与 @config.<这是键> 的合法引用目标。
+inline constexpr char kConfigDeclaredKey[] = "_config_declared";
 inline constexpr char kMessagesKey[] = "messages";  // M12：对话通道（add_messages reducer）
 inline constexpr char kResultsKey[] = "results";
 inline constexpr char kLastExecKey[] = "_last_exec";
@@ -43,7 +55,7 @@ inline constexpr char kToolLoopKey[] = "_tool_loop";
 // 版本号由节点层从 next_artifact_version()（引擎单调源）分配；verify probe 判据用 version 校验新鲜度。
 inline constexpr char kArtifactVerKey[] = "_artifact_ver";
 
-enum class RefKind { LastResult, NamedResult, Config };
+enum class RefKind { LastResult, NamedResult, Config, RunVar };
 
 struct Ref {
   RefKind kind = RefKind::LastResult;
@@ -77,5 +89,11 @@ struct RefScan {
 
 // 校验用：字符串里是否有语法损坏的 $/@config 片段；有 → 说明此问题。
 [[nodiscard]] std::optional<std::string> ref_syntax_problem(std::string_view s);
+
+// P1.5（arch 25）：运行变量注入 —— 把 tree 里所有 `${workdir}`/`${sessionId}`/`${runId}`
+// 子串整体替换成 config 里的 workspace/session/runId（均为字符串；那个键缺失 → 字面量原样保留）。
+// fire 时对**合并后的 config 树**调用一次，声明文件里的 `${...}` 即生效；
+// 节点参数内联的 `${...}` 另由 resolve_parameter 的 RunVar 引用路径覆盖。
+void inject_run_vars(Json& tree, Json const& config);
 
 }  // namespace cppchain::workflow

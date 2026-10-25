@@ -239,12 +239,25 @@ struct NodeIR {
   Json raw = Json::object();                 // 原始节点对象（校验回读用）
 };
 
+// ---- P1.5（arch 25）：声明式配置 —— declarations.configs 声明区 ----
+// 每个声明把一份配置文件（from，相对 CompileOptions.config_dir）注册进全局 config 表：
+//   · 有 target  → 文件**顶层键平铺**为 config 默认值（"该类型节点的默认参数包"，全局可见）；
+//   · 有 name    → 另注册命名空间 `config.<name>`（整个文件对象），节点用 `@config.<name>.<子路径>` 引用。
+// 宿主 fire 时给的 config 顶层键覆盖声明缺省（命名空间整块覆盖）。
+struct ConfigDecl {
+  std::string name;              // 命名空间名（标识符，无 target 时也可用）
+  std::string from;              // 配置文件相对路径（基准 = CompileOptions.config_dir）
+  std::optional<std::string> target;  // 命中该节点类型的节点则声明视为"默认参数包"；可选
+};
+
 struct WorkflowIR {
   std::string id;
   // 可选：无 trigger 即「宿主手工触发」（wfr 直接拉起），调度语义由宿主决定（D1 无 OS 调度）
   std::optional<TriggerIR> trigger;
   std::vector<NodeIR> nodes;                 // nodes[0] = 入口（隐式，§3）
   std::vector<ImportIR> imports;             // ⑤：动态库导入声明（顶层"imports"键）
+  // P1.5（arch 25）：声明式配置来源（顶层"declarations.configs"键）
+  std::vector<ConfigDecl> declarations;
 
   // 从顶层 JSON 解析；失败返回人类可读错误（可直接回喂给生成器）。
   // 只做"看懂结构"，不做规则校验（规则在 validator.hpp，是另一道关）。

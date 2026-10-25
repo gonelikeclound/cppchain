@@ -7,9 +7,12 @@
 #include <chrono>
 #include <exception>
 #include <expected>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -146,6 +149,51 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     return std::unexpected(WorkflowError{WorkflowError::Kind::Invalid, std::move(m)});
   };
 
+  // P1.5（arch 25）：声明式配置装载 —— 读 declarations.configs 的 from 文件，装入
+  // `declared_config`（缺省 config：命名空间 + target 平铺键），并扩充宿主 config 契约
+  // （namespace name 与 target 平铺键并入白名单，VR4 不再误拦）。fail-closed：
+  // 缺 config_dir / 文件缺失 / JSON 坏 / name 重复 → 全部**编译期**拒绝。
+  Json declared_config = Json::object();
+  std::vector<std::string> declared_names;
+  {
+    if (!ir.declarations.empty() && opts.config_dir.empty())
+      return invalid("workflow 声明了 declarations.configs，但 CompileOptions.config_dir 为空"
+                     "（声明式配置需要基准目录）");
+    std::vector<std::string> keys =
+        opts.config_keys.value_or(std::vector<std::string>{});
+    for (ConfigDecl const& d : ir.declarations) {
+      if (declared_config.contains(d.name))
+        return invalid("declarations.configs 的 name 重复或与 config 顶层键冲突: '" + d.name + "'");
+      std::filesystem::path const p = std::filesystem::path(opts.config_dir) / d.from;
+      std::ifstream in(p, std::ios::binary);
+      if (!in)
+        return invalid("declarations.configs[" + d.name + "].from 读取失败: " + p.string());
+      std::ostringstream ss;
+      ss << in.rdbuf();
+      Json file;
+      try {
+        file = Json::parse(ss.str());
+      } catch (std::exception const& e) {
+        return invalid("declarations.configs[" + d.name + "] 配置 JSON 解析失败: " + e.what());
+      }
+      if (!file.is_object())
+        return invalid("declarations.configs[" + d.name + "] 配置必须是 JSON 对象（文件: " +
+                       p.string() + "）");
+      // 命名空间：config.<name> = 整个文件对象；target：顶层键平铺为全局缺省
+      declared_config[d.name] = file;
+      declared_names.push_back(d.name);
+      if (d.target)
+        for (auto it = file.begin(); it != file.end(); ++it)
+          if (!declared_config.contains(it.key())) declared_config[it.key()] = it.value();
+      // 白名单：namespace name + target 平铺键
+      if (std::find(keys.begin(), keys.end(), d.name) == keys.end()) keys.push_back(d.name);
+      if (d.target)
+        for (auto it = file.begin(); it != file.end(); ++it)
+          if (std::find(keys.begin(), keys.end(), it.key()) == keys.end()) keys.push_back(it.key());
+    }
+    if (!ir.declarations.empty()) opts.config_keys = std::move(keys);
+  }
+
   // 1) 先过校验器（fail-closed：不编译坏 IR）
   ValidationResult vr =
       validate(ir, ValidatorOptions{&registry, opts.config_keys, opts.components});
@@ -210,6 +258,7 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
   cctx.subworkflow_loader = opts.subworkflow_loader;  // wfr-㊿：proxyNode 子 workflow 装载
   cctx.max_subflow_depth = opts.max_subflow_depth;    // wfr-㊿：子 workflow 嵌套上限
   cctx.config_keys = opts.config_keys;                // wfr-㊿：@config 契约透传（子编译同源）
+  cctx.config_dir = opts.config_dir;                    // P1.5：声明式配置基准目录透传（子编译同根）
   cctx.max_steps = opts.max_steps;                    // wfr-㊿：steps/Send 兜底透传（子编译同源）
   cctx.max_parallel = opts.max_parallel;
   // wfr-㊿：子 workflow 编译期共用"当前编译链"（嵌套编译共享同一份 → 环/深度可检出）。
@@ -355,7 +404,8 @@ std::expected<CompiledWorkflow, WorkflowError> compile_workflow(
     return std::unexpected(WorkflowError{WorkflowError::Kind::Compile, compiled.error().message});
 
   CompiledWorkflow out{std::move(*compiled), ir.id, ir.trigger, cctx.registered, cp,
-                         std::move(g.kinds), std::move(sink)};
+                         std::move(g.kinds), std::move(sink), std::move(declared_config),
+                         std::move(declared_names)};
   return out;
 }
 
@@ -368,6 +418,24 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   FireOptions o;
   o.thread_id = thread_id;
   return fire_once(wf, config, std::move(o));
+}
+
+void merge_declared_config(CompiledWorkflow const& wf, Json& cfg) {
+  for (auto it = wf.declared_config.begin(); it != wf.declared_config.end(); ++it)
+    if (!cfg.contains(it.key())) cfg[it.key()] = it.value();
+  // config["_config_declared"] = 已有（父/宿主传入的声明名，proxyNode 子链继承）∪ 本 workflow 声明名。
+  // 只并集不覆盖 —— 覆盖会把子链里父命名空间的点分语义丢掉。
+  std::vector<std::string> names;
+  auto decl = cfg.find(kConfigDeclaredKey);
+  if (decl != cfg.end() && decl->is_array())
+    for (Json const& n : *decl)
+      if (n.is_string() && std::find(names.begin(), names.end(), n.get<std::string>()) == names.end())
+        names.push_back(n.get<std::string>());
+  for (std::string const& n : wf.declared_names)
+    if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
+  Json arr = Json::array();
+  for (std::string const& n : names) arr.push_back(n);
+  cfg[kConfigDeclaredKey] = std::move(arr);
 }
 
 std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& config,
@@ -405,7 +473,17 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
                           std::optional<Json>(Json{{kMessagesKey, opts.input_messages}}));
   }
 
-  Json input = Json{{kConfigKey, config}};
+  // P1.5（arch 25）：合并声明缺省 + 注入运行变量。
+  //   · 声明缺省（declared_config，编译期装入）做底，宿主顶层键覆盖；
+  //   · config.runId = 本次 run 号（${runId} 取值源），再全树替换 ${workdir}/${sessionId}/${runId}。
+  //     注意：run 已在上方算出（"r-" + seq），先写 runId 再整体替换。
+  Json cfg = config;  // config 是 const&，这里显式拷贝
+  merge_declared_config(wf, cfg);
+  // 运行变量只替换 config 里已就位的（workspace/session/runId）。**不自动注入 runId**：
+  // 每次 fire 的 run 号若是 state 的一部分，会破坏「串行/并行最终 state 逐键相等」等确定性契约
+  // （problems/30）；宿主若需要 `${runId}` 语义，请自行把稳定的 run 标识放进 config。
+  inject_run_vars(cfg, cfg);
+  Json input = Json{{kConfigKey, std::move(cfg)}};
   wf.sink->streaming = opts.stream != nullptr;
   graph::InvokeOptions iopts;
   // 全模式事件：host 要的是事件流本身；没传 stream 时 sink=null → 零事件（仅构造无磨损）

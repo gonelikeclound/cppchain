@@ -64,6 +64,11 @@ struct CompileOptions {
   // 而不是运行期静默解析成 null（工具读到 null 才炸）。
   std::optional<std::vector<std::string>> config_keys = std::nullopt;
 
+  // P1.5（arch 25）：声明式配置基准目录。workflow 有 declarations.configs 时必须设置
+  // （from 相对此目录解析），编译期读文件 → 装入 CompiledWorkflow.declared_config。
+  // 为空且 IR 带 declarations → 编译报错（fail-closed，不会静默跳过声明）。
+  std::string config_dir;
+
   // M12 组件注册表（nullptr = 含 model 节点时报错，因为无模型可用）
   ComponentRegistry const* components = nullptr;
 
@@ -113,6 +118,13 @@ struct CompiledWorkflow {
   // 触发期注入的会话日志句柄（节点 wrapper 共享同一份；fire_once 写 log/run）。
   std::shared_ptr<SessionSink> sink;
 
+  // P1.5（arch 25）：声明式配置合并后的**缺省 config**（声明文件装入：命名空间 + target 平铺键）。
+  // fire_once 以它为缺省合成最终 config（宿主顶层键覆盖；再注入 ${workdir} 等运行变量）。
+  Json declared_config = Json::object();
+  // P1.5（arch 25）：声明区 `declarations.configs` 的 namespace name 名单（fire 时写入
+  // config["_config_declared"]，供 resolve_ref 判定 `@config.<名>.<路径>` 的点分语义）。
+  std::vector<std::string> declared_names;
+
   [[nodiscard]] std::size_t registered_nodes() const { return graph_node_count_; }
 };
 
@@ -132,6 +144,11 @@ compile_workflow(WorkflowIR const& ir, tool::ToolRegistry const& registry,
 [[nodiscard]] std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf,
                                                            Json const& config,
                                                            std::string const& thread_id);
+
+// P1.5（arch 25）：把声明默认值并入 cfg（宿主顶层键覆盖声明），并写 config["_config_declared"]。
+// 不负责 ${...} 注入 —— 调用方在 runId/workspace 就位后自行 inject_run_vars。
+// fire_once 与 proxyNode 子 workflow 的 sync/detach 直连 `graph.invoke` 两条路共用。
+void merge_declared_config(CompiledWorkflow const& wf, Json& cfg);
 
 // 触发期选项（docs/12 §6、§7）：每次触发可注入一个会话日志 + 本轮输入。
 struct FireOptions {

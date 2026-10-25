@@ -2316,6 +2316,7 @@ void c_subworkflow(NodeIR const& n, NodeType::CompileContext& ctx) {
   sub_opts.max_steps = ctx.max_steps;
   sub_opts.max_parallel = ctx.max_parallel;
   sub_opts.config_keys = ctx.config_keys;
+  sub_opts.config_dir = ctx.config_dir;  // P1.5：声明式配置基准目录（子自带声明时同根解析）
   sub_opts.tool_policy = ctx.guard;
   sub_opts.shared_registry = ctx.shared_registry;
   sub_opts.tool_lib_dirs = ctx.tool_lib_dirs;
@@ -2332,8 +2333,15 @@ void c_subworkflow(NodeIR const& n, NodeType::CompileContext& ctx) {
   ctx.graph.add_node(
       n.id, [child, mode, copy_state = n.copy_state, input = n.sub_input, spec = n.sub_workflow,
              node_id = n.id](Json const& state, NodeContext&) -> Command {
-        // 子初始 state：config 继承（主 config 原样给子）→ copy_state 拷贝 → input 解析（右胜覆盖）。
-        Json sub_state{{kConfigKey, state.value(kConfigKey, Json::object())}};
+        // 子初始 state：config 继承（主 config 原样给子，再并入**子自己的声明缺省** + 运行变量）
+        // → copy_state 拷贝 → input 解析（右胜覆盖）。子 config 里的 runId/workspace 由主 fire
+        // 预留（主合并后的 config 含 runId），故 inject_run_vars 在子侧同样成义。
+        Json cfg = state.contains(kConfigKey) && state[kConfigKey].is_object()
+                       ? state[kConfigKey].get<Json>()
+                       : Json::object();
+        merge_declared_config(*child, cfg);
+        inject_run_vars(cfg, cfg);
+        Json sub_state{{kConfigKey, std::move(cfg)}};
         for (std::string const& k : copy_state)
           if (state.contains(k)) sub_state[k] = state[k];
         Json const inp = resolve_parameter(input, state);
