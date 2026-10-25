@@ -106,6 +106,12 @@ enum class NodeKind {
              //    （目标/完成标准/纪律/经验/本任务，与 Context 节点同形状，model 自动带上）；
              // end：state.lesson → lessons.json 追加沉淀；project.json.progress[task] 更新。
              //    任务档案仍归 task 节点（@config.project 非空时路径下沉到项目目录，见 arch 26）。
+  // ---- arch 27：project_drive —— 自管理 loop 的 meta 决策节点 ----
+  ProjectDrive, // 决定下一个要执行的任务（或停机）：读 project.json（fail-closed 缺档）→
+                //   简报（目标/标准/纪律 + 每任务进度/摘要）。规则档（无 model）= 第一个进度≠done
+                //   的任务；模型档（可选 judge 模型）= 简报 + system_prompt 决策（选已 done → 拒绝回落）。
+                //   产出 results.<id> = {next_task|null, done, plan_steps(该任务 steps 种子), goal}，
+                //   由 expr 门（next_task != null）决定跑任务还是 _break 收尾。
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供

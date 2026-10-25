@@ -1,0 +1,21 @@
+{
+  "id": "project_drive",
+  "nodes": [
+    { "id": "loop", "kind": "loop", "max": 50, "next": "_turn_end", "on_max": "_turn_end",
+      "body": [
+        { "id": "drive", "kind": "project_drive", "project": "@config.project", "model": "main",
+          "system_prompt": "你是项目调度者（meta）。依据项目简报决定下一个要执行的任务：从进度不是 done 的任务里挑一个最该先做的；若项目可收尾或全部完成返回 done=true 且 task=null。只输出 JSON：{\"task\":\"任务id\"或null,\"done\":true或false,\"reason\":\"一句理由\"}，不要输出别的。",
+          "next": "gate" },
+        { "id": "gate", "kind": "expr",
+          "expr": "$drive.result.next_task != null",
+          "then": "run", "else": "_break" },
+        { "id": "run", "kind": "subworkflow", "workflow": "lot_project", "mode": "sync",
+          "copy_state": ["session"],
+          "input": { "config": { "task": "$drive.result.next_task",
+                                  "project": "@config.project",
+                                  "plan_steps": "$drive.result.plan_steps",
+                                  "goal": "$drive.result.goal" } },
+          "next": "_continue" }
+      ] }
+  ]
+}

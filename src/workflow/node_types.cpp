@@ -2519,6 +2519,158 @@ void c_project(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ---- project_drive（arch 27，自管理 loop）：meta 决策 —— 决定下一个任务 / 停机 ----
+// 读 .wfr/projects/<p>/project.json（fail-closed 缺档）→ 简报（目标/验收标准/纪律 + 每任务进度/摘要）。
+// 规则档（无 model）：第一个 progress[tid] != "done" 的任务 → {next_task, plan_steps(该任务 steps 种子)};
+//                   无未完成 → {next_task:null, done:true}（停机判据，由 expr 门 _break 吃住）。
+// 模型档（可选 judge 模型）：简报 + system_prompt → 模型输出 {"task": "<id>"|null, "done": bool, "reason"}；
+//   模型选已 done/未知任务 → 拒绝并回落规则档；模型判 done/null → 停机。解码失败 → 规则档兜底。
+std::vector<std::string> t_project_drive(NodeIR const& n) { return {n.project}; }
+
+void v_project_drive(NodeIR const& n, NodeType::ValidateContext const&,
+                     NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN26", "project_drive 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const proj_spec = n.project;
+  std::string const judge_sys = n.system_prompt;
+  model::ChatModel* judge =
+      (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [node_id, proj_spec, judge_sys, judge, sink_p](
+                               Json const& state, NodeContext& nc) {
+    std::string const project =
+        resolve_text_parameter(proj_spec.empty() ? "@config.project" : proj_spec, state);
+    if (project.empty() || project == "null")
+      throw tool::ToolException("project_drive 节点 '" + node_id + "' 缺项目名（@config.project 或字段 project）");
+    std::filesystem::path const pdir = project_dir_path(state, project);
+    auto const loaded = read_json_file(pdir / "project.json");
+    if (!loaded || !loaded->is_object())
+      throw tool::ToolException("project_drive 节点 '" + node_id + "' 缺 project 档案: " +
+                                (pdir / "project.json").string());
+    Json const& po = *loaded;
+    Json const progress = po.value("progress", Json::object());
+    Json const tasks = po.value("tasks", Json::array());
+
+    // 简报（模型档决策依据；与项目终审简报同格式）
+    std::string brief;
+    brief += "【项目目标】" + po.value("goal", std::string{}) + "\n";
+    brief += "【验收标准】" + po.value("completion_criteria", std::string{}) + "\n";
+    if (tasks.is_array()) {
+      brief += "【任务进展】\n";
+      for (Json const& t : tasks) {
+        if (!t.is_object()) continue;
+        std::string const tid = t.value("id", "");
+        if (tid.empty()) continue;
+        brief += "- " + tid + " 进度:" + progress.value(tid, "未开始") + " · 目标:" +
+                 t.value("goal", "") + "\n";
+        auto const arch = read_json_file(pdir / "tasks" / (tid + ".json"));
+        if (arch && arch->is_object())
+          brief += "  摘要:" + arch->value("last_summary", "") + "\n";
+      }
+    }
+
+    // 规则档：第一个未完成任务（含其 steps 种子 / 目标）
+    auto task_info = [&tasks, &progress](std::string const& tid)
+        -> std::optional<std::pair<std::string, std::string>> {  // {goal, plan_steps}
+      if (!tasks.is_array()) return std::nullopt;
+      for (Json const& t : tasks)
+        if (t.is_object() && t.value("id", "") == tid) {
+          std::string seed;
+          if (t.contains("steps") && t["steps"].is_array()) seed = t["steps"].dump();
+          return std::make_pair(t.value("goal", ""), seed);
+        }
+      return std::nullopt;
+    };
+    std::string next_task;   // 空 = 停机
+    std::string next_goal;
+    std::string next_seed;
+    std::string reason;
+    if (tasks.is_array())
+      for (Json const& t : tasks) {
+        if (!t.is_object()) continue;
+        std::string const tid = t.value("id", "");
+        if (tid.empty() || progress.value(tid, "") == "done") continue;
+        next_task = tid;
+        auto const info = task_info(tid);
+        if (info) {
+          next_goal = info->first;
+          next_seed = info->second;
+        }
+        reason = "顺序推进（规则档）：第一个未完成任务 " + tid;
+        break;
+      }
+    if (next_task.empty()) reason = "项目全部任务 done（规则档停机）";
+
+    // 模型档：有 model → 简报 + system_prompt 决策（可覆盖规则选扇；解码失败/选已 done → 回落规则）
+    if (judge != nullptr) {
+      message::Message const sys = message::system_message(
+          judge_sys.empty()
+              ? "你是项目调度者（meta）。依据【项目简报】决定下一个要执行的任务：从进度不是 done 的"
+                "任务里挑一个最该先做的；若项目可收尾或全部完成返回 done=true 且 task=null。"
+                "只输出 JSON：{\"task\":\"任务id\"或null,\"done\":true或false,\"reason\":\"一句理由\"}，不要输出别的。"
+              : judge_sys);
+      message::Message const usr = message::human_message(brief);
+      auto resp = judge->invoke({sys, usr}, {});
+      if (resp) {
+        auto const j = json_block_of(resp->text());
+        if (j.has_value() && j->contains("task")) {
+          Json const& tv = (*j)["task"];
+          bool const model_done = j->contains("done") && (*j)["done"].is_boolean() &&
+                                  (*j)["done"].get<bool>();
+          if (tv.is_string() && !tv.get<std::string>().empty() && !model_done) {
+            // 模型选的任务必须存在且未 done（fail-closed：选已 done → 拒绝）
+            bool known = false;
+            if (tasks.is_array())
+              for (Json const& t : tasks)
+                if (t.is_object() && t.value("id", "") == tv.get<std::string>() &&
+                    progress.value(t.value("id", ""), "") != "done") {
+                  known = true;
+                  break;
+                }
+            if (known) {
+              next_task = tv.get<std::string>();
+              auto const info = task_info(next_task);
+              if (info) {
+                next_goal = info->first;
+                next_seed = info->second;
+              }
+              reason = "模型档决策：" + j->value("reason", "（无理由）");
+            } else {
+              reason = "模型选中已 done/未知任务 → 回落规则档：" + reason;
+            }
+          } else if (tv.is_null() || model_done) {
+            next_task.clear();
+            reason = "模型档停机：" + j->value("reason", "（无理由）");
+          }
+        } else {
+          reason = "模型决策不可解析 → 回落规则档：" + reason;
+        }
+      } else {
+        reason = "模型决策调用失败 → 回落规则档：" + reason;
+      }
+    }
+
+    Json result = Json{{"action", "drive"},
+                       {"project", project},
+                       {"next_task", next_task.empty() ? Json(nullptr) : Json(next_task)},
+                       {"done", next_task.empty()},
+                       {"reason", reason},
+                       {"goal", next_goal},
+                       {"plan_steps", next_seed}};
+    if (sink_p)
+      sink_p->log_node(nc.node_name, "info",
+                       "project_drive: " + project + " → " +
+                           (next_task.empty() ? "(停机)" : next_task) + " · " + reason);
+    return Command::with_update(
+        Json{{kResultsKey, Json{{node_id, std::move(result)}}}, {kLastExecKey, node_id}});
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 // ---- subworkflow（wfr-㊿ proxyNode，见 02-arch-design/24）：运行期调用子 workflow ----
 // 编译期：通过 subworkflow_loader 读子 workflow JSON → parse → validate → compile_workflow
 // （fail-fast：找不到/校验不过/编译失败 → 主编译即报错）。子 workflow 编译复用宿主全套契约
@@ -2620,7 +2772,20 @@ void c_subworkflow(NodeIR const& n, NodeType::CompileContext& ctx) {
           if (state.contains(k)) sub_state[k] = state[k];
         Json const inp = resolve_parameter(input, state);
         if (inp.is_object())
-          for (auto it = inp.begin(); it != inp.end(); ++it) sub_state[it.key()] = it.value();
+          for (auto it = inp.begin(); it != inp.end(); ++it) {
+            // arch 27（自管理 loop）：input.config = {...} → 与子 config **逐键合并**（写给子
+            // workflow 的 @config.* 动态键，如 project_drive 派发的 task/project/plan_steps），
+            // 不是整块替换主 config（丢主键即丢 workspace/session 等）。向后兼容：现有 input 无 config 键。
+            if (it.key() == kConfigKey && it.value().is_object() &&
+                sub_state.contains(kConfigKey) && sub_state[kConfigKey].is_object()) {
+              Json cfg = sub_state[kConfigKey];
+              for (auto cit = it.value().begin(); cit != it.value().end(); ++cit)
+                cfg[cit.key()] = cit.value();
+              sub_state[kConfigKey] = std::move(cfg);
+            } else {
+              sub_state[it.key()] = it.value();
+            }
+          }
 
         if (mode == "detach") {
           // fire-and-forget：立即返回 detached；后台线程跑子图并落盘审计（workspace 缺失则跳过）。
@@ -4238,6 +4403,26 @@ std::vector<NodeType> const& builtin_node_types() {
                                     (n.project.empty() ? "" : " project=" + n.project) +
                                     " → " + n.next; },
        v_project, c_project, e_next, t_project},
+      // ---------------- project_drive（arch 27，自管理 loop）：meta 决策下一个任务 ----------------
+      {NodeKind::ProjectDrive, "project_drive",
+       [](Json const& nn) { return kind_is(nn, "project_drive"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "project", out.project);
+         get_str(out, node, "model", out.model);          // 可选：meta 决策模型（无 = 规则档）
+         get_str(out, node, "system_prompt", out.system_prompt);
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "project_drive";
+         if (!n.project.empty()) node["project"] = n.project;
+         if (!n.model.empty()) node["model"] = n.model;
+         if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("project_drive") +
+                                    (n.project.empty() ? "" : " project=" + n.project) +
+                                    " → " + n.next; },
+       v_project_drive, c_project_drive, e_next, t_project_drive},
       // ---------------- subworkflow（wfr-㊿ proxyNode，arch 24）：运行期调用子 workflow ----------------
       {NodeKind::SubWorkflow, "subworkflow",
        [](Json const& n) { return kind_is(n, "subworkflow"); },

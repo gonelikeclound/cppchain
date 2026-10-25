@@ -197,6 +197,7 @@ add_executable(workflow_tests
   wf/proxy_node_test.cpp
   wf/project_test.cpp
   wf/project_review_test.cpp
+  wf/project_drive_test.cpp
   wf/governance_test.cpp
   wf/lot_task_test.cpp
   wf/history_nodes_test.cpp
