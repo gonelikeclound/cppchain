@@ -44,8 +44,27 @@ loop{max=50, next:_turn_end, on_max:_turn_end}
 
 ## 四、demo / 测试 / 验收
 
-- 单测 `tests/wf/project_drive_test.cpp`：规则档顺序推进全 done 并停机 / 已 done 任务跳过 / 模型档挑指定任务 /
-  loop 上界防病态 / proxyNode input.config 合并。测试用无模型的 chain 子 workflow（project→task→task→project）。
+- 单测 `tests/wf/project_drive_test.cpp`（11 例）：规则档顺序推进全 done 并停机 / 已 done 任务跳过 /
+  模型档挑指定任务 / 模型选已 done 回落 / loop 上界防病态 / proxyNode input.config 合并；
+  **经验回流 5 例**（§五）：加权重排 / 通用经验计而无序 / 无关过滤 / 加权跳过 done / 模型档简报含相关经验。
+  测试用无模型的 chain 子 workflow（project→task→task→project，probe 判 done）。
 - demo `examples/project_drive`：离线规则档「monthly_ops」3 任务（各带 steps seed）跑完 → progress 全 done +
-  next_task null 停；模型档（ScriptedModel）挑 monthly 先做。
-- 验收 problems/51；全仓全绿。
+  next_task null 停；含一条 applicable_if=weekly 的经验（经验优先演示）。
+- 验收 problems/51（调度循环）+ problems/52（经验回流）；全仓全绿。
+
+## 五、第二刀：经验回流决策（meta 从 lessons 学习改进决策，problems/52）
+
+problems/49/51 押后的「meta 从 lessons 学习改进决策」落地为 project_drive 的经验增强：
+
+1. **相关性挑选**：drive 读 `lessons.json`，按 `applicable_if` 命中（空 = 通用经验总相关；非空 = 与任务
+   id/name **双向子串匹配**）筛出**相关经验**；无关经验不灌上下文（防噪音）。
+2. **规则档加权**：候选未完成任务排序 = applicable_if 命中的未完成（pref）排前，其余按文件序跟上。
+   对应任务已 done → 不参与加权（只作用于未完成）。
+3. **模型档决策依据**：简报新增【项目经验（lessons，仅相关…）】段（编号 [lesson N]）；缺省 meta
+   system_prompt 要求参考经验、reason 引用经验时以 `[lesson N]` 标注（**可审计的回流锚点**）。
+4. **可观测**：drive 结果带 `lessons_used`（相关条数计数）。
+5. **语义边界**：经验只**影响**决策（排序/上下文），不保证模型必然套用——"学习"的判定 = 经验
+   进得了上下文、用得上（引用锚点）、可审计；模型是否真套用由调度案例实测（真机待跑）。
+
+## 六、保留押后（沿 §四）
+- 任务依赖图调度（非顺序）；自适应 plan_steps（meta 产 plan）；评审 fail 专线重跑路由。
