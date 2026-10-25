@@ -67,8 +67,23 @@ problems/49/51 押后的「meta 从 lessons 学习改进决策」落地为 proje
    进得了上下文、用得上（引用锚点）、可审计；模型是否真套用由调度案例实测（真机待跑）。
 
 ## 六、保留押后（沿 §四）
-- 自适应 plan_steps（meta 产 plan）；评审 fail 专线重跑路由。
-- （任务依赖图调度已在下方 §七 实现。）
+- 评审 fail 专线重跑路由。
+- （任务依赖图调度已在 §七 实现；自适应 plan_steps 已在 §八 实现。）
+
+## 八、第四刀：自适应 plan_steps（meta 产 plan，problems/54）
+
+任务计划不再只依赖预置 `tasks[].steps`：
+
+1. **单步兜底（规则档）**：无/空预置 steps → 产出单步计划 `[{"id":"s1","goal":任务目标}]`，子 task begin
+   可建档（原 missing_seed 空转会反复选同任务 → 现在能跑、能完结回写）。
+2. **模型产 plan（模型档）**：选中任务无预置 steps 时，模型可同轮输出可选 `plan_steps` 数组（每步须含
+   `id`/`goal`）；合法 → 用模型计划；非法 → 回落单步兜底（fail-closed）。
+3. **预置优先（幂等）**：预置 `steps` 存在 → 恒用预置，模型 plan_steps 不覆盖（每轮决策可预期）。
+4. **可观测**：drive 结果带 `plan_source = preset | model | fallback`；规则档 reason 附「自适应单步兜底」。
+5. prompt 给模型说明：无预置时可输出 `plan_steps`；有预置则不输出。
+
+语义：首版计划来源自适应；跨批计划更新仍走长程语义（批次间档案保留 + recheck_prev 复查），
+meta 产 plan 只影响任务**建档**的首版步骤。单测 +5，全仓 896。
 
 ## 七、第三刀：任务依赖图调度（problems/53）
 
