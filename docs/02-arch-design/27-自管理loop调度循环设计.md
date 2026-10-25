@@ -67,8 +67,31 @@ problems/49/51 押后的「meta 从 lessons 学习改进决策」落地为 proje
    进得了上下文、用得上（引用锚点）、可审计；模型是否真套用由调度案例实测（真机待跑）。
 
 ## 六、保留押后（沿 §四）
-- 评审 fail 专线重跑路由。
-- （任务依赖图调度已在 §七 实现；自适应 plan_steps 已在 §八 实现。）
+- 无（依赖图 §七 / 自适应 plan §八 / 评审 fail 重跑 §九 均已实现）。后续增量方向见 §十。
+
+## 九、第五刀：评审 fail 专线重跑路由（problems/55）
+
+项目级终审（第二刀）fail 从"只落档"升级为"点名返工 → drive 重跑"：
+
+1. **评审点名**：`judge_project_review` 模型判 fail 时可输出可选 `rework:["任务id",…]`（只收存在于
+   project.tasks 的 id，未知忽略）；review system_prompt 说明"判 fail 时如能指出需返工任务就列出来"。
+2. **落档**：`verify review`（项目模式）把 rework 写 `state.project_review.rework` → `project end` 写进
+   `completion.rework`（verdict=fail 时）。
+3. **重跑路由**：`project_drive` 读到 `completion.verdict==fail` 且 `completion.rework` 非空 → 进入
+   **返工模式**：候选 = rework 清单里的任务（**即使 progress=done 也重跑**——整体不达标点名返工），
+   依赖仍须就绪；reason 标「项目终审 fail → 返工重跑」。
+4. **模型档**：简报加【项目终审】状态（fail + 返工清单）；prompt 优先选返工清单任务（done 也重跑）；
+   模型选非清单任务 → 回落规则档（fail-closed）。
+5. **阻塞与闭环**：返工候选无一依赖就绪 → 阻塞停机；每任务跑完子 workflow 里的项目终审会重判
+   completion——判 done → 下一轮 drive 退出返工模式正常收尾；判 fail 且再点名 → 继续返工
+   （loop max 兜底防病态）。
+6. 结果 `rework` 计数；测试 +5，全仓 901。
+
+## 十、自管理 loop 六刀全景（problems/51–55）
+
+调度循环（880）→ 经验回流（885）→ 任务依赖图（891）→ 自适应 plan_steps（896）→ **评审 fail 专线重跑
+（901）**。arch 27 押后清单清空；下一阶段增量（真机量化 meta 引用经验比例、wfr cron 触发接入、依赖图
+失败专线重做路由等）另行立项。
 
 ## 八、第四刀：自适应 plan_steps（meta 产 plan，problems/54）
 
