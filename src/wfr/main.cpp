@@ -656,6 +656,9 @@ int main(int argc, char** argv) {
 
   CompileOptions opts;
   opts.components = &comps;
+  // P1.5（arch 25）：声明式配置基准目录 = 主 workflow 文件所在目录（declarations.configs 的
+  // from 相对它解析；子 workflow 装载沿用同一根）。显式路径与按名定位都从这里取。
+  opts.config_dir = std::filesystem::path(*path).parent_path().string();
   opts.tool_policy = &guard;  // wfr-㊷：挂进 c_tool / c_run_tools 两个执行点
   opts.shared_registry = &shared_registry;  // wfr-㊹：tool_registry 加载目标（可空则 workflow 里该节点报错）
   if (!tool_lib_dirs.empty()) opts.tool_lib_dirs = &tool_lib_dirs;  // wfr-㊹：`lib<from>.so` 搜索目录
