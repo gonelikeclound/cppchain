@@ -43,6 +43,8 @@ set(HITL_EXAMPLE_TARGETS approve_interrupt)
 set(PROXY_EXAMPLE_TARGETS proxy_call)
 # P1.5 声明式配置（arch 25）demo：declarations.configs 三形态 + ${workdir} 运行变量（纯离线）
 set(CONFIG_DECL_EXAMPLE_TARGETS config_decl)
+# arch 26 project 自管理（第一刀）demo：目录化多文件 + 多任务独立对话 + 项目级注入（纯离线）
+set(PROJECT_EXAMPLE_TARGETS project_run)
 # 主动智能 workflow 生成端到端验收（真机 LLM）+ wfr 已在 src/wfr（正式 CLI，非 examples）
 set(WF_EXAMPLE_TARGETS wf_eval proactive workflow_cli)
 # 需要 agent 库（真机）的 demo
@@ -66,6 +68,7 @@ list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basic
 list(APPEND EXAMPLE_TARGETS approve_interrupt)
 list(APPEND EXAMPLE_TARGETS ${PROXY_EXAMPLE_TARGETS})  # proxy_call：wfr-㊿ 子 workflow 调用（离线）
 list(APPEND EXAMPLE_TARGETS ${CONFIG_DECL_EXAMPLE_TARGETS})  # config_decl：P1.5 声明式配置（离线）
+list(APPEND EXAMPLE_TARGETS ${PROJECT_EXAMPLE_TARGETS})  # project_run：arch 26 project 结构（离线）
 if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS tools_retrieval_vector)
   list(APPEND EXAMPLE_TARGETS agent_loop)
@@ -117,6 +120,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   elseif(t IN_LIST PROXY_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow Threads::Threads)
   elseif(t IN_LIST CONFIG_DECL_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_workflow)
+  elseif(t IN_LIST PROJECT_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)
   elseif(t IN_LIST WF_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow cppchain_http_curl)
