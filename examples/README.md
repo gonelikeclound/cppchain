@@ -70,6 +70,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `vision_agent` | **看图→调工具→回答 组合（离线）**：模型决定调 `read_image` → 工具读图得 base64 → `make_image_message` 注入 ImageBlock → 视觉模型"看图"回答；两轮 `invoke`（tool_call / 识别答案）脚本化，零网络 | 多模态 agent 组合 |
 | `proxy_call` | **wfr-㊿ proxyNode（运行期调用子 workflow，离线）**：`subworkflow` 节点——sync 模式子 workflow（sum 工具）跑完、子结果提升为 `results.<id>` 帧顶层键、主流程用 `$sub.result.calc` 引用；detach 模式 fire-and-forget（立即返回 detached:true），子流程后台跑、结果落盘 `.wfr/subflows/` 审计。子 workflow 装载走**内存 loader**（spec→JSON，编译期 fail-fast） | 借鉴 miclaw-rs `workflow.call`（sync/detach + copyState + 审计落盘） |
 | `config_decl` | **P1.5 声明式配置（arch 25，离线）**：`declarations.configs` 自描述配置来源——① 命名空间引用 `@config.llm.base_url`（点分导航进 `configs/llm.json`）；② target 平铺（`tools.json` 顶层键全局可见）；③ `${workdir}`/`${sessionId}` 运行变量在全 config 树替换；④ 宿主顶层键覆盖声明缺省。全离线自建 echo 工具回显参数证明引用解析到位 | 借鉴 miclaw-rs `crates/config`（声明区 + 三形态 + 运行变量 + 启动即炸） |
+| `project_run` | **Project 自管理第一刀（arch 26，离线，无模型）**：一个 project「月度运营综述」3 个任务各跑**独立 session**——`project` 节点 begin 把 目标/完成标准/纪律/lessons 拼进 `system_context`（model 装配时自动带上）；任务档案 `@config.project` 下沉到 `.wfr/projects/<p>/tasks/`；end 收口 lessons.json 经验沉淀 + project.json progress 更新 | 长程任务升级为 project（多任务独立对话 + 项目级父上下文） |
 
 > 设计原则：**一个 demo 只讲一件事**。曾经的 `message_pipeline`（综合流水线）因与上述 demo 重复约 70% 已删除；
 > 真正有意义的"端到端综合"留到 M3/M7 有真实 agent 循环时再写。
