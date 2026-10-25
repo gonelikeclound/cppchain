@@ -2612,6 +2612,15 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
       return true;
     };
 
+    // arch 27 第四刀：自适应 plan_steps —— 预置 tasks[].steps 缺/空时的兜底计划（单步 = 任务目标
+    // 本身），避免"无 seed → 子 task begin missing_seed → drive 反复选同任务"的空转死循环；
+    // 模型档可选用自己的 plan_steps（无预置时），见下方模型块。
+    auto ensure_plan_seed = [](std::string& seed, std::string const& goal, std::string const& tid) {
+      if (seed.empty() || seed == "[]")
+        seed = Json::array({Json{{"id", "s1"},
+                                 {"goal", goal.empty() ? ("任务" + tid) : goal}}}).dump();
+    };
+
     // 简报（模型档决策依据；与项目终审简报同格式）
     std::string brief;
     brief += "【项目目标】" + po.value("goal", std::string{}) + "\n";
@@ -2683,6 +2692,7 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
     std::string next_task;   // 空 = 停机
     std::string next_goal;
     std::string next_seed;
+    std::string plan_source = "preset";  // preset（预置 steps）| model（模型产 plan）| fallback（单步兜底）
     std::string reason;
     if (blocked) {
       reason = "任务依赖未就绪（阻塞停机）：" + std::to_string(unfinished.size()) +
@@ -2694,9 +2704,14 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
         next_goal = info->first;
         next_seed = info->second;
       }
+      // 自适应 plan：无/空预置 steps → 单步目标兜底（归档可跑，不再 missing_seed 空转）
+      bool const used_fallback = (next_seed.empty() || next_seed == "[]");
+      ensure_plan_seed(next_seed, next_goal, next_task);
+      if (used_fallback) plan_source = "fallback";
       reason = std::string(pref_tasks.count(next_task) != 0 ? "经验优先（规则档）："
                                                        : "顺序推进（规则档）：") +
                "未完成任务 " + next_task;
+      if (used_fallback) reason += "（无预置 steps → 自适应单步兜底）";
     } else {
       reason = "项目全部任务 done（规则档停机）";
     }
@@ -2714,7 +2729,11 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
                 "只能选依赖已就绪（deps 全部 done）的任务；【任务进展】中标有 依赖:[…] 且前置未完成的"
                 "任务不可选；若存在未完成任务但无一就绪（依赖堵塞/环）返回 task=null 且 done=false、"
                 "reason 说明『依赖未就绪』。"
-                "只输出 JSON：{\"task\":\"任务id\"或null,\"done\":true或false,\"reason\":\"一句理由\"}，不要输出别的。"
+                "若你选中的任务【任务进展】里未标注计划/产物证据（无预置 steps），可同时输出 "
+                "\"plan_steps\":[{\"id\":\"s1\",\"goal\":\"本批第一步（一句话，可含验证方式）\"}] "
+                "给出该任务的首版计划；有预置 steps 则不输出。"
+                "只输出 JSON：{\"task\":\"任务id\"或null,\"done\":true或false,\"reason\":\"一句理由\"}"
+                "（可选的 \"plan_steps\":[…]），不要输出别的。"
               : judge_sys);
       message::Message const usr = message::human_message(brief);
       auto resp = judge->invoke({sys, usr}, {});
@@ -2732,6 +2751,27 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
               if (info) {
                 next_goal = info->first;
                 next_seed = info->second;
+              }
+              // 自适应 plan_steps：无/空预置 steps 且模型给了合法 plan_steps → 用模型计划；
+              // 否则单步兜底（不回退到 missing_seed 空转）。
+              if (next_seed.empty() || next_seed == "[]") {
+                if (j->contains("plan_steps") && (*j)["plan_steps"].is_array() &&
+                    !(*j)["plan_steps"].empty()) {
+                  bool ok = true;
+                  for (Json const& st : (*j)["plan_steps"])
+                    if (!st.is_object() || !st.contains("id") || !st["id"].is_string()) {
+                      ok = false;
+                      break;
+                    }
+                  if (ok) {
+                    next_seed = (*j)["plan_steps"].dump();
+                    plan_source = "model";
+                  }
+                }
+                if (plan_source != "model") {
+                  ensure_plan_seed(next_seed, next_goal, next_task);
+                  plan_source = "fallback";
+                }
               }
               reason = "模型档决策：" + j->value("reason", "（无理由）");
             } else {
@@ -2762,6 +2802,7 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
                        {"reason", reason},
                        {"goal", next_goal},
                        {"plan_steps", next_seed},
+                       {"plan_source", plan_source},
                        {"lessons_used", static_cast<long>(related.size())}};
     if (sink_p)
       sink_p->log_node(nc.node_name, "info",

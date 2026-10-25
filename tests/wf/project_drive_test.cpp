@@ -521,3 +521,116 @@ TEST(WfProjectDrive, loop_runs_tasks_in_dependency_order) {
   EXPECT_TRUE(d["done"] == true);
   EXPECT_TRUE(d["next_task"].is_null());
 }
+
+// ---- 自适应 plan_steps（arch 27 第四刀）----
+
+// 规则档：无/空预置 steps → 单步目标兜底（不再 missing_seed 空转）
+TEST(WfProjectDrive, rule_fallback_single_step_plan_without_seed) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array(
+      {Json{{"id", "weekly"}, {"goal", "周报"}, {"deps", Json::array()}},
+       Json{{"id", "monthly"}, {"goal", "月报"}, {"deps", Json::array()}}}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");
+  EXPECT_EQ(d["plan_source"], "fallback");
+  EXPECT_NE(d["reason"].get<std::string>().find("自适应单步兜底"), std::string::npos);
+  auto seed = Json::parse(d["plan_steps"].get<std::string>());
+  ASSERT_TRUE(seed.is_array());
+  ASSERT_EQ(seed.size(), 1u);
+  EXPECT_EQ(seed[0]["id"], "s1");
+  EXPECT_EQ(seed[0]["goal"], "周报");
+}
+
+// 模型档：无预置 steps → 模型产 plan_steps → 用模型计划（plan_source=model）
+TEST(WfProjectDrive, model_plans_for_seedless_task) {
+  DriveFixture fx;
+  fx.set_project_tasks(
+      Json::array({Json{{"id", "weekly"}, {"goal", "周报"}, {"deps", Json::array()}}}));
+  ScriptedDrive mdl;
+  mdl.replies.push_back(message::ai_message(
+      R"({"task":"weekly","done":false,"reason":"先周报",
+          "plan_steps":[{"id":"p1","goal":"先核对数据源"},{"id":"p2","goal":"再写周报"}]})"));
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");
+  EXPECT_EQ(d["plan_source"], "model");
+  auto seed = Json::parse(d["plan_steps"].get<std::string>());
+  ASSERT_TRUE(seed.is_array());
+  ASSERT_EQ(seed.size(), 2u);
+  EXPECT_EQ(seed[0]["id"], "p1");
+  EXPECT_EQ(seed[1]["goal"], "再写周报");
+}
+
+// 模型档：plan_steps 非法 → 回落单步兜底（fail-closed）
+TEST(WfProjectDrive, model_plan_invalid_falls_back_single) {
+  DriveFixture fx;
+  fx.set_project_tasks(
+      Json::array({Json{{"id", "weekly"}, {"goal", "周报"}, {"deps", Json::array()}}}));
+  ScriptedDrive mdl;
+  mdl.replies.push_back(message::ai_message(
+      R"({"task":"weekly","done":false,"reason":"先周报","plan_steps":"not-an-array"})"));
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["plan_source"], "fallback");
+  auto seed = Json::parse(d["plan_steps"].get<std::string>());
+  ASSERT_EQ(seed.size(), 1u);
+}
+
+// 预置 steps 优先：模型即使给了 plan_steps 也不覆盖预置（幂等可预期）
+TEST(WfProjectDrive, preset_steps_beat_model_plan) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("weekly", "周报", Json::array())}));
+  ScriptedDrive mdl;
+  mdl.replies.push_back(message::ai_message(
+      R"({"task":"weekly","done":false,"reason":"先周报",
+          "plan_steps":[{"id":"x1","goal":"模型想改计划"}]})"));
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["plan_source"], "preset");       // 预置优先
+  EXPECT_NE(d["plan_steps"].get<std::string>().find("done_weekly"), std::string::npos);
+}
+
+// 集成：无预置 steps 的任务经 drive 循环建档并跑完（单步兜底 → unverified 诚实推进 → done，不 starvation）
+TEST(WfProjectDrive, loop_runs_seedless_task_without_starvation) {
+  DriveFixture fx;
+  fx.set_project_tasks(
+      Json::array({Json{{"id", "weekly"}, {"goal", "周报"}, {"deps", Json::array()}}}));
+  CompileOptions copts;
+  copts.subworkflow_loader = [](std::string const& spec) -> std::optional<Json> {
+    if (spec == "wf_drive_child") return Json::parse(child_json());
+    return std::nullopt;
+  };
+  auto st = fire_parsed(drive_loop_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  EXPECT_EQ(fx.progress()["weekly"], "done");   // 建档 + 推进 + end 写回
+  EXPECT_TRUE(std::filesystem::exists(fx.proj_dir / "tasks" / "weekly.json"));
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_TRUE(d["done"] == true);               // 末轮停机（不是 blocked）
+}
