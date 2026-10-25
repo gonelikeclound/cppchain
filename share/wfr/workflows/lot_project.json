@@ -25,7 +25,11 @@
       "system_prompt": "汇总本批完成的情况，给一句批间摘要。",
       "next": "t_end" },
     { "id": "t_end", "kind": "task", "task": "@config.task",
-      "phase": "end", "next": "p_end" },
+      "phase": "end", "next": "p_review" },
+    { "id": "p_review", "kind": "verify", "phase": "review", "project": "@config.project",
+      "model": "main", "role": "reviewer", "criteria": "@config.project_criteria",
+      "system_prompt": "你是项目『@config.project』的独立终审 Reviewer：依据【验收标准】对项目级【任务进展】做整体把关，不盲从执行者自述；验收标准未全部满足必须 fail。只输出 {\"pass\":true或false,\"feedback\":\"一句理由\"}。",
+      "next": "p_end" },
     { "id": "p_end", "kind": "project", "project": "@config.project",
       "phase": "end", "next": "_turn_end" }
   ]

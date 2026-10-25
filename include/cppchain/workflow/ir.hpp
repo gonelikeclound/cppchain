@@ -221,7 +221,8 @@ struct NodeIR {
   std::string goal;      // plan 节点的目标（可 @config.*）
   std::string phase;     // verify: announce / judge / review；task：begin/end；project：begin/end
   std::string task;       // task（㊿）：任务名（可 @config.*）
-  std::string project;    // project（arch 26）：项目名（可 @config.*；空 = 走 @config.project）
+  std::string project;    // 项目绑定（arch 26）：project 节点 = 项目名（可 @config.*；空 = 走 @config.project）；
+                          // verify phase=review 复用 = 启动"项目级终审"（判 project 整体是否达标，见 arch 26 第二刀）
   std::string confirm;   // plan_review（批④）："true/false"（假 = 关确认门直接过）；可 @config.*
   std::string role;      // verify（wfr-㊾）：审计角色名（如 "executor"/"reviewer"），plan_log 落行时带
   std::string criteria;  // verify phase=review（wfr-㊾）：批级判据（可 @config.*，缺省空 = 用 plan.goal）

@@ -1979,6 +1979,85 @@ bool judge_batch_review(Json const& plan, Json const& plan_log, std::string cons
   return pass;
 }
 
+// ---- judge_project_review（arch 26 第二刀）：项目级独立终审（判 project 整体是否达标）----
+// 输入 = **项目简报**：只投 项目目标/验收标准/纪律 + 各任务档案的事实（批数 + last_summary），
+// 不把单任务执行思考/全局会话带进去 —— 与 judge_batch_review 同纪律（Reviewer 独立复核，
+// 不盲从执行者自述）。criteria 为空 → 用 project.json.completion_criteria。
+std::optional<Json> read_json_file(std::filesystem::path const& p);  // 定义在 task_archive_path 附近
+bool judge_project_review(std::filesystem::path const& pdir, std::string const& criteria,
+                          model::ChatModel* m, std::string const& rev_sys, std::string& why) {
+  if (m == nullptr) {
+    why = "review 模型未配置（verify review 项目模式缺 model）";
+    return false;
+  }
+  auto const loaded = read_json_file(pdir / "project.json");
+  if (!loaded || !loaded->is_object()) {
+    why = "项目评审：缺 project 档案";
+    return false;
+  }
+  Json const& po = *loaded;
+  std::string cr = criteria;
+  if (cr.empty() || cr == "null") cr = po.value("completion_criteria", std::string{});
+  std::string brief;
+  brief += "【项目目标】" + po.value("goal", std::string{}) + "\n";
+  brief += "【验收标准】" + cr + "\n";
+  if (po.contains("discipline") && po["discipline"].is_array()) {
+    brief += "【项目纪律】\n";
+    for (Json const& x : po["discipline"])
+      if (x.is_string()) brief += "- " + x.get<std::string>() + "\n";
+  }
+  brief += "【任务进展】\n";
+  bool have_tasks = false;
+  if (po.contains("tasks") && po["tasks"].is_array()) {
+    Json const progress = po.value("progress", Json::object());
+    for (Json const& t : po["tasks"]) {
+      if (!t.is_object()) continue;
+      std::string const tid = t.value("id", "");
+      if (tid.empty()) continue;
+      have_tasks = true;
+      brief += "- " + tid +
+               (t.contains("name") && t["name"].is_string()
+                    ? "（" + t["name"].get<std::string>() + "）"
+                    : "") +
+               " 进度:" + progress.value(tid, "未开始") + "\n";
+      auto const arch = read_json_file(pdir / "tasks" / (tid + ".json"));
+      if (arch && arch->is_object())
+        brief += "  批数:" + std::to_string(arch->value("batch_no", 0L)) +
+                 " · 摘要:" + arch->value("last_summary", "") + "\n";
+      else
+        brief += "  （无任务档案）\n";
+    }
+  }
+  if (!have_tasks) brief += "（无任务）\n";
+  message::Message const sys = message::system_message(
+      rev_sys.empty()
+          ? "你是项目级独立审查员。依据【验收标准】对【项目目标】在整个项目的【任务进展】上做独立判断，"
+            "不盲从任何执行者自述，只依据任务档案里的事实。验收标准未全部满足必须 pass=false。"
+            "只输出 JSON：{\"pass\":true或false,\"feedback\":\"一句理由\"}，不要输出别的。"
+          : rev_sys);
+  message::Message const usr = message::human_message(brief);
+  auto resp = m->invoke({sys, usr}, {});
+  if (!resp) {
+    why = "项目评审调用失败：" + resp.error().message;
+    return false;
+  }
+  auto const j = json_block_of(resp->text());
+  if (!j.has_value()) {
+    why = "项目评审未返回可解析 JSON";
+    return false;
+  }
+  if (!j->contains("pass")) {
+    why = "项目评审缺 pass 字段";
+    return false;
+  }
+  bool const pass = j->value("pass", false);
+  why = std::string(pass ? "项目级终审通过" : "项目级终审不通过") +
+        (j->contains("feedback") && (*j)["feedback"].is_string()
+             ? std::string("：") + (*j)["feedback"].get<std::string>()
+             : std::string());
+  return pass;
+}
+
 // ---- plan_review（批④）：步骤边界任务级 HITL（interrupt 悬挂 → continue/rollback_to:K/abort）----
 void v_plan_review(NodeIR const& n, NodeType::ValidateContext const&,
                    NodeType::ErrorSink const& err) {
@@ -2412,10 +2491,20 @@ void c_project(NodeIR const& n, NodeType::CompileContext& ctx) {
         if (!po.contains("progress") || !po["progress"].is_object())
           po["progress"] = Json::object();
         po["progress"][task] = status;
-        write_json_file(pj, po);
         results[node_id] = Json{{"action", "end"}, {"project", project}, {"task", task},
                                 {"status", status},
                                 {"lesson_written", lesson.is_object()}};
+        // arch 26 第二刀：项目级终审（verify review project=<p>）的 verdict → project.completion。
+        // 与 progress[task]（任务级）分开：completion 是项目整体验收档（Reviewer 独立判）。
+        if (state.contains("project_review") && state["project_review"].is_object()) {
+          Json const& rv = state["project_review"];
+          po["completion"] = Json{{"verdict", rv.value("verdict", "")},
+                                  {"when", today_str()},
+                                  {"by", rv.value("project", "")},
+                                  {"why", rv.value("why", "")}};
+          results[node_id]["project_review"] = rv.value("verdict", "");
+        }
+        write_json_file(pj, po);
       } else {
         results[node_id] = Json{{"action", "end"}, {"project", project}, {"task", task},
                                 {"status", "skipped_progress"}};
@@ -2722,6 +2811,9 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
   std::string const judge_sys = n.system_prompt;
   std::string const judge_role = n.role;
   std::string const batch_criteria = n.criteria;  // review 相位的批级判据（可 @config.*）
+  // arch 26 第二刀：verify phase=review 带 project 字段 → 项目级终审（判 project 整体达标）；
+  // 终审 verdict 除落 plan_log 外写 state.project_review，由 project end 收口进 project.json。
+  std::string const proj_spec = n.project;
   // A6（problems/39）：验收者只读工具集 —— 从 toolset 组件名解析，只拷贝 read_only 工具。
   // 写工具不在 registry 里 → 模型发不出写调用（"不存在而非被拒"）。
   auto ro_registry = std::make_shared<tool::ToolRegistry>();
@@ -2731,7 +2823,7 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
         if (tool::ToolSpec const* sp = ctx.registry->find(tname); sp != nullptr)
           if (sp->read_only) ro_registry->add(*sp);  // 只读才收；写工具跳过（不给验收者）
   ctx.graph.add_node(n.id, [node_id, phase, judge, judge_sys, judge_role, batch_criteria,
-                            ro_registry,
+                            proj_spec, ro_registry,
                             break_target](Json const& state, NodeContext&) {
     Json plan = plan_from_state(state);
     Json steps = plan.contains("steps") && plan["steps"].is_array() ? plan["steps"] : Json::array();
@@ -2762,6 +2854,8 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
 
     // ---- review（wfr-㊾）：批级独立终审（Reviewer 角色）----
     // 不做 cursor 推进、不改步骤状态；只读整批计划 + plan_log，产出批级 verdict 落 plan_log。
+    // arch 26 第二刀：带 project 字段 → **项目级终审**（判 project 整体是否达标），verdict
+    // 同时写 state.project_review（供 project end 收口）。
     if (phase == "review") {
       std::string criteria = batch_criteria;
       if (criteria.empty()) criteria = plan.value("goal", "");
@@ -2770,15 +2864,27 @@ void c_verify(NodeIR const& n, NodeType::CompileContext& ctx) {  std::string con
         if (!eff.empty()) criteria = eff;
       }
       std::string why;
-      bool const ok = judge_batch_review(plan, plan_log, criteria, judge, judge_sys, why);
+      bool ok;
+      std::string project;
+      if (!proj_spec.empty()) {
+        project = resolve_text_parameter(proj_spec, state);
+        std::filesystem::path const pdir = project_dir_path(state, project);
+        ok = judge_project_review(pdir, criteria, judge, judge_sys, why);
+      } else {
+        ok = judge_batch_review(plan, plan_log, criteria, judge, judge_sys, why);
+      }
       Json verdict_obj = Json{{"step", "*"}, {"kind", "review"},
                               {"verdict", ok ? "done" : "fail"}, {"why", why}};
       if (!judge_role.empty()) verdict_obj["role"] = judge_role;
+      if (!project.empty()) verdict_obj["project"] = project;
       plan_log.push_back(std::move(verdict_obj));
       // review 不改 cursor/steps，批级判定只落 plan_log（facts）；results 里透出 verdict 供宿主/调试台读
       Json update{{kPlanLogStateKey, std::move(plan_log)},
                   {kResultsKey, Json{{node_id, Json{{"phase", "review"},
                                                     {"verdict", ok ? "done" : "fail"}}}}}};
+      if (!project.empty())
+        update["project_review"] =
+            Json{{"project", project}, {"verdict", ok ? "done" : "fail"}, {"why", why}};
       return Command::with_update(std::move(update));
     }
 
@@ -4021,6 +4127,7 @@ std::vector<NodeType> const& builtin_node_types() {
          get_str(out, node, "system_prompt", out.system_prompt);  // reviewer 独立身份（wfr-㊾）
          get_str(out, node, "role", out.role);         // 审计角色名（wfr-㊾）
          get_str(out, node, "criteria", out.criteria); // 批级终审判据 review（wfr-㊾）
+         get_str(out, node, "project", out.project);   // arch 26 第二刀：review 项目级终审（可 @config.*）
          get_str(out, node, "next", out.next);
        },
        [](Json& node, NodeIR const& n) {
@@ -4031,6 +4138,7 @@ std::vector<NodeType> const& builtin_node_types() {
          if (!n.system_prompt.empty()) node["system_prompt"] = n.system_prompt;
          if (!n.role.empty()) node["role"] = n.role;
          if (!n.criteria.empty()) node["criteria"] = n.criteria;
+         if (!n.project.empty()) node["project"] = n.project;
          node["next"] = n.next;
        },
        [](NodeIR const& n) {
