@@ -30,9 +30,15 @@ class ScriptedDrive final : public model::ChatModel {
  public:
   std::deque<Message> replies;
   std::size_t invoked = 0;
-  std::expected<Message, model::ModelError> invoke(std::span<Message const>,
+  std::vector<std::string> last_humans;  // 每次 invoke 的最后 human 文本（简报可见性审计）
+  std::expected<Message, model::ModelError> invoke(std::span<Message const> msgs,
                                                    model::CallOptions const&) override {
     ++invoked;
+    for (auto it = msgs.rbegin(); it != msgs.rend(); ++it)
+      if (it->type == message::Role::Human) {
+        last_humans.push_back(it->text());
+        break;
+      }
     if (replies.empty())
       return std::unexpected(
           model::ModelError{model::ModelError::Kind::Parse, 0, "replies exhausted", {}});
@@ -103,6 +109,20 @@ struct DriveFixture {
     j["progress"] = p;
     std::ofstream out(proj_dir / "project.json");
     out << j.dump();
+  }
+  // 覆盖 project.json 的 tasks（经验加权顺序测试用），extra 可并入顶层键
+  void set_project_tasks(Json tasks, Json const& extra = Json::object()) const {
+    std::ifstream in(proj_dir / "project.json");
+    Json j;
+    in >> j;
+    j["tasks"] = std::move(tasks);
+    for (auto it = extra.begin(); it != extra.end(); ++it) j[it.key()] = it.value();
+    std::ofstream out(proj_dir / "project.json");
+    out << j.dump();
+  }
+  void write_lessons(Json lessons) const {
+    std::ofstream out(proj_dir / "lessons.json");
+    out << lessons.dump();
   }
 };
 
@@ -280,4 +300,105 @@ TEST(WfProjectDrive, loop_max_bounds_runaway) {
   // 触顶收尾（on_max=_turn_end）：weekley 仍 not done，但整体正常结束（没挂死/没抛异常）
   EXPECT_EQ(fx.progress()["weekly"], "in_progress");
   EXPECT_TRUE((*st).contains("results"));
+}
+
+// ---- meta 从 lessons 学习改进决策（arch 27 第二刀）----
+
+// 经验加权：文件序 monthly 在前，但一条 applicable_if 命中 "weekly" 的经验 → 规则档先做 weekly
+TEST(WfProjectDrive, rule_lesson_weighting_reorders) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array(
+      {Json{{"id", "monthly"}, {"goal", "月报"}, {"steps", Json::array()}},
+       Json{{"id", "review"}, {"goal", "复盘"}, {"steps", Json::array()}},
+       Json{{"id", "weekly"}, {"goal", "周报"}, {"steps", Json::array()}}}));
+  fx.write_lessons(Json::array({Json{{"when", "2026-10-24"}, {"applicable_if", "weekly"},
+                                     {"conclusion", "周报务必先做"}, {"evidence", "上次体验"}}}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");  // 经验把 weekly 提到最前
+  EXPECT_NE(d["reason"].get<std::string>().find("经验优先"), std::string::npos);
+  EXPECT_EQ(d["lessons_used"], 1L);
+}
+
+// 通用经验（applicable_if 空）：总是相关，但不改变文件序（无 weighted 目标）
+TEST(WfProjectDrive, rule_generic_lesson_reported_without_reorder) {
+  DriveFixture fx;
+  fx.write_lessons(Json::array({Json{{"when", "2026-10-24"},
+                                     {"applicable_if", ""},
+                                     {"conclusion", "先确认数据源再落笔"},
+                                     {"evidence", ""}}}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");  // 无命中任务 → 仍按文件序
+  EXPECT_EQ(d["lessons_used"], 1L);     // 但计数（简报/模型档可见）
+  EXPECT_EQ(d["reason"].get<std::string>().find("顺序推进") != std::string::npos, true);
+}
+
+// 无关经验被过滤：related=0、lessons_used=0，选择不受影响
+TEST(WfProjectDrive, rule_ignores_unrelated_lessons) {
+  DriveFixture fx;
+  fx.write_lessons(Json::array({Json{{"when", "2026-10-24"},
+                                     {"applicable_if", "洋务运动"},
+                                     {"conclusion", "无关经验"},
+                                     {"evidence", ""}}}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");
+  EXPECT_EQ(d["lessons_used"], 0L);
+}
+
+// 加权只作用于未完成任务：weekly 已 done → 经验命中 weekly 也不插手，规则选第一个未完成（monthly）
+TEST(WfProjectDrive, rule_lesson_weight_skips_done) {
+  DriveFixture fx;
+  fx.seed_progress(Json{{"weekly", "done"}});
+  fx.write_lessons(Json::array({Json{{"when", "2026-10-24"}, {"applicable_if", "weekly"},
+                                     {"conclusion", "周报优先"}, {"evidence", ""}}}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "monthly");  // weekly done，规则未完成第一个是 monthly
+  EXPECT_EQ(d["reason"].get<std::string>().find("顺序推进") != std::string::npos, true);
+}
+
+// 模型档：简报含【项目经验】段且只含相关条目；lessons_used 对齐；模型 reason 可引用 [lesson N]
+TEST(WfProjectDrive, model_brief_includes_related_lessons) {
+  DriveFixture fx;
+  fx.write_lessons(Json::array(
+      {Json{{"when", "2026-10-24"}, {"applicable_if", "weekly"},
+            {"conclusion", "周报务必先做"}, {"evidence", "上次"}},
+       Json{{"when", "2026-10-23"}, {"applicable_if", "洋务运动"},
+            {"conclusion", "无关"}, {"evidence", ""}}}));
+  ScriptedDrive mdl;
+  mdl.replies.push_back(message::ai_message(
+      R"({"task":"weekly","done":false,"reason":"按 [lesson 1]：周报务必先做"})"));
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");
+  EXPECT_EQ(d["lessons_used"], 1L);  // 只计相关
+  // 简报含相关经验、不含无关经验
+  ASSERT_FALSE(mdl.last_humans.empty());
+  std::string const brief = mdl.last_humans.back();
+  EXPECT_NE(brief.find("【项目经验（lessons"), std::string::npos) << brief;
+  EXPECT_NE(brief.find("周报务必先做"), std::string::npos) << brief;
+  EXPECT_EQ(brief.find("洋务运动"), std::string::npos) << brief;
+  // 模型选 weekly + reason 引用 [lesson 1]（审计锚点）
+  EXPECT_NE(d["reason"].get<std::string>().find("[lesson 1]"), std::string::npos);
 }

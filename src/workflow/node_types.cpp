@@ -2554,6 +2554,40 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
     Json const progress = po.value("progress", Json::object());
     Json const tasks = po.value("tasks", Json::array());
 
+    // arch 27 第二刀：experience 回流 —— 读 lessons.json，按"适用条件（applicable_if）命中候选任务"
+    // 做**相关性挑选**：通用经验（applicable_if 空）= 总是相关；非空时与任务 id/name 双向子串匹配。
+    // 命中未完成任务的进 pref_tasks（规则档加权）；相关经验进 related（简报展示 + [lesson N] 审计）。
+    Json lessons = Json::array();
+    if (auto const ls = read_json_file(pdir / "lessons.json"); ls.has_value() && ls->is_array())
+      lessons = *ls;
+    std::vector<Json> related;                   // 相关经验（决策引用依据，编号即审计锚点）
+    std::unordered_set<std::string> pref_tasks;  // 经验指向的未完成任务
+    {
+      auto hit_task = [](std::string const& app, std::string const& tid,
+                         std::string const& tname) {
+        return app.find(tid) != std::string::npos || tid.find(app) != std::string::npos ||
+               app.find(tname) != std::string::npos || tname.find(app) != std::string::npos;
+      };
+      for (Json const& x : lessons)
+        if (x.is_object()) {
+          std::string const app = x.value("applicable_if", "");
+          if (app.empty()) {
+            related.push_back(x);
+            continue;
+          }
+          bool related_this = false;
+          if (tasks.is_array())
+            for (Json const& t : tasks)
+              if (t.is_object() && hit_task(app, t.value("id", ""),
+                                            t.value("name", t.value("id", "")))) {
+                related_this = true;
+                std::string const tid = t.value("id", "");
+                if (!tid.empty() && progress.value(tid, "") != "done") pref_tasks.insert(tid);
+              }
+          if (related_this) related.push_back(x);
+        }
+    }
+
     // 简报（模型档决策依据；与项目终审简报同格式）
     std::string brief;
     brief += "【项目目标】" + po.value("goal", std::string{}) + "\n";
@@ -2571,6 +2605,16 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
           brief += "  摘要:" + arch->value("last_summary", "") + "\n";
       }
     }
+    // 经验段（仅相关条目；决策参考 + 可审计引用 [lesson N]）
+    if (!related.empty()) {
+      brief += "【项目经验（lessons，仅相关；决策请参考，引用时标注 [lesson N]）】\n";
+      std::size_t idx = 0;
+      for (Json const& r : related) {
+        ++idx;
+        brief += "[" + std::to_string(idx) + "] 适用：" + r.value("applicable_if", "") +
+                 " → 结论：" + r.value("conclusion", "") + "\n";
+      }
+    }
 
     // 规则档：第一个未完成任务（含其 steps 种子 / 目标）
     auto task_info = [&tasks, &progress](std::string const& tid)
@@ -2584,25 +2628,36 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
       return std::nullopt;
     };
+    // 规则档：候选未完成（文件序）；**经验加权** = applicable_if 命中的未完成任务排前，其余跟上。
+    std::vector<std::string> candidates;
+    auto append_unfinished = [&](std::vector<std::string>& out, bool pref) {
+      if (!tasks.is_array()) return;
+      for (Json const& t : tasks)
+        if (t.is_object()) {
+          std::string const tid = t.value("id", "");
+          if (tid.empty() || progress.value(tid, "") == "done") continue;
+          if (pref == (pref_tasks.count(tid) != 0)) out.push_back(tid);
+        }
+    };
+    append_unfinished(candidates, true);   // 经验命中者优先
+    append_unfinished(candidates, false);  // 其余按文件序
     std::string next_task;   // 空 = 停机
     std::string next_goal;
     std::string next_seed;
     std::string reason;
-    if (tasks.is_array())
-      for (Json const& t : tasks) {
-        if (!t.is_object()) continue;
-        std::string const tid = t.value("id", "");
-        if (tid.empty() || progress.value(tid, "") == "done") continue;
-        next_task = tid;
-        auto const info = task_info(tid);
-        if (info) {
-          next_goal = info->first;
-          next_seed = info->second;
-        }
-        reason = "顺序推进（规则档）：第一个未完成任务 " + tid;
-        break;
+    if (!candidates.empty()) {
+      next_task = candidates[0];
+      auto const info = task_info(next_task);
+      if (info) {
+        next_goal = info->first;
+        next_seed = info->second;
       }
-    if (next_task.empty()) reason = "项目全部任务 done（规则档停机）";
+      reason = std::string(pref_tasks.count(next_task) != 0 ? "经验优先（规则档）："
+                                                       : "顺序推进（规则档）：") +
+               "未完成任务 " + next_task;
+    } else {
+      reason = "项目全部任务 done（规则档停机）";
+    }
 
     // 模型档：有 model → 简报 + system_prompt 决策（可覆盖规则选扇；解码失败/选已 done → 回落规则）
     if (judge != nullptr) {
@@ -2610,6 +2665,8 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
           judge_sys.empty()
               ? "你是项目调度者（meta）。依据【项目简报】决定下一个要执行的任务：从进度不是 done 的"
                 "任务里挑一个最该先做的；若项目可收尾或全部完成返回 done=true 且 task=null。"
+                "注意参考【项目经验（lessons）】：经验适用就套用，reason 里引用经验时请以 [lesson N]"
+                "标注（N 为经验编号），不要凭空引用不存在的经验。"
                 "只输出 JSON：{\"task\":\"任务id\"或null,\"done\":true或false,\"reason\":\"一句理由\"}，不要输出别的。"
               : judge_sys);
       message::Message const usr = message::human_message(brief);
@@ -2659,7 +2716,8 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
                        {"done", next_task.empty()},
                        {"reason", reason},
                        {"goal", next_goal},
-                       {"plan_steps", next_seed}};
+                       {"plan_steps", next_seed},
+                       {"lessons_used", static_cast<long>(related.size())}};
     if (sink_p)
       sink_p->log_node(nc.node_name, "info",
                        "project_drive: " + project + " → " +

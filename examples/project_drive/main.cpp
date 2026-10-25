@@ -77,12 +77,15 @@ int main() {
              "completion_criteria":"三份产物落盘且数字一致",
              "discipline":["数字一致性"],
              "tasks":[
-               {"id":"weekly","goal":"周报","steps":[{"id":"s1","goal":"写周报","verify":{"kind":"probe","probe":"file","path":".out/done_weekly.md","contains":"done"}}]},
                {"id":"monthly","goal":"月报","steps":[{"id":"s1","goal":"写月报","verify":{"kind":"probe","probe":"file","path":".out/done_monthly.md","contains":"done"}}]},
-               {"id":"review","goal":"复盘","steps":[{"id":"s1","goal":"做复盘","verify":{"kind":"probe","probe":"file","path":".out/done_review.md","contains":"done"}}]}
+               {"id":"review","goal":"复盘","steps":[{"id":"s1","goal":"做复盘","verify":{"kind":"probe","probe":"file","path":".out/done_review.md","contains":"done"}}]},
+               {"id":"weekly","goal":"周报","steps":[{"id":"s1","goal":"写周报","verify":{"kind":"probe","probe":"file","path":".out/done_weekly.md","contains":"done"}}]}
              ]})";
-    std::ofstream l(proj / "lessons.json");
-    l << "[]";
+    // 经验回流：applicable_if=weekly 的经验把 weekly 提到调度首位（即使文件序它最后）
+    {
+      std::ofstream l(proj / "lessons.json");
+      l << R"([{"when":"2026-10-24","applicable_if":"weekly","conclusion":"周报务必先做","evidence":"meta 学习演示" }])";
+    }
   }
   // 预置三份"已产出"证据（probe 判 done 的磁盘依据）。
   for (std::string const& tid : {"weekly", "monthly", "review"}) {
@@ -122,6 +125,8 @@ int main() {
   std::println("末轮决策: next_task={} done={}",
                last["next_task"].is_null() ? "(null·停机)" : last["next_task"].get<std::string>(),
                last["done"].get<bool>());
+  std::println("经验学习: 本轮读到 {} 条相关 lessons（project_drive 简报/规则档都计入）",
+               last.value("lessons_used", 0L));
   std::println("终止理由: {}", last["reason"].get<std::string>());
   {
     std::ifstream p(proj / "project.json");
