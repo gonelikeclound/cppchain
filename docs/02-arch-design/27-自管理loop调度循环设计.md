@@ -93,6 +93,18 @@ problems/49/51 押后的「meta 从 lessons 学习改进决策」落地为 proje
 （901）**。arch 27 押后清单清空；下一阶段增量（真机量化 meta 引用经验比例、wfr cron 触发接入、依赖图
 失败专线重做路由等）另行立项。
 
+## 十一、wfr cron 触发接入（使能②，problems/56）
+
+长程使能②「到点再跑」接入 project 化调度（problems/12 §三）：
+
+- **`wfr_cron_batch`**（`wfr_lookup.hpp/cpp`，可单测）：`.wfr/cron.json` job 支持 `project` 字段 →
+  触发 **lot_project**（project 版单批）；`session` 缺省 = `"<project>.<task>"`（每任务独立对话，
+  arch 26 ⑤ 两段）；`plan_steps` 读 `.wfr/projects/<p>/project.json` 该任务 steps（无 → **单步兜底**，
+  与 drive 自适应一致）；goal 缺省取任务 goal（job.goal 覆盖）；无 project → 触发 lot（现状兼容）。
+- `wfr cron` 分支改用该 helper（fire 行打印 workflow/task/session）；last_run 更新逻辑不变。
+- 单测 `tests/wf/cron_batch_test.cpp` 6 例；cron E2E 冒烟（--once：project job 触发 + last_run 更新）通过；
+  批次完整执行仍依赖 LLM（与既有 lot cron 同）。全仓 907。
+
 ## 八、第四刀：自适应 plan_steps（meta 产 plan，problems/54）
 
 任务计划不再只依赖预置 `tasks[].steps`：
