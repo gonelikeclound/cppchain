@@ -439,15 +439,14 @@ int main(int argc, char** argv) {
       long const every = job.value("every_minutes", 0L);
       long const last = job.value("last_run", 0L);
       if (every <= 0 || now - last < every * 60) continue;
-      std::string const S = job.value("session", T);
-      std::string const G = job.value("goal", "");
-      std::println("⏱ cron ➜ 触发批次 task={}（距上次 {}s ≥ {}min）", T, now - last, every);
-      std::vector<std::string> av = {self, "lot", "--workdir", workdir, "--session", S,
-                                     "--set", "task=" + T, "--set", "approve_policy=allow"};
-      if (!G.empty()) { av.push_back("--set"); av.push_back("goal=" + G); }
-      av.push_back("cron 定时批");
+      // arch 27 §十：project 感知装配（job.project → lot_project；否则 lot 现状兼容）
+      WfrCronBatch const batch = wfr_cron_batch(workdir, job, self);
+      if (batch.args.empty()) continue;  // task 缺失
+      std::println("⏱ cron ➜ 触发批次 workflow={} task={} session={}", batch.workflow,
+                   batch.task, batch.session);
       auto const spawned = cppchain::tool::detail::run_argv(
-          av, std::nullopt, cppchain::tool::detail::SpawnLimits{}, std::chrono::minutes(30), 1u << 20);
+          batch.args, std::nullopt, cppchain::tool::detail::SpawnLimits{},
+          std::chrono::minutes(30), 1u << 20);
       if (spawned.exit_code != 0)  // 拉起失败不丢现场，但视为已触发（沿用原语义）
         std::println("⚠ cron ➜ 批次拉起失败（exit={}）{}", spawned.exit_code,
                      spawned.note.empty() ? spawned.output : spawned.note);

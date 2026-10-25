@@ -210,7 +210,8 @@ add_executable(workflow_tests
   wf/loop_test.cpp
   wf/history_ops_test.cpp
   wf/history_process_test.cpp
-  wf/wfr_lookup_test.cpp)
+  wf/wfr_lookup_test.cpp
+  wf/cron_batch_test.cpp)
 
 target_include_directories(workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)
 

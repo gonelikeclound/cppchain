@@ -42,4 +42,21 @@ wfr_lookup_workflow(std::string const& workdir, std::string const& name, Json co
 // 统计一个目录里现存的 workflow 名（*.json），供 `wfr list` 汇总。目录不存在→空。
 [[nodiscard]] std::vector<std::string> wfr_list_workflows_in(std::string const& dir);
 
+// arch 27 §十：wfr cron 批次装配（project 感知）。job 为 .wfr/cron.json 的一个条目：
+//   {task, project?, every_minutes, session?, goal?}
+// project 非空 → 触发 **lot_project**（project 版单批），config 注入 project/task/plan_steps
+//   （plan_steps 读 .wfr/projects/<p>/project.json 该任务 steps；无 → 单步兜底）/goal；
+//   session 缺省 = "<project>.<task>"（每任务独立对话，arch 26 ⑤）。
+// project 空 → 触发 **lot**（现状兼容），session 缺省 = task。
+// 返回 argv（args[0] = self，调用方填 wfr 可执行路径），供 wfr cron 拉起批次。
+struct WfrCronBatch {
+  std::vector<std::string> args;
+  std::string workflow;    // "lot" | "lot_project"
+  std::string task;        // 有效任务名（非空）
+  std::string session;
+  bool project_mode = false;
+};
+[[nodiscard]] WfrCronBatch wfr_cron_batch(std::string const& workdir, Json const& job,
+                                          std::string const& self);
+
 }  // namespace cppchain::workflow

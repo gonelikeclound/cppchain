@@ -83,4 +83,67 @@ std::vector<std::string> wfr_list_workflows_in(std::string const& dir) {
   return out;
 }
 
+WfrCronBatch wfr_cron_batch(std::string const& workdir, Json const& job, std::string const& self) {
+  WfrCronBatch out;
+  std::string const T = job.value("task", "");
+  std::string const P = job.value("project", "");
+  std::string const G = job.value("goal", "");
+  if (T.empty()) return out;  // 无效 job：task 必填
+  out.task = T;
+  out.project_mode = !P.empty();
+  std::string goal = G;
+  std::string seed;  // plan_steps（project 模式才注入）
+  if (out.project_mode) {
+    out.workflow = "lot_project";
+    out.session = job.value("session", P + "." + T);  // 每任务独立对话（arch 26 ⑤，两段 session）
+    // 读 .wfr/projects/<p>/project.json 该任务 steps（无 → 单步兜底，与 drive 自适应一致）；
+    // goal 缺省取任务 goal（job.goal 优先）。
+    std::filesystem::path const pj = wfr_root(workdir) / "projects" / P / "project.json";
+    if (std::ifstream in(pj); in)
+      try {
+        Json po = Json::parse(in);
+        if (po.is_object() && po.contains("tasks") && po["tasks"].is_array())
+          for (Json const& t : po["tasks"])
+            if (t.is_object() && t.value("id", "") == T) {
+              if (goal.empty()) goal = t.value("goal", "");
+              if (t.contains("steps") && t["steps"].is_array() && !t["steps"].empty())
+                seed = t["steps"].dump();
+              break;
+            }
+      } catch (std::exception const&) {
+      }
+    if (seed.empty())
+      seed = Json::array({Json{{"id", "s1"},
+                               {"goal", goal.empty() ? ("任务" + T) : goal}}})
+                 .dump();
+  } else {
+    out.workflow = "lot";
+    out.session = job.value("session", T);
+  }
+  out.args.push_back(self);
+  out.args.push_back(out.workflow);
+  out.args.push_back("--workdir");
+  out.args.push_back(workdir);
+  out.args.push_back("--session");
+  out.args.push_back(out.session);
+  if (out.project_mode) {
+    out.args.push_back("--set");
+    out.args.push_back("project=" + P);
+  }
+  out.args.push_back("--set");
+  out.args.push_back("task=" + T);
+  out.args.push_back("--set");
+  out.args.push_back("approve_policy=allow");
+  if (out.project_mode) {
+    out.args.push_back("--set");
+    out.args.push_back("plan_steps=" + seed);
+  }
+  if (!goal.empty()) {
+    out.args.push_back("--set");
+    out.args.push_back("goal=" + goal);
+  }
+  out.args.push_back("cron 定时批");
+  return out;
+}
+
 }  // namespace cppchain::workflow
