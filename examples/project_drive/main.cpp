@@ -79,7 +79,8 @@ int main() {
              "tasks":[
                {"id":"monthly","goal":"月报","steps":[{"id":"s1","goal":"写月报","verify":{"kind":"probe","probe":"file","path":".out/done_monthly.md","contains":"done"}}]},
                {"id":"review","goal":"复盘","steps":[{"id":"s1","goal":"做复盘","verify":{"kind":"probe","probe":"file","path":".out/done_review.md","contains":"done"}}]},
-               {"id":"weekly","goal":"周报","steps":[{"id":"s1","goal":"写周报","verify":{"kind":"probe","probe":"file","path":".out/done_weekly.md","contains":"done"}}]}
+               {"id":"weekly","goal":"周报","deps":["monthly"],
+                "steps":[{"id":"s1","goal":"写周报","verify":{"kind":"probe","probe":"file","path":".out/done_weekly.md","contains":"done"}}]}
              ]})";
     // 经验回流：applicable_if=weekly 的经验把 weekly 提到调度首位（即使文件序它最后）
     {
@@ -127,6 +128,8 @@ int main() {
                last["done"].get<bool>());
   std::println("经验学习: 本轮读到 {} 条相关 lessons（project_drive 简报/规则档都计入）",
                last.value("lessons_used", 0L));
+  // 依赖门：weekly 虽被经验标为优先，但 deps=[monthly] 未完成时（首轮）不会先做它。
+  std::println("依赖调度: weekly.deps=[monthly] —— monthly 未 done 前 weekly 不会入选（依赖门）");
   std::println("终止理由: {}", last["reason"].get<std::string>());
   {
     std::ifstream p(proj / "project.json");

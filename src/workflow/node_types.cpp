@@ -2588,6 +2588,30 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
     }
 
+    // arch 27 第三刀：任务依赖（tasks[].deps）——就绪 = 未完成 && deps 全部 done。
+    // 缺失/未知/非字符串依赖 → 不满足（fail-closed，最终显为依赖阻塞停机）。
+    auto task_deps = [&tasks](std::string const& tid) -> Json {
+      if (tasks.is_array())
+        for (Json const& t : tasks)
+          if (t.is_object() && t.value("id", "") == tid) {
+            if (t.contains("deps") && t["deps"].is_array()) return t["deps"];
+            break;
+          }
+      return Json::array();
+    };
+    auto dep_met = [&progress](Json const& dep) -> bool {
+      return dep.is_string() && progress.contains(dep.get<std::string>()) &&
+             progress[dep.get<std::string>()] == "done";
+    };
+    auto is_ready = [&](std::string const& tid) {
+      if (progress.contains(tid) && progress[tid] == "done") return false;  // done 不算候选
+      Json const deps = task_deps(tid);
+      if (deps.is_array())
+        for (Json const& d : deps)
+          if (!dep_met(d)) return false;
+      return true;
+    };
+
     // 简报（模型档决策依据；与项目终审简报同格式）
     std::string brief;
     brief += "【项目目标】" + po.value("goal", std::string{}) + "\n";
@@ -2600,6 +2624,13 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
         if (tid.empty()) continue;
         brief += "- " + tid + " 进度:" + progress.value(tid, "未开始") + " · 目标:" +
                  t.value("goal", "") + "\n";
+        Json const deps = task_deps(tid);
+        if (deps.is_array() && !deps.empty()) {
+          std::string ds;
+          for (Json const& d : deps)
+            if (d.is_string()) ds += (ds.empty() ? "" : ",") + d.get<std::string>();
+          brief += "  依赖:[" + ds + "] (未就绪则需先完成)\n";
+        }
         auto const arch = read_json_file(pdir / "tasks" / (tid + ".json"));
         if (arch && arch->is_object())
           brief += "  摘要:" + arch->value("last_summary", "") + "\n";
@@ -2628,24 +2659,35 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
       return std::nullopt;
     };
-    // 规则档：候选未完成（文件序）；**经验加权** = applicable_if 命中的未完成任务排前，其余跟上。
-    std::vector<std::string> candidates;
-    auto append_unfinished = [&](std::vector<std::string>& out, bool pref) {
-      if (!tasks.is_array()) return;
+    // 规则档：未完成（文件序）→ 就绪子集（deps 全 done）→ **经验加权**排序后选首个。
+    //      阻塞停机 = 有未完成但无就绪（依赖未满足：疑环 / 缺失依赖 / 依赖任务在途）。
+    std::vector<std::string> unfinished;
+    if (tasks.is_array())
       for (Json const& t : tasks)
         if (t.is_object()) {
           std::string const tid = t.value("id", "");
           if (tid.empty() || progress.value(tid, "") == "done") continue;
-          if (pref == (pref_tasks.count(tid) != 0)) out.push_back(tid);
+          unfinished.push_back(tid);
         }
+    std::vector<std::string> ready;
+    for (std::string const& tid : unfinished)
+      if (is_ready(tid)) ready.push_back(tid);
+    bool const blocked = !unfinished.empty() && ready.empty();
+    std::vector<std::string> candidates;
+    auto append_ready = [&](std::vector<std::string>& out, bool pref) {
+      for (std::string const& tid : ready)
+        if (pref == (pref_tasks.count(tid) != 0)) out.push_back(tid);
     };
-    append_unfinished(candidates, true);   // 经验命中者优先
-    append_unfinished(candidates, false);  // 其余按文件序
+    append_ready(candidates, true);   // 经验命中者优先（就绪内）
+    append_ready(candidates, false);  // 其余按文件序
     std::string next_task;   // 空 = 停机
     std::string next_goal;
     std::string next_seed;
     std::string reason;
-    if (!candidates.empty()) {
+    if (blocked) {
+      reason = "任务依赖未就绪（阻塞停机）：" + std::to_string(unfinished.size()) +
+               " 个未完成任务，但无任何任务依赖已满足（疑环/缺失依赖/在途）";
+    } else if (!candidates.empty()) {
       next_task = candidates[0];
       auto const info = task_info(next_task);
       if (info) {
@@ -2667,6 +2709,11 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
                 "任务里挑一个最该先做的；若项目可收尾或全部完成返回 done=true 且 task=null。"
                 "注意参考【项目经验（lessons）】：经验适用就套用，reason 里引用经验时请以 [lesson N]"
                 "标注（N 为经验编号），不要凭空引用不存在的经验。"
+                // arch 27 第三刀：依赖约束 —— 只能选依赖已就绪（deps 全部 done）的任务；
+                // 简报里标注了"依赖:[…] (未就绪则需先完成)"的任务不可选。
+                "只能选依赖已就绪（deps 全部 done）的任务；【任务进展】中标有 依赖:[…] 且前置未完成的"
+                "任务不可选；若存在未完成任务但无一就绪（依赖堵塞/环）返回 task=null 且 done=false、"
+                "reason 说明『依赖未就绪』。"
                 "只输出 JSON：{\"task\":\"任务id\"或null,\"done\":true或false,\"reason\":\"一句理由\"}，不要输出别的。"
               : judge_sys);
       message::Message const usr = message::human_message(brief);
@@ -2678,16 +2725,8 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
           bool const model_done = j->contains("done") && (*j)["done"].is_boolean() &&
                                   (*j)["done"].get<bool>();
           if (tv.is_string() && !tv.get<std::string>().empty() && !model_done) {
-            // 模型选的任务必须存在且未 done（fail-closed：选已 done → 拒绝）
-            bool known = false;
-            if (tasks.is_array())
-              for (Json const& t : tasks)
-                if (t.is_object() && t.value("id", "") == tv.get<std::string>() &&
-                    progress.value(t.value("id", ""), "") != "done") {
-                  known = true;
-                  break;
-                }
-            if (known) {
+            // 模型选的任务必须**就绪**：存在、未 done、依赖已满足（arch 27 第三刀；选未就绪 → 拒绝回落）
+            if (is_ready(tv.get<std::string>())) {
               next_task = tv.get<std::string>();
               auto const info = task_info(next_task);
               if (info) {
@@ -2696,11 +2735,14 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
               }
               reason = "模型档决策：" + j->value("reason", "（无理由）");
             } else {
-              reason = "模型选中已 done/未知任务 → 回落规则档：" + reason;
+              reason = "模型选中 已 done/依赖未就绪/未知任务 → 回落规则档：" + reason;
             }
           } else if (tv.is_null() || model_done) {
             next_task.clear();
-            reason = "模型档停机：" + j->value("reason", "（无理由）");
+            if (tv.is_null() && !model_done)
+              reason = "模型档（依赖未就绪/无就绪任务）：" + j->value("reason", "（无理由）");
+            else
+              reason = "模型档停机：" + j->value("reason", "（无理由）");
           }
         } else {
           reason = "模型决策不可解析 → 回落规则档：" + reason;
@@ -2713,7 +2755,10 @@ void c_project_drive(NodeIR const& n, NodeType::CompileContext& ctx) {
     Json result = Json{{"action", "drive"},
                        {"project", project},
                        {"next_task", next_task.empty() ? Json(nullptr) : Json(next_task)},
-                       {"done", next_task.empty()},
+                       // done = 有停机且不是依赖阻塞（阻塞停机 ≠ 完成，见 WfProjectDrive.*blocked*）
+                       {"done", next_task.empty() && !blocked},
+                       {"blocked", blocked},   // 依赖未就绪/环 → 停机且非 done
+                       {"ready", static_cast<long>(ready.size())},
                        {"reason", reason},
                        {"goal", next_goal},
                        {"plan_steps", next_seed},

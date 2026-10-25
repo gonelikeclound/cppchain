@@ -126,6 +126,17 @@ struct DriveFixture {
   }
 };
 
+// 构造单步探针任务（deps 可选；steps 单步 probe 判 done）
+Json probe_task(std::string const& id, std::string const& goal, Json deps) {
+  Json verify = Json{{"kind", "probe"}, {"probe", "file"},
+                     {"path", ".out/done_" + id + ".md"}, {"contains", "done"}};
+  Json step = Json{{"id", "s1"}, {"goal", goal}, {"verify", std::move(verify)}};
+  return Json{{"id", id},
+              {"goal", goal},
+              {"deps", std::move(deps)},
+              {"steps", Json::array({std::move(step)})}};
+}
+
 // 单个 drive 节点（规则/模型档单元用）
 Json drive_only_ir() {
   return Json::parse(R"json({
@@ -401,4 +412,112 @@ TEST(WfProjectDrive, model_brief_includes_related_lessons) {
   EXPECT_EQ(brief.find("洋务运动"), std::string::npos) << brief;
   // 模型选 weekly + reason 引用 [lesson 1]（审计锚点）
   EXPECT_NE(d["reason"].get<std::string>().find("[lesson 1]"), std::string::npos);
+}
+
+// ---- 任务依赖图调度（arch 27 第三刀）----
+
+// 依赖门槛：weekly 文件序在前，但 deps:[monthly] 未完成 → 规则档不选它，选就绪的 monthly
+TEST(WfProjectDrive, rule_dependency_gates_earlier_task) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("weekly", "周报", Json::array({"monthly"})),
+                                    probe_task("monthly", "月报", Json::array())}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "monthly");     // 挡掉 weekly，选依赖已就绪的 monthly
+  EXPECT_EQ(d["ready"], 1L);
+  EXPECT_EQ(d["blocked"], false);
+  EXPECT_FALSE(d["reason"].get<std::string>().empty());
+}
+
+// 解锁：dep 完成后 weekly 就绪 → 下次 drive 选它
+TEST(WfProjectDrive, rule_dependency_unlocks_once_dep_done) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("weekly", "周报", Json::array({"monthly"})),
+                                    probe_task("monthly", "月报", Json::array())}));
+  fx.seed_progress(Json{{"monthly", "done"}});
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "weekly");      // monthly 已 done → weekly 依赖满足
+  EXPECT_EQ(d["done"], false);
+}
+
+// 环（A↔B 互依、均未完成）→ 依赖未就绪阻塞停机（不静默死循环）
+TEST(WfProjectDrive, rule_stops_blocked_on_cycle) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("a", "A", Json::array({"b"})),
+                                    probe_task("b", "B", Json::array({"a"}))}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_TRUE(d["next_task"].is_null());
+  EXPECT_EQ(d["done"], false);              // 非"全部完成"停机
+  EXPECT_EQ(d["blocked"], true);            // 依赖阻塞停机
+  EXPECT_NE(d["reason"].get<std::string>().find("依赖未就绪"), std::string::npos) << d["reason"];
+}
+
+// 缺失依赖（deps 指向不存在的任务）→ fail-closed 阻塞停机
+TEST(WfProjectDrive, rule_stops_blocked_on_missing_dep) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("weekly", "周报", Json::array({"ghost"}))}));
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        CompileOptions{});
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_TRUE(d["next_task"].is_null());
+  EXPECT_EQ(d["blocked"], true);
+}
+
+// 模型选了个依赖未就绪的任务 → 拒绝并回落规则档（就绪候选）
+TEST(WfProjectDrive, model_rejects_dep_not_ready_falls_back) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array({probe_task("weekly", "周报", Json::array({"monthly"})),
+                                    probe_task("monthly", "月报", Json::array())}));
+  ScriptedDrive mdl;
+  mdl.replies.push_back(message::ai_message(
+      R"({"task":"weekly","done":false,"reason":"想先做周报"})"));  // 依赖 monthly 未 done
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire_parsed(drive_only_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_EQ(d["next_task"], "monthly");     // 规则档兜底选就绪任务
+  EXPECT_NE(d["reason"].get<std::string>().find("依赖未就绪"), std::string::npos) << d["reason"];
+}
+
+// 集成：依赖链任务经 drive 循环全部按序完成（monthly → weekly → review）
+TEST(WfProjectDrive, loop_runs_tasks_in_dependency_order) {
+  DriveFixture fx;
+  fx.set_project_tasks(Json::array(
+      {probe_task("monthly", "月报", Json::array()),
+       probe_task("weekly", "周报", Json::array({"monthly"})),
+       probe_task("review", "复盘", Json::array({"monthly", "weekly"}))}));
+  for (std::string const& tid : {"weekly", "monthly", "review"}) fx.mark_product(tid);
+  CompileOptions copts;
+  copts.subworkflow_loader = [](std::string const& spec) -> std::optional<Json> {
+    if (spec == "wf_drive_child") return Json::parse(child_json());
+    return std::nullopt;
+  };
+  auto st = fire_parsed(drive_loop_ir(),
+                        Json{{"workspace", fx.ws.string()}, {"project", "monthly_ops"}},
+                        copts);
+  ASSERT_TRUE(st);
+  EXPECT_EQ(fx.progress()["monthly"], "done");
+  EXPECT_EQ(fx.progress()["weekly"], "done");
+  EXPECT_EQ(fx.progress()["review"], "done");
+  Json const& d = (*st)["results"]["drive"];
+  EXPECT_TRUE(d["done"] == true);
+  EXPECT_TRUE(d["next_task"].is_null());
 }
