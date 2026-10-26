@@ -611,3 +611,94 @@ TEST(WfLongdoc, retrieve_vector_disabled_without_embedder) {
   EXPECT_EQ(res["vector"], false);
   EXPECT_EQ(res["hits"].size(), 0u);
 }
+
+// ================= 人物关系 / 故事线索（longdoc_relation）=================
+
+namespace {
+Json relation_ir() {
+  return Json::parse(R"json({"id":"w","nodes":[{"id":"rel","kind":"longdoc_relation",
+    "longdoc_index":"@config.longdoc_index","longdoc_query":"@config.longdoc_rel_query",
+    "next":"_turn_end"}]})json");
+}
+// 三份带 relations/thread 的模型回复（复用 ScriptedLongdoc）。
+void push_rel_replies(ScriptedLongdoc& mdl) {
+  mdl.replies.push_back(message::ai_message(
+      R"({"blurb":"父女入川","keys":["李宁","李英琼"],"relations":[{"a":"李宁","b":"李英琼","rel":"父女"},{"a":"李宁","b":"周淳","rel":"故交"}],"thread":"父女入川遇故交"})"));
+  mdl.replies.push_back(message::ai_message(
+      R"({"blurb":"周淳结怨","keys":["周淳","毛太"],"relations":[{"a":"李宁","b":"周淳","rel":"故交"},{"a":"周淳","b":"毛太","rel":"仇怨"}],"thread":"周淳与毛太结怨"})"));
+  mdl.replies.push_back(message::ai_message(
+      R"({"blurb":"毛太师徒","keys":["毛太","邓明"],"relations":[{"a":"毛太","b":"邓明","rel":"师徒"}],"thread":"毛太师徒出场"})"));
+}
+}  // namespace
+
+// 模型档 ingest 产 relations/thread；rel_net 按 a-b 排序键去重并记引用块。
+TEST(WfLongdoc, ingest_extracts_relations_and_thread) {
+  LongdocFixture fx;
+  ScriptedLongdoc mdl;
+  push_rel_replies(mdl);
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire(ingest_ir(), Json{{"longdoc_root", fx.corpus.string()},
+                                   {"longdoc_index", fx.index_path().string()}}, copts);
+  ASSERT_TRUE(st.state) << st.error;
+  Json const idx = fx.read_index();
+  ASSERT_EQ(idx["units"].size(), 3u);
+  EXPECT_EQ(idx["units"][0]["thread"], "父女入川遇故交");
+  ASSERT_EQ(idx["units"][0]["relations"].size(), 2u);
+  // 聚合：李宁|周淳 去重为一条、两块引用
+  bool found = false;
+  for (auto const& r : idx["rel_net"])
+    if (r["a"] == "李宁" && r["b"] == "周淳") {
+      found = true;
+      EXPECT_EQ(r["rel"], "故交");
+      EXPECT_EQ(r["blocks"], Json::array({"a.txt", "b.txt"}));
+    }
+  EXPECT_TRUE(found) << "rel_net 应含去重后的 李宁|周淳";
+  auto const& th = idx["threads"];
+  ASSERT_EQ(th.size(), 3u);
+  EXPECT_EQ(th[0]["id"], "a.txt");
+}
+
+// relation 节点：把 关系网+线索+问题 写进 system_context，供 model 作答。
+TEST(WfLongdoc, relation_node_builds_context_from_net) {
+  LongdocFixture fx;
+  ScriptedLongdoc mdl;
+  push_rel_replies(mdl);
+  ComponentRegistry comps;
+  comps.models["m"] = &mdl;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire(ingest_ir(), Json{{"longdoc_root", fx.corpus.string()},
+                                   {"longdoc_index", fx.index_path().string()}}, copts);
+  ASSERT_TRUE(st.state) << st.error;
+  auto r = fire(relation_ir(),
+                Json{{"longdoc_index", fx.index_path().string()},
+                     {"longdoc_rel_query", "李宁与周淳什么关系？"}},
+                copts);
+  ASSERT_TRUE(r.state) << r.error;
+  auto const& sc = (*r.state)["system_context"];
+  ASSERT_TRUE(sc.is_array() && !sc.empty());
+  std::string const text = sc[0]["content"][0].value("text", "");
+  EXPECT_NE(text.find("李宁与周淳什么关系？"), std::string::npos);
+  EXPECT_NE(text.find("【人物关系网】"), std::string::npos);
+  EXPECT_NE(text.find("李宁 — 周淳：故交 [a.txt b.txt]"), std::string::npos);
+  EXPECT_NE(text.find("【故事线索】"), std::string::npos);
+  auto const& res = (*r.state)["results"]["rel"];
+  EXPECT_EQ(res["relations"], 4);   // 李宁|英琼, 李宁|周淳, 毛太|周淳, 毛太|邓明
+  EXPECT_EQ(res["threads"], 3);
+}
+
+// 无关系数据的索引（规则档）→ relation 节点 fail-closed。
+TEST(WfLongdoc, relation_node_missing_data_fails_closed) {
+  LongdocFixture fx;
+  auto st = fire(ingest_ir(), Json{{"longdoc_root", fx.corpus.string()},
+                                   {"longdoc_index", fx.index_path().string()}}, CompileOptions{});
+  ASSERT_TRUE(st.state) << st.error;
+  EXPECT_FALSE(fx.read_index().contains("rel_net"));
+  auto r = fire(relation_ir(), Json{{"longdoc_index", fx.index_path().string()},
+                                    {"longdoc_rel_query", "李宁与周淳？"}}, CompileOptions{});
+  EXPECT_FALSE(r.state);
+  EXPECT_NE(r.error.find("索引无人物关系"), std::string::npos);
+}

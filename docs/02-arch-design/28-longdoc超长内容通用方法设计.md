@@ -66,6 +66,11 @@ retrieve(@config.query) → model(main, system_prompt=「依据【片段】回�
   retrieve 运行时 hybrid 打分 `@config.longdoc_vector_weight`（缺省 0.5）混合 向量余弦 +
   IDF（归一）；无关键词命中但向量有 → 纯向量（治"第一回讲了什么"这类泛问）；无 embedding
   → 纯关键词（向后兼容）。
+- **人物关系/故事线索已落地（2026-10-26，problems/61）**：ingest 模型档提示词一次调用追加
+  `relations`/`thread` 抽取 → units 带 relations/thread + 索引预聚合 `rel_net`（a-b 排序键去重、
+  引用块；展示保留模型原始 a/b 序）+ `threads`；新增 `longdoc_relation` 节点把「问题+关系网+线索」
+  写进 system_context（同 retrieve，节点不自己调模型）→ model 作答；`longdoc_relask` 模板。
+  真机实证：DeepSeek 6 块抽 39 条关系网，「李宁与周淳」答故交、「主要人物关系网/主线」综合作答良好。
 - **命中子集升级 merge** —— 押后。
 - 骨架提取的模型档**真机质量已验证（2026-10-26，problems/60）**：DeepSeek-flash 真机当骨架器，
   蜀山前 6 块 6/6 出实质 blurb（故事摘要）+ 丰富专名 keys（周淳/李宁/李英琼/毛太/醉道人/白云大师

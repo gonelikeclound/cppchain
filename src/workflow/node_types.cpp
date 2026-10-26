@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <print>
+#include <set>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -4436,8 +4437,10 @@ void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
           message::Message const sys = message::system_message(
               skel_sys.empty()
                   ? "你是超长文档的结构提取器。给这段文本产出结构骨架：一句话 blurb（≤60字，概括本段讲什么）、"
-                    "keys（这段出现的专名/主题，字符串数组）。只输出 JSON：{\"blurb\":\"…\",\"keys\":[\"…\"]}，"
-                    "不要输出别的。"
+                    "keys（这段出现的专名/主题，字符串数组）、人物关系 relations（数组 [{a,b,rel}]，"
+                    "a/b 为人物名，rel 为关系类型如 父女/师徒/故交/仇怨/同门/主仆）、"
+                    "本段故事线索 thread（一句话主线进展）。"
+                    "只输出 JSON：{\"blurb\":\"…\",\"keys\":[…],\"relations\":[…],\"thread\":\"…\"}，不要输出别的。"
                   : skel_sys);
           message::Message const usr =
               message::human_message("【文本片段】\n" + utf8_cut(ctext, 6000));
@@ -4455,13 +4458,24 @@ void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
         if (keys.empty()) keys = longdoc_rule_keys(ctext);
         std::sort(keys.begin(), keys.end());
         keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        // 人物关系/故事线索（模型档才有；规则档缺省空 → 关系节点会 fail-closed 提示重建）
+        std::string thread = sk.value("thread", std::string{});
+        Json rels = Json::array();
+        if (sk.contains("relations") && sk["relations"].is_array())
+          for (Json const& r : sk["relations"])
+            if (r.is_object() && r.contains("a") && r.contains("b") &&
+                !r["a"].get<std::string>().empty() && !r["b"].get<std::string>().empty())
+              rels.push_back(r);
         std::string const id = (chunks->size() == 1)
                                    ? fname
                                    : fname + "!" + std::to_string(ci + 1);
-        units.push_back(Json{{"id", id}, {"title", c.title},
-                             {"blurb", blurb}, {"keys", keys},
-                             {"path", fname}, {"offset", static_cast<long long>(c.byte_off)},
-                             {"bytes", static_cast<long long>(c.byte_len)}});
+        Json unit = Json{{"id", id}, {"title", c.title},
+                         {"blurb", blurb}, {"keys", keys},
+                         {"path", fname}, {"offset", static_cast<long long>(c.byte_off)},
+                         {"bytes", static_cast<long long>(c.byte_len)}};
+        if (!thread.empty()) unit["thread"] = thread;
+        if (!rels.empty()) unit["relations"] = rels;
+        units.push_back(std::move(unit));
         for (std::string const& k : keys) {
           if (!keys_map.contains(k)) keys_map[k] = Json::array();
           keys_map[k].push_back(unit_idx);
@@ -4492,10 +4506,43 @@ void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
         sink_p->log_node(nc.node_name, "warn",
                          "longdoc_ingest: 向量嵌入失败，索引无 emb（退关键词检索）");
     }
-    Json const index =
-        Json{{"meta", Json{{"root", r.string()}, {"unit_of", strategy}, {"built", today_str()},
-                           {"embed", embed_name}}},
-             {"units", std::move(units)}, {"keys", std::move(keys_map)}};
+    // 人物关系/故事线索聚合：a-b 排序键去重 → rel_net（带引用块）；threads 线索列表。
+    struct RelAgg { std::string a, b, rel; std::set<std::string> blocks; };
+    std::map<std::string, RelAgg> relmap;
+    Json threads = Json::array();
+    bool any_rel = false;
+    for (Json const& u : units) {
+      std::string const id = u.value("id", std::string{});
+      if (u.contains("thread") && u["thread"].is_string() && !u["thread"].get<std::string>().empty())
+        threads.push_back(Json{{"id", id}, {"thread", u["thread"].get<std::string>()}});
+      if (!u.contains("relations") || !u["relations"].is_array()) continue;
+      for (Json const& r : u["relations"]) {
+        if (!r.is_object() || !r.contains("a") || !r.contains("b")) continue;
+        std::string const orig_a = r.value("a", ""), orig_b = r.value("b", "");
+        if (orig_a.empty() || orig_b.empty()) continue;
+        // 去重键按字节排序（a|b 无序同构），展示保留模型给的原始 a/b 顺序。
+        std::string const key_a = orig_a < orig_b ? orig_a : orig_b;
+        std::string const key_b = orig_a < orig_b ? orig_b : orig_a;
+        std::string const key = key_a + "|" + key_b;
+        if (!relmap.count(key)) relmap[key] = RelAgg{orig_a, orig_b, r.value("rel", ""), {}};
+        relmap[key].blocks.insert(id);
+        any_rel = true;
+      }
+    }
+    Json rel_net = Json::array();
+    if (any_rel)
+      for (auto const& [key, ra] : relmap) {
+        Json blocks = Json::array();
+        for (std::string const& b : ra.blocks) blocks.push_back(b);
+        rel_net.push_back(Json{{"a", ra.a}, {"b", ra.b}, {"rel", ra.rel}, {"blocks", std::move(blocks)}});
+      }
+    Json const index = [&] {
+      Json idx = Json{{"meta", Json{{"root", r.string()}, {"unit_of", strategy}, {"built", today_str()},
+                                    {"embed", embed_name}}},
+                      {"units", std::move(units)}, {"keys", std::move(keys_map)}};
+      if (any_rel) { idx["rel_net"] = std::move(rel_net); idx["threads"] = std::move(threads); }
+      return idx;
+    }();
     write_json_file(std::filesystem::path(index_path), index);
     if (sink_p)
       sink_p->log_node(nc.node_name, "info",
@@ -4639,6 +4686,85 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
     if (sink_p)
       sink_p->log_node(nc.node_name, "info",
                        "longdoc_retrieve: " + query + " → " + std::to_string(take) + " hits");
+    return Command::with_update(std::move(update));
+  });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
+// ---- longdoc_relation（人物关系/故事线索，全局综合）----
+// 读索引聚合 rel_net（a-b 去重关系网，带引用块）+ threads（线索）→ 连同问题写进
+// system_context，由 workflow 里的 model 节点作答（同 retrieve：节点不自己调模型）。
+void v_longdoc_relation(NodeIR const& n, NodeType::ValidateContext const&,
+                        NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN27", "longdoc_relation 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_longdoc_relation(NodeIR const& n, NodeType::CompileContext& ctx) {
+  std::string const node_id = n.id;
+  std::string const index_spec = n.longdoc_index;
+  std::string const query_spec = n.longdoc_query;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(n.id, [node_id, index_spec, query_spec, sink_p](Json const& state,
+                                                                    NodeContext& nc) {
+    std::string const index_path = resolve_text_parameter(
+        index_spec.empty() ? "@config.longdoc_index" : index_spec, state);
+    if (index_path.empty() || index_path == "null")
+      throw tool::ToolException("longdoc_relation 节点 '" + node_id +
+                                "' 缺 longdoc_index（索引路径）");
+    auto idx = read_json_file(std::filesystem::path(index_path));
+    if (!idx || !idx->is_object())
+      throw tool::ToolException("longdoc_relation 节点 '" + node_id + "' 索引缺失/损坏: " +
+                                index_path);
+    Json const& index = *idx;
+    std::string const query = resolve_text_parameter(
+        query_spec.empty() ? "@config.longdoc_rel_query" : query_spec, state);
+    Json const rel_net = index.value("rel_net", Json::array());
+    Json const threads = index.value("threads", Json::array());
+    if (rel_net.empty() && threads.empty())
+      throw tool::ToolException("longdoc_relation 节点 '" + node_id +
+                                "' 索引无人物关系/线索数据（需模型档重建：ingest 带 model）");
+    long const limit = longdoc_int_param("@config.longdoc_rel_limit", state, 100);
+
+    std::string net_text;
+    {
+      long shown = 0;
+      for (Json const& r : rel_net) {
+        if (shown >= limit) break;
+        std::string blocks;
+        for (Json const& b : r.value("blocks", Json::array())) {
+          if (!blocks.empty()) blocks += " ";
+          blocks += b.get<std::string>();
+        }
+        net_text += "· " + r.value("a", "") + " — " + r.value("b", "") + "：" +
+                    r.value("rel", "") + (blocks.empty() ? "" : " [" + blocks + "]") + "\n";
+        ++shown;
+      }
+      if (shown < static_cast<long>(rel_net.size()))
+        net_text += "（余 " + std::to_string(rel_net.size() - shown) +
+                    " 条未列出，可调大 longdoc_rel_limit）\n";
+    }
+    std::string thread_text;
+    for (Json const& t : threads)
+      thread_text += "· [" + t.value("id", "") + "] " + t.value("thread", "") + "\n";
+
+    Json sys = Json::array();
+    sys.push_back(message::system_message(
+        "【用户问题】" + query +
+        "\n【人物关系网】（抽取聚合，引用 [块名]；不知道就直说，不要编）\n" + net_text +
+        "\n【故事线索】\n" + thread_text));
+    Json update;
+    update[kSystemContextKey] = std::move(sys);
+    update[kResultsKey] =
+        Json{{node_id, Json{{"action", "relation"},
+                            {"query", query},
+                            {"relations", static_cast<long>(rel_net.size())},
+                            {"threads", static_cast<long>(threads.size())}}}};
+    if (sink_p)
+      sink_p->log_node(nc.node_name, "info",
+                       "longdoc_relation: " + query + " → rel_net " +
+                           std::to_string(rel_net.size()) + " / threads " +
+                           std::to_string(threads.size()));
     return Command::with_update(std::move(update));
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
@@ -5170,6 +5296,23 @@ std::vector<NodeType> const& builtin_node_types() {
                                     (n.longdoc_query.empty() ? "" : " q=" + n.longdoc_query) +
                                     " → " + n.next; },
        v_longdoc_retrieve, c_longdoc_retrieve, e_next, t_none},
+      {NodeKind::LongdocRelation, "longdoc_relation",
+       [](Json const& nn) { return kind_is(nn, "longdoc_relation"); },
+       [](NodeIR& out, Json const& node) {
+         get_str(out, node, "longdoc_index", out.longdoc_index);
+         get_str(out, node, "longdoc_query", out.longdoc_query);
+         get_str(out, node, "next", out.next);
+       },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "longdoc_relation";
+         if (!n.longdoc_index.empty()) node["longdoc_index"] = n.longdoc_index;
+         if (!n.longdoc_query.empty()) node["longdoc_query"] = n.longdoc_query;
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("longdoc_relation") +
+                                    (n.longdoc_query.empty() ? "" : " q=" + n.longdoc_query) +
+                                    " → " + n.next; },
+       v_longdoc_relation, c_longdoc_relation, e_next, t_none},
       // ---------------- subworkflow（wfr-㊿ proxyNode，arch 24）：运行期调用子 workflow ----------------
       {NodeKind::SubWorkflow, "subworkflow",
        [](Json const& n) { return kind_is(n, "subworkflow"); },

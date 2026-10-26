@@ -1,0 +1,11 @@
+{
+  "id": "longdoc_relask",
+  "nodes": [
+    { "id": "rel", "kind": "longdoc_relation",
+      "longdoc_index": "@config.longdoc_index", "longdoc_query": "@config.longdoc_rel_query",
+      "next": "answer" },
+    { "id": "answer", "kind": "model", "model": "main",
+      "system_prompt": "你是超长文档的人物关系/故事线索分析助手。依据【人物关系网】与【故事线索】回答：引用 [块名] 作为依据；不知道或材料没有的就直说，不要编造。",
+      "next": "_turn_end" }
+  ]
+}

@@ -117,6 +117,8 @@ enum class NodeKind {
                    //   规则档）→ 落 `longdoc.index.json`（units + keys 倒排）。与语料无关（见 arch 28）。
   LongdocRetrieve, // 按需检索：query 分词 → keys 倒排命中 top-k 单元 → 加载命中单元原文切片（预算
                    //   截断）→ 写 state[system_context]（供 model 自动带上）+ results.hits。
+  LongdocRelation, // 人物关系/故事线索（全局综合）：读索引聚合 rel_net/threads → 写
+                   //   state[system_context]（【人物关系网】+【故事线索】+问题）→ model 作答。
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供
