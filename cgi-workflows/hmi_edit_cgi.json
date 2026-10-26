@@ -2,33 +2,89 @@
   "id": "hmi_edit_cgi",
   "description": "hmi-editor AI 助手主 workflow（⑤ context 升级版）：context（注入环境 + 加载 hmi-skill）→ load_history → summarize → loop 对话[model/route/run_tools]。工具集 chat=get_weather/web_search/file_read/list_dir/file_write/read_skill/wiki_search；workspace=工程目录。",
   "nodes": [
-    { "id": "ctx", "kind": "context",
-      "env": { "工程": "@config.env_project", "当前页面": "@config.env_file", "视口": "@config.env_viewport" },
-      "system": [ { "file": "@config.skill_dir/hmi-skill.md" } ],
-      "next": "recall" },
-    { "id": "recall", "kind": "load_history",
-      "path": "@config.workspace", "session": "@config.session",
-      "next": "compress" },
-    { "id": "compress", "kind": "summarize", "model": "main",
+    {
+      "id": "ctx",
+      "kind": "context",
+      "env": {
+        "工程": "@config.env_project",
+        "当前页面": "@config.env_file",
+        "视口": "@config.env_viewport",
+        "编译自检脚本": "@config.comp_root/tools/build_project.sh",
+        "工程名": "@config.project_name"
+      },
+      "system": [
+        {
+          "file": "@config.skill_dir/hmi-skill.md"
+        }
+      ],
+      "next": "recall"
+    },
+    {
+      "id": "recall",
+      "kind": "load_history",
+      "path": "@config.workspace",
+      "session": "@config.session",
+      "next": "compress"
+    },
+    {
+      "id": "compress",
+      "kind": "summarize",
+      "model": "main",
       "when": "@config.compress_when",
       "max_msgs": "@config.compress_max_msgs",
       "keep_last": "@config.compress_keep_last",
       "style": "concise",
       "on_fail": "skip",
-      "next": "loop" },
-    { "id": "loop", "kind": "loop", "max": 16, "next": "_turn_end",
+      "next": "loop"
+    },
+    {
+      "id": "loop",
+      "kind": "loop",
+      "max": 16,
+      "next": "_turn_end",
       "body": [
-        { "id": "think", "kind": "model", "model": "main", "tools": "chat",
-          "system_prompt": "你是 hmi-editor 的 AI 助手，负责维护当前工作目录下的 HMI 工程。你会收到一条注入的「【skill: hmi-skill.md】」系统消息，那是 hmi.xml 的格式与约束依据，必须遵守（文件需 <page> 置顶、组件 meta 必有 default 主题等）。「【当前环境】」里的「视口」就是当前设计窗口（${W}/${H} 即它），所有布局以它为基准、决不超出窗口；hmi-skill 里的『画布默认 480×480』只是示例，不是当前窗口，别硬编码 480。**做界面/加控件/仪表/图表前必须先查组件库**：用 wiki_search 或 read_skill 查「hmi-components」目录，凡组件库有的（text_button / slider / progress_bar / ammeter / multichart / card 等 27 个）一律**先 import（url 用工程内 `../components/xxx.hmi.xml`，name=别名）再用该别名作元素标签实例化**（如 `<slider …/>`，**不是 `<comp>`**），禁止从零用 rect/text 手造已有组件；只有组件库没有的全新控件才手写基础元素。开工先读工程结构：list_dir / file_read 看清 project.conf、PAGES 和既有 pages 的写法再动手；要写规范/查经验，用 read_skill / wiki_search；落盘一律 file_write。事件动作只写 var 不写 prop、多语句用分号，颜色尽量走 theme key，数组只支持数值数组。改完简要说明改动，并提醒用户点编译验证（编译由 hmi-editor 完成）。回答简短直接，数值必须与工具结果一致，不要编造。",
-          "next": "echo_think" },
-        { "id": "echo_think", "kind": "echo",
-          "text": "💭 $think.result.thinking", "next": "route" },
-        { "id": "route", "kind": "route", "on": "last_ai_outcome",
-          "cases": { "tool_calls": "act", "invalid_tool_calls": "_fail", "text": "_turn_end" },
-          "default": "_fail" },
-        { "id": "act", "kind": "run_tools", "next": "echo_tool" },
-        { "id": "echo_tool", "kind": "echo",
-          "text": "🔧 $act.result.summary", "next": "_continue" }
-      ] }
+        {
+          "id": "think",
+          "kind": "model",
+          "model": "main",
+          "tools": "chat_bash",
+          "system_prompt": "你是 hmi-editor 的 AI 助手，负责维护当前工作目录下的 HMI 工程。你会收到一条注入的「【skill: hmi-skill.md】」系统消息，那是 hmi.xml 的格式与约束依据，必须遵守（文件需 <page> 置顶、组件 meta 必有 default 主题等）。「【当前环境】」里的「视口」就是当前设计窗口（${W}/${H} 即它），所有布局以它为基准、决不超出窗口；hmi-skill 里的『画布默认 480×480』只是示例，不是当前窗口，别硬编码 480。**做界面/加控件/仪表/图表前必须先查组件库**：用 wiki_search 或 read_skill 查「hmi-components」目录，凡组件库有的（text_button / slider / progress_bar / ammeter / multichart / card 等 27 个）一律**先 import（url 写 `components/xxx.hmi.xml`，不带 `../`，按查找路径搜索；name=别名）再用该别名作元素标签实例化**（如 `<slider …/>`，**不是 `<comp>`**），禁止从零用 rect/text 手造已有组件；只有组件库没有的全新控件才手写基础元素。开工先读工程结构：list_dir / file_read 看清 project.conf、PAGES 和既有 pages 的写法再动手；要写规范/查经验，用 read_skill / wiki_search；落盘一律 file_write。事件动作只写 var 不写 prop、多语句用分号，颜色尽量走 theme key，数组只支持数值数组。改完简要说明改动，并提醒用户点编译验证（编译由 hmi-editor 完成）。**铁律（固定必守，不靠检索）**：① 数值属性要么纯数字、要么**整值** `${表达式}`，禁止 `${W}-48` 这类拼接（E5004）；② 实例标签只能写组件的 `<prop>`，组件 `<var>` 是内部态不能传（E4007）；③ 组件实例化 = import 的 `name` 作标签（`<slider …/>`），**不是 `<comp>`**；④ import url 写 `components/xxx.hmi.xml`（不带 `../`，走查找路径）；⑤ 写完/改完页面**必须用 bash 工具执行编译自检**：`bash <【当前环境】的「编译自检脚本」> <「工程名」>`（脚本路径/工程名已注入上下文；输出回显即编译日志），有报错按日志修到通过再回答；bash 被拒就如实说明。回答简短直接，数值必须与工具结果一致，不要编造。",
+          "next": "echo_think"
+        },
+        {
+          "id": "echo_think",
+          "kind": "echo",
+          "text": "💭 $think.result.thinking",
+          "next": "route"
+        },
+        {
+          "id": "route",
+          "kind": "route",
+          "on": "last_ai_outcome",
+          "cases": {
+            "tool_calls": "apv",
+            "invalid_tool_calls": "_fail",
+            "text": "_turn_end"
+          },
+          "default": "_fail"
+        },
+        {
+          "id": "apv",
+          "kind": "approve_tools",
+          "next": "act"
+        },
+        {
+          "id": "act",
+          "kind": "run_tools",
+          "next": "echo_tool"
+        },
+        {
+          "id": "echo_tool",
+          "kind": "echo",
+          "text": "🔧 $act.result.summary",
+          "next": "_continue"
+        }
+      ]
+    }
   ]
 }
