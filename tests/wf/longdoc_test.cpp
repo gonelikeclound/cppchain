@@ -372,3 +372,150 @@ TEST(WfLongdoc, shushan_rule_ingest_42_units) {
   std::error_code ec;
   std::filesystem::remove(idx, ec);
 }
+// ================= 分块策略进阶（arch 28 下一刀）：固定窗口 / 章节 =================
+
+namespace {
+struct ChunkCorpus {
+  std::filesystem::path dir;
+  explicit ChunkCorpus(std::string tag) {
+    dir = std::filesystem::temp_directory_path() / ("wf_longdoc_chunk_" + tag + "_" +
+                                                    std::to_string(static_cast<unsigned>(std::random_device{}())));
+    std::filesystem::create_directories(dir);
+  }
+  ~ChunkCorpus() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+  }
+  void write(std::string const& name, std::string const& text) const {
+    std::ofstream out(dir / name);
+    out << text;
+  }
+  std::filesystem::path index_path() const { return dir / "longdoc.index.json"; }
+  Json read_index() const {
+    std::ifstream in(index_path());
+    Json j;
+    in >> j;
+    return j;
+  }
+};
+
+// 固定窗口：~300 词 → 多块；retrieve 只按 offset/length 读命中的那一块（不是整文件）。
+TEST(WfLongdoc, fixed_window_chunks_and_range_retrieve) {
+  ChunkCorpus c("fixed");
+  std::string big;
+  for (int i = 0; i < 10; ++i) {
+    big += "wordA" + std::to_string(i) + " wordB" + std::to_string(i) + " common word\n";
+  }  // 10 行 ≈ 300 字符，逐行词不同
+  c.write("big.txt", big);
+  Json const cfg = Json{{"longdoc_root", c.dir.string()},
+                        {"longdoc_index", c.index_path().string()},
+                        {"longdoc_unit_of", "fixed"},
+                        {"longdoc_chunk_chars", 120},
+                        {"longdoc_chunk_overlap", 20},
+                        {"query", "wordA7"},
+                        {"longdoc_topk", 2},
+                        {"longdoc_slice_chars", 2000}};
+  auto r = fire(ingest_ir(), cfg, CompileOptions{});
+  ASSERT_TRUE(r.state) << r.error;
+  Json const idx = c.read_index();  // 自己读
+  EXPECT_EQ(idx["meta"]["unit_of"], "fixed");
+  auto const& units = idx["units"];
+  ASSERT_GT(units.size(), 1u);  // 120 字符窗 / step100 → 至少 3 块
+  // 偏移单调、首 0、末块终点 == 文件字节
+  long long prev_off = -1;
+  for (auto const& u : units) {
+    long long const off = u["offset"].get<long long>();
+    EXPECT_GT(off, prev_off);
+    prev_off = off;
+    EXPECT_TRUE(u.contains("bytes") && u["bytes"].get<long long>() > 0);
+  }
+  EXPECT_EQ(units[0]["offset"].get<long long>(), 0LL);
+
+  // retrieve：query wordA7 → 命中含 wordA7 的那块，且只读该块范围（文本不含别的窗的词）
+  auto q = fire(retrieve_ir(), cfg, CompileOptions{});
+  ASSERT_TRUE(q.state) << q.error;
+  Json const& hits = (*q.state)["results"]["find"]["hits"];
+  ASSERT_GT(hits.size(), 0u);
+  std::string const text = hits[0]["text"].get<std::string>();
+  EXPECT_NE(text.find("wordA7"), std::string::npos);
+  EXPECT_EQ(text.find("wordA9"), std::string::npos);  // 不在命中块的窗，没被读进来
+  // 命中块 offset 与索引里含 wordA7 的那块一致（只读该块范围）
+  bool offset_aligned = false;
+  for (auto const& u : units)
+    if (u["offset"].get<long long>() == hits[0]["offset"].get<long long>()) offset_aligned = true;
+  EXPECT_TRUE(offset_aligned) << "hits.offset 应对应索引中某一块";
+}
+
+// 章节：按 第X回/章 切块，标题=标题行，retrieve 只命中目标块。
+TEST(WfLongdoc, chapter_headings_split_and_title) {
+  ChunkCorpus c("chapter");
+  c.write("novel.txt",
+          "第1回 Alpha Story\nalpha beta content here.\n\n第2回 Beta Story\n"
+          "gamma delta content here.\n\n第3回 Gamma Story\nepsilon zeta content here.\n");
+  Json const cfg = Json{{"longdoc_root", c.dir.string()},
+                        {"longdoc_index", c.index_path().string()},
+                        {"longdoc_unit_of", "chapter"},
+                        {"query", "gamma"},
+                        {"longdoc_topk", 1},
+                        {"longdoc_slice_chars", 2000}};
+  auto r = fire(ingest_ir(), cfg, CompileOptions{});
+  ASSERT_TRUE(r.state) << r.error;
+  Json const idx = c.read_index();
+  EXPECT_EQ(idx["meta"]["unit_of"], "chapter");
+  auto const& units = idx["units"];
+  ASSERT_EQ(units.size(), 3u);
+  EXPECT_EQ(units[0]["title"], "第1回 Alpha Story");
+  EXPECT_EQ(units[1]["title"], "第2回 Beta Story");
+  EXPECT_EQ(units[2]["title"], "第3回 Gamma Story");
+  EXPECT_EQ(units[1]["id"], "novel.txt!2");
+
+  auto q = fire(retrieve_ir(), cfg, CompileOptions{});
+  ASSERT_TRUE(q.state) << q.error;
+  Json const& hits = (*q.state)["results"]["find"]["hits"];
+  ASSERT_EQ(hits.size(), 1u);
+  EXPECT_EQ(hits[0]["id"], "novel.txt!2");        // gamma 在第二回
+  EXPECT_NE(hits[0]["text"].get<std::string>().find("gamma"), std::string::npos);
+  EXPECT_EQ(hits[0]["text"].get<std::string>().find("alpha"), std::string::npos);  // 只读第二回
+}
+
+// 章节无标题 → 退化整文件一个块（fail-open，不丢数据）。
+TEST(WfLongdoc, chapter_no_heading_falls_back_whole) {
+  ChunkCorpus c("nohdr");
+  c.write("plain.txt", "hello world no headings here\nsecond line\n");
+  Json const cfg = Json{{"longdoc_root", c.dir.string()},
+                        {"longdoc_index", c.index_path().string()},
+                        {"longdoc_unit_of", "chapter"}};
+  auto r = fire(ingest_ir(), cfg, CompileOptions{});
+  ASSERT_TRUE(r.state) << r.error;
+  Json const idx = c.read_index();
+  ASSERT_EQ(idx["units"].size(), 1u);
+  EXPECT_EQ(idx["units"][0]["id"], "plain.txt");
+  EXPECT_EQ(idx["units"][0]["offset"], 0);
+}
+
+// 固定窗口边界 UTF-8 安全：分块起点绝不能落在多字节字符中间。
+TEST(WfLongdoc, fixed_window_boundaries_utf8_safe) {
+  ChunkCorpus c("utf8");
+  std::string zh;
+  for (int i = 0; i < 60; ++i) zh += "蜀山剑侠传李英琼";  // 60×3字，全中文
+  c.write("zh.txt", zh);
+  Json const cfg = Json{{"longdoc_root", c.dir.string()},
+                        {"longdoc_index", c.index_path().string()},
+                        {"longdoc_unit_of", "fixed"},
+                        {"longdoc_chunk_chars", 7},   // 7 字窗，必然横跨 3 字节中文字
+                        {"longdoc_chunk_overlap", 1}};
+  auto r = fire(ingest_ir(), cfg, CompileOptions{});
+  ASSERT_TRUE(r.state) << r.error;
+  // 读原文件字节
+  std::ifstream in(c.dir / "zh.txt", std::ios::binary);
+  std::string const bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  Json const idx = c.read_index();
+  for (auto const& u : idx["units"]) {
+    std::size_t const off = static_cast<std::size_t>(u["offset"].get<long long>());
+    ASSERT_LT(off, bytes.size());
+    unsigned char const lead = static_cast<unsigned char>(bytes[off]);
+    EXPECT_FALSE(lead >= 0x80 && lead <= 0xBF)
+        << "分块起点落在多字节字符中间（续字节），offset=" << off;
+  }
+}
+}  // namespace

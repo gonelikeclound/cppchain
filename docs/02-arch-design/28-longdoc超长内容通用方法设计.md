@@ -58,7 +58,11 @@ retrieve(@config.query) → model(main, system_prompt=「依据【片段】回�
 
 ## 四、边界 / 押后
 
-- 分块策略第一版 = 文件；章节正则 / 固定窗口切块、向量臂（复用个人 Wiki 向量）、命中子集升级 merge —— 押后。
+- 分块策略第一版 = 文件；**章节正则 / 固定窗口已落地（2026-10-26，problems/58）**：ingest 支持
+  `@config.longdoc_unit_of = file | chapter | fixed`（+ `longdoc_chunk_chars` / `longdoc_chunk_overlap`），
+  索引 units 带 `offset`，retrieve 按字节区间读块；旧索引无 offset → 兼容为整文件。
+- **向量臂**（复用个人 Wiki 向量，泛问"第一回讲了什么"这类无专名问题靠 blurb 语义检索）、
+  命中子集升级 merge —— 押后。
 - 骨架提取的模型档真机质量（blurb/keys 准不准）—— 验证后真机试。
 - 检索排序 = 关键词命中 + IDF；BM25/向量 hybrid 复用个人 Wiki 设施可接，押后。
 

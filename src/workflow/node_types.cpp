@@ -4172,15 +4172,15 @@ void c_context(NodeIR const& n, NodeType::CompileContext& ctx) {
 // 索引格式 longdoc.index.json：{meta{root,unit_of,built}, units[{id,title,blurb,keys,path,bytes}],
 //   keys{<键>:[unit 下标]}}。分块策略第一版=文件（目录下每个常规文件=一个单元）。与语料无关。
 
-// 查询/原文分词：空白 + 常见标点分隔；中文无空格连续段整体成一个 token（key 双向子串命中即可）。
+// 查询/原文分词：空白 + ASCII 标点分隔；中文无空格连续段整体成一个 token（key 双向子串命中即可；
+// 中文标点如逗号不是分隔符——多字节字符无法用 char 单字节比较，误写只会是死代码，故不列）。
 std::vector<std::string> longdoc_tokenize(std::string const& s) {
   std::vector<std::string> out;
   std::string cur;
   for (char c : s) {
-    if (std::isspace(static_cast<unsigned char>(c)) || c == '，' || c == '。' || c == '；' ||
-        c == '：' || c == '！' || c == '？' || c == '、' || c == '…' || c == '"' || c == '\'' ||
-        c == '(' || c == ')' || c == '[' || c == ']' || c == ',' || c == '.' || c == '?' ||
-        c == '!' || c == '\n' || c == '\t') {
+    if (std::isspace(static_cast<unsigned char>(c)) || c == '"' || c == '\'' || c == '(' ||
+        c == ')' || c == '[' || c == ']' || c == ',' || c == '.' || c == '?' || c == '!' ||
+        c == '\n' || c == '\t') {
       if (!cur.empty()) out.push_back(cur);
       cur.clear();
     } else {
@@ -4211,6 +4211,128 @@ std::vector<std::string> longdoc_rule_keys(std::string const& text) {
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());
   return out;
+}
+
+// ---- 分块策略（arch 28 下一刀：章节正则 / 固定窗口）----
+// 一个分块 = 原文（相对 root 的字节区间）+ 标题。策略："file"（整文件）/ "chapter"（第X回章）
+// / "fixed"（固定字符窗口，带 overlap）。分块边界保证 UTF-8 安全（不切断多字节字符）。
+
+std::size_t longdoc_seq_len(unsigned char c) {
+  if (c < 0x80) return 1;
+  if ((c & 0xE0) == 0xC0) return 2;
+  if ((c & 0xF0) == 0xE0) return 3;
+  if ((c & 0xF8) == 0xF0) return 4;
+  return 1;  // 非法首字节按 1 处理（不丢数据，宁可多切）
+}
+
+struct LongdocChunk {
+  std::size_t byte_off = 0;
+  std::size_t byte_len = 0;
+  std::string title;
+};
+
+// 每个字符起点的字节偏移（含一个"结尾"哨兵 = text.size()）。
+std::vector<std::size_t> longdoc_char_starts(std::string_view text) {
+  std::vector<std::size_t> starts{0};
+  std::size_t off = 0;
+  while (off < text.size()) {
+    off += longdoc_seq_len(static_cast<unsigned char>(text[off]));
+    starts.push_back(off);
+  }
+  return starts;
+}
+
+bool longdoc_utf8_eq(std::string_view l, std::size_t pos, char const* bytes, std::size_t n) {
+  return l.size() >= pos + n && std::memcmp(l.data() + pos, bytes, n) == 0;
+}
+
+// 行是不是章节标题：以「第」开头（E7 AC AC），其后 ≤8 个字符内出现 回/章/节/卷/部 之一
+//（标题常见「第1回 Alpha Story」「第一百零八回 双女四美」——标记在行首段，不要求行尾）。
+bool longdoc_chapter_heading(std::string_view line) {
+  std::size_t b = 0, e = line.size();
+  while (b < e && (line[b] == ' ' || line[b] == '\t')) ++b;
+  while (e > b && (line[e - 1] == ' ' || line[e - 1] == '\t' || line[e - 1] == '\r')) --e;
+  std::string_view const l = line.substr(b, e - b);
+  if (!longdoc_utf8_eq(l, 0, "\xE7\xAC\xAC", 3)) return false;  // 第
+  static char const* const kMark[5] = {"\xE5\x9B\x9E", "\xE7\xAB\xA0", "\xE8\x8A\x82",
+                                       "\xE5\x8D\xB7", "\xE9\x83\xA8"};  // 回/章/节/卷/部
+  std::size_t pos = 3;
+  int chars = 0;
+  while (pos + 3 <= l.size() && chars <= 8) {
+    for (char const* m : kMark)
+      if (longdoc_utf8_eq(l, pos, m, 3)) return true;
+    std::size_t const n = longdoc_seq_len(static_cast<unsigned char>(l[pos]));
+    pos += n;
+    ++chars;
+  }
+  return false;
+}
+
+// 整文件 = 一个分块（file 策略）。
+std::vector<LongdocChunk> longdoc_chunk_file(std::string_view text, std::string const& fname) {
+  return std::vector<LongdocChunk>{{0, text.size(), fname}};
+}
+
+// 章节策略：按标题行切块；无标题 → 退化为整文件一个块（fail-open，不丢数据）。
+std::vector<LongdocChunk> longdoc_chunk_chapter(std::string_view text, std::string const& fname) {
+  std::vector<LongdocChunk> out;
+  std::vector<std::size_t> starts;  // 每个块的起点（字节）
+  starts.push_back(0);
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    std::size_t const nl = text.find('\n', pos);
+    std::string_view const line =
+        text.substr(pos, nl == std::string_view::npos ? text.size() - pos : nl - pos);
+    if (longdoc_chapter_heading(line) && pos > 0) starts.push_back(pos);  // 首块起点已含 0
+    if (nl == std::string_view::npos) break;
+    pos = nl + 1;
+  }
+  for (std::size_t i = 0; i < starts.size(); ++i) {
+    std::size_t const off = starts[i];
+    std::size_t const end = i + 1 < starts.size() ? starts[i + 1] : text.size();
+    // 标题 = 该块首行（如有）；整文件退化 → 文件名
+    std::string title = fname;
+    if (starts.size() > 1) {
+      std::size_t const nl = text.find('\n', off);
+      std::string_view first =
+          text.substr(off, nl == std::string_view::npos ? end - off : nl - off);
+      while (!first.empty() && (first.front() == ' ' || first.front() == '\t')) first.remove_prefix(1);
+      std::size_t tr = first.size();
+      while (tr > 0 && (first[tr - 1] == ' ' || first[tr - 1] == '\t' || first[tr - 1] == '\r')) --tr;
+      title = std::string(first.substr(0, tr));
+      if (title.empty()) title = fname + "#" + std::to_string(i + 1);
+    }
+    out.push_back(LongdocChunk{off, end - off, std::move(title)});
+  }
+  return out;
+}
+
+// 固定窗口策略：每窗 chunk_chars 个字符，重叠 overlap 个字符（UTF-8 安全切边界）。
+std::vector<LongdocChunk> longdoc_chunk_fixed(std::string_view text, std::string const& fname,
+                                              std::size_t chunk_chars, std::size_t overlap) {
+  auto const starts = longdoc_char_starts(text);
+  std::size_t const char_count = starts.size() - 1;
+  if (char_count <= chunk_chars) return std::vector<LongdocChunk>{{0, text.size(), fname}};
+  std::size_t const step = chunk_chars >= overlap ? chunk_chars - overlap : chunk_chars;
+  std::vector<LongdocChunk> out;
+  for (std::size_t cbegin = 0, n = 1; cbegin < char_count; cbegin += step, ++n) {
+    std::size_t const cend = std::min(cbegin + chunk_chars, char_count);
+    out.push_back(LongdocChunk{starts[cbegin], starts[cend] - starts[cbegin],
+                               fname + " 第" + std::to_string(n) + "段"});
+    if (cend >= char_count) break;
+  }
+  return out;
+}
+
+// 统一入口：按策略名切分（未知策略 fail-closed 交回调用方报错）。
+std::expected<std::vector<LongdocChunk>, std::string> longdoc_chunks_for(
+    std::string_view text, std::string const& fname, std::string const& unit_of,
+    std::size_t chunk_chars, std::size_t overlap) {
+  if (unit_of == "file") return longdoc_chunk_file(text, fname);
+  if (unit_of == "chapter") return longdoc_chunk_chapter(text, fname);
+  if (unit_of == "fixed") return longdoc_chunk_fixed(text, fname, chunk_chars, overlap);
+  return std::unexpected("未知 longdoc 分块策略 '" + unit_of +
+                         "'（支持 file / chapter / fixed）");
 }
 
 // 解析正整数配置（字面量或 @config.*；空/"null"/非法 → 缺省）。
@@ -4254,7 +4376,14 @@ void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
     if (index_path.empty() || index_path == "null")
       index_path = (r.parent_path() / "longdoc.index.json").string();
 
-    // 单遍扫描：目录下常规文件 = 单元（排序稳定 → 块号顺序）
+    // 分块策略（config 驱动，缺省 file）：unit_of + fixed 参数。
+    std::string const unit_of = resolve_text_parameter("@config.longdoc_unit_of", state);
+    std::string const strategy =
+        (unit_of.empty() || unit_of == "null") ? std::string("file") : unit_of;
+    long const chunk_chars = longdoc_int_param("@config.longdoc_chunk_chars", state, 4000);
+    long const chunk_overlap = longdoc_int_param("@config.longdoc_chunk_overlap", state, 200);
+
+    // 单遍扫描：目录下常规文件 → 按策略切块 → 每块一个单元（排序稳定 → 块号顺序）
     std::vector<std::string> files;
     for (std::filesystem::directory_iterator it(r, ec), end; it != end; it.increment(ec)) {
       if (ec) break;
@@ -4270,40 +4399,55 @@ void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
       std::ifstream in(r / fname, std::ios::binary);
       if (!in) continue;
       std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-      // 骨架：模型档（可选）→ 规则兜底
-      Json sk = Json::object();
-      if (judge != nullptr) {
-        message::Message const sys = message::system_message(
-            skel_sys.empty()
-                ? "你是超长文档的结构提取器。给这段文本产出结构骨架：一句话 blurb（≤60字，概括本段讲什么）、"
-                  "keys（这段出现的专名/主题，字符串数组）。只输出 JSON：{\"blurb\":\"…\",\"keys\":[\"…\"]}，"
-                  "不要输出别的。"
-                : skel_sys);
-        message::Message const usr = message::human_message("【文本片段】\n" + utf8_cut(text, 6000));
-        auto resp = judge->invoke({sys, usr}, {});
-        if (resp)
-          if (auto j = json_block_of(resp->text()); j.has_value() && j->is_object()) sk = *j;
+      auto chunks = longdoc_chunks_for(text, fname, strategy,
+                                       static_cast<std::size_t>(chunk_chars),
+                                       static_cast<std::size_t>(chunk_overlap));
+      if (!chunks)
+        throw tool::ToolException("longdoc_ingest 节点 '" + node_id + "' " + chunks.error());
+      for (std::size_t ci = 0; ci < chunks->size(); ++ci) {
+        LongdocChunk const& c = (*chunks)[ci];
+        std::string const ctext = text.substr(c.byte_off, c.byte_len);
+        // 骨架：模型档（可选，按块给）→ 规则兜底（也按块给，keys 更聚焦）
+        Json sk = Json::object();
+        if (judge != nullptr) {
+          message::Message const sys = message::system_message(
+              skel_sys.empty()
+                  ? "你是超长文档的结构提取器。给这段文本产出结构骨架：一句话 blurb（≤60字，概括本段讲什么）、"
+                    "keys（这段出现的专名/主题，字符串数组）。只输出 JSON：{\"blurb\":\"…\",\"keys\":[\"…\"]}，"
+                    "不要输出别的。"
+                  : skel_sys);
+          message::Message const usr =
+              message::human_message("【文本片段】\n" + utf8_cut(ctext, 6000));
+          auto resp = judge->invoke({sys, usr}, {});
+          if (resp)
+            if (auto j = json_block_of(resp->text()); j.has_value() && j->is_object()) sk = *j;
+        }
+        std::string blurb = sk.value("blurb", std::string{});
+        std::vector<std::string> keys;
+        if (sk.contains("keys") && sk["keys"].is_array())
+          for (Json const& k : sk["keys"])
+            if (k.is_string() && !k.get<std::string>().empty())
+              keys.push_back(k.get<std::string>());
+        if (blurb.empty()) blurb = longdoc_rule_blurb(ctext);
+        if (keys.empty()) keys = longdoc_rule_keys(ctext);
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        std::string const id = (chunks->size() == 1)
+                                   ? fname
+                                   : fname + "!" + std::to_string(ci + 1);
+        units.push_back(Json{{"id", id}, {"title", c.title},
+                             {"blurb", blurb}, {"keys", keys},
+                             {"path", fname}, {"offset", static_cast<long long>(c.byte_off)},
+                             {"bytes", static_cast<long long>(c.byte_len)}});
+        for (std::string const& k : keys) {
+          if (!keys_map.contains(k)) keys_map[k] = Json::array();
+          keys_map[k].push_back(unit_idx);
+        }
+        ++unit_idx;
       }
-      std::string blurb = sk.value("blurb", std::string{});
-      std::vector<std::string> keys;
-      if (sk.contains("keys") && sk["keys"].is_array())
-        for (Json const& k : sk["keys"])
-          if (k.is_string() && !k.get<std::string>().empty()) keys.push_back(k.get<std::string>());
-      if (blurb.empty()) blurb = longdoc_rule_blurb(text);
-      if (keys.empty()) keys = longdoc_rule_keys(text);
-      std::sort(keys.begin(), keys.end());
-      keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-      units.push_back(Json{{"id", fname}, {"title", fname},
-                           {"blurb", blurb}, {"keys", keys},
-                           {"path", fname}, {"bytes", static_cast<long long>(text.size())}});
-      for (std::string const& k : keys) {
-        if (!keys_map.contains(k)) keys_map[k] = Json::array();
-        keys_map[k].push_back(unit_idx);
-      }
-      ++unit_idx;
     }
     Json const index =
-        Json{{"meta", Json{{"root", r.string()}, {"unit_of", "file"}, {"built", today_str()}}},
+        Json{{"meta", Json{{"root", r.string()}, {"unit_of", strategy}, {"built", today_str()}}},
              {"units", std::move(units)}, {"keys", std::move(keys_map)}};
     write_json_file(std::filesystem::path(index_path), index);
     if (sink_p)
@@ -4383,15 +4527,27 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
         std::string const id = unit.value("id", "unit_" + std::to_string(u));
         std::string text;
         if (!root.empty() && unit.contains("path") && unit["path"].is_string()) {
+          // 按块读取：offset..offset+bytes（旧索引无 offset → 默认 0 = 整文件，兼容）。
           std::ifstream in(std::filesystem::path(root) / unit["path"].get<std::string>(),
                            std::ios::binary);
-          text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+          if (in) {
+            long long const off = unit.value("offset", 0LL);
+            long long const len = unit.value("bytes", -1LL);
+            if (len < 0) {
+              text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            } else if (len > 0) {
+              in.seekg(static_cast<std::streamoff>(off));
+              text.resize(static_cast<std::size_t>(len));
+              in.read(text.data(), static_cast<std::streamsize>(len));
+            }
+          }
         }
         std::string const sliced = utf8_cut(text, static_cast<std::size_t>(slice));
         hits.push_back(Json{{"id", id},
                             {"title", unit.value("title", id)},
                             {"blurb", unit.value("blurb", "")},
                             {"keys", unit.value("keys", Json::array())},
+                            {"offset", unit.value("offset", 0LL)},
                             {"bytes", static_cast<long long>(text.size())},
                             {"text", sliced}});
         sys.push_back(message::system_message(
