@@ -4348,6 +4348,28 @@ long longdoc_int_param(std::string const& spec, Json const& state, long def) {
   }
 }
 
+// 解析 [0,1] 小数配置（向量混合权重等）。
+double longdoc_double_param(std::string const& spec, Json const& state, double def) {
+  if (spec.empty()) return def;
+  std::string const v = resolve_text_parameter(spec, state);
+  if (v.empty() || v == "null") return def;
+  try {
+    double const d = std::stod(v);
+    return (d >= 0.0 && d <= 1.0) ? d : def;
+  } catch (std::exception const&) {
+    return def;
+  }
+}
+
+// JSON 数组 → Embedding（retrieve 从索引读 units[].emb）。
+model::Embedding longdoc_emb_from_json(Json const& e) {
+  model::Embedding out;
+  if (e.is_array())
+    for (Json const& x : e)
+      out.push_back(x.is_number() ? static_cast<float>(x.get<double>()) : 0.0f);
+  return out;
+}
+
 void v_longdoc_ingest(NodeIR const& n, NodeType::ValidateContext const&,
                       NodeType::ErrorSink const& err) {  if (n.next.empty()) err("VN27", "longdoc_ingest 节点 '" + n.id + "' 缺少 next");
 }
@@ -4359,8 +4381,9 @@ void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const skel_sys = n.system_prompt;
   model::ChatModel* judge =
       (ctx.components != nullptr) ? ctx.components->model(n.model) : nullptr;
+  ComponentRegistry const* components = ctx.components;
   auto sink_p = ctx.sink;
-  ctx.graph.add_node(n.id, [node_id, root_spec, index_spec, skel_sys, judge, sink_p](
+  ctx.graph.add_node(n.id, [node_id, root_spec, index_spec, skel_sys, judge, components, sink_p](
                                Json const& state, NodeContext& nc) {
     std::string const root = resolve_text_parameter(
         root_spec.empty() ? "@config.longdoc_root" : root_spec, state);
@@ -4446,8 +4469,32 @@ void c_longdoc_ingest(NodeIR const& n, NodeType::CompileContext& ctx) {
         ++unit_idx;
       }
     }
+    // 向量臂（arch 28 下一刀）：@config.longdoc_embed 指名 embedding 组件 → 每个单元 blurb
+    // 批量嵌入存 units[].emb（泛问"第一回讲了什么"这类无专名问题靠 blurb 语义检索）。
+    model::Embeddings* embedder = nullptr;
+    std::string embed_name = resolve_text_parameter("@config.longdoc_embed", state);
+    if (embed_name.empty() || embed_name == "null") {
+      embed_name.clear();
+    } else if (components != nullptr) {
+      embedder = components->embedding(embed_name);
+      if (embedder == nullptr && sink_p)
+        sink_p->log_node(nc.node_name, "warn",
+                         "longdoc_ingest: 找不到 embedding 组件 '" + embed_name + "'，索引无向量");
+    }
+    if (embedder != nullptr && !units.empty()) {
+      std::vector<std::string> blurbs;
+      for (Json const& u : units) blurbs.push_back(u.value("blurb", ""));
+      auto embs = embedder->embed(blurbs);
+      if (embs && embs->size() == units.size())
+        for (std::size_t i = 0; i < units.size(); ++i)
+          units[static_cast<long>(i)]["emb"] = (*embs)[static_cast<std::size_t>(i)];
+      else if (sink_p)
+        sink_p->log_node(nc.node_name, "warn",
+                         "longdoc_ingest: 向量嵌入失败，索引无 emb（退关键词检索）");
+    }
     Json const index =
-        Json{{"meta", Json{{"root", r.string()}, {"unit_of", strategy}, {"built", today_str()}}},
+        Json{{"meta", Json{{"root", r.string()}, {"unit_of", strategy}, {"built", today_str()},
+                           {"embed", embed_name}}},
              {"units", std::move(units)}, {"keys", std::move(keys_map)}};
     write_json_file(std::filesystem::path(index_path), index);
     if (sink_p)
@@ -4473,9 +4520,10 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
   std::string const query_spec = n.longdoc_query;
   std::string const topk_spec = n.longdoc_topk;
   std::string const slice_spec = n.longdoc_slice_chars;
+  ComponentRegistry const* components = ctx.components;
   auto sink_p = ctx.sink;
-  ctx.graph.add_node(n.id, [node_id, index_spec, query_spec, topk_spec, slice_spec, sink_p](
-                               Json const& state, NodeContext& nc) {
+  ctx.graph.add_node(n.id, [node_id, index_spec, query_spec, topk_spec, slice_spec, components,
+                            sink_p](Json const& state, NodeContext& nc) {
     std::string const index_path = resolve_text_parameter(
         index_spec.empty() ? "@config.longdoc_index" : index_spec, state);
     if (index_path.empty() || index_path == "null")
@@ -4497,8 +4545,15 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
     std::string const root =
         index.value("meta", Json::object()).value("root", std::string{});
 
-    // 打分：query token × 命中键 → IDF 加权
-    std::map<long, double> score;
+    // 打分：关键词 IDF（归一）+ 向量余弦（可选，blurb 语义检索）混合。
+    // final = vector_weight*vec + (1-vector_weight)*norm_kw；无关键词命中但向量有 → 纯向量。
+    double const vector_weight = longdoc_double_param("@config.longdoc_vector_weight", state, 0.5);
+    std::string const embed_name =
+        index.value("meta", Json::object()).value("embed", std::string{});
+    model::Embeddings* embedder =
+        (components != nullptr && !embed_name.empty()) ? components->embedding(embed_name) : nullptr;
+
+    std::map<long, double> kw;
     for (std::string const& t : longdoc_tokenize(query))
       for (auto it = keys_map.begin(); it != keys_map.end(); ++it)
         if (longdoc_key_match(t, it.key()) && it.value().is_array()) {
@@ -4506,8 +4561,25 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
               std::log(static_cast<double>(units.size() + 1) /
                        (static_cast<double>(it.value().size()) + 1.0));
           for (Json const& u : it.value())
-            if (u.is_number_unsigned()) score[u.get<long>()] += idf;
+            if (u.is_number_unsigned()) kw[u.get<long>()] += idf;
         }
+    std::map<long, double> vec;
+    bool const has_emb = units.is_array() && !units.empty() && units[0].contains("emb");
+    if (embedder != nullptr && has_emb) {
+      auto qe = embedder->embed_query(query);
+      if (qe)
+        for (std::size_t ui = 0; ui < units.size(); ++ui)
+          if (units[ui].contains("emb"))
+            vec[static_cast<long>(ui)] =
+                std::max(0.0, model::cosine_similarity(*qe, longdoc_emb_from_json(units[ui]["emb"])));
+    }
+    double kw_max = 0.0;
+    for (auto const& [u, s] : kw) kw_max = std::max(kw_max, s);
+    std::map<long, double> score;
+    for (auto const& [u, s] : kw) score[u] = kw_max > 0.0 ? s / kw_max : 0.0;
+    for (auto const& [u, v] : vec)
+      score[u] = vector_weight * v + (1.0 - vector_weight) * (kw.contains(u) ? score[u] : 0.0);
+
     // top-k（按分降序，同分按单元序）
     std::vector<long> ranked;
     for (auto const& [u, s] : score) ranked.push_back(u);
@@ -4549,6 +4621,7 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
                             {"keys", unit.value("keys", Json::array())},
                             {"offset", unit.value("offset", 0LL)},
                             {"bytes", static_cast<long long>(text.size())},
+                            {"score", score.at(u)},
                             {"text", sliced}});
         sys.push_back(message::system_message(
             "【" + id + "】" + unit.value("blurb", "") + "\n" + sliced));
@@ -4559,6 +4632,7 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
     Json result = Json{{"action", "retrieve"},
                        {"query", query},
                        {"topk", take},
+                       {"vector", !vec.empty()},
                        {"hits", std::move(hits)}};
     if (take == 0) result["note"] = "索引无命中（query 未匹配任何键）——建议换词或检查索引 keys";
     update[kResultsKey] = Json{{node_id, std::move(result)}};

@@ -61,10 +61,14 @@ retrieve(@config.query) → model(main, system_prompt=「依据【片段】回�
 - 分块策略第一版 = 文件；**章节正则 / 固定窗口已落地（2026-10-26，problems/58）**：ingest 支持
   `@config.longdoc_unit_of = file | chapter | fixed`（+ `longdoc_chunk_chars` / `longdoc_chunk_overlap`），
   索引 units 带 `offset`，retrieve 按字节区间读块；旧索引无 offset → 兼容为整文件。
-- **向量臂**（复用个人 Wiki 向量，泛问"第一回讲了什么"这类无专名问题靠 blurb 语义检索）、
-  命中子集升级 merge —— 押后。
+- **向量臂已落地（2026-10-26，problems/59）**：ComponentRegistry 增 embeddings 槽；ingest 用
+  `@config.longdoc_embed` 指名组件 → 每单元 blurb 批量嵌入存 `units[].emb`（meta.embed 记名）；
+  retrieve 运行时 hybrid 打分 `@config.longdoc_vector_weight`（缺省 0.5）混合 向量余弦 +
+  IDF（归一）；无关键词命中但向量有 → 纯向量（治"第一回讲了什么"这类泛问）；无 embedding
+  → 纯关键词（向后兼容）。
+- **命中子集升级 merge** —— 押后。
 - 骨架提取的模型档真机质量（blurb/keys 准不准）—— 验证后真机试。
-- 检索排序 = 关键词命中 + IDF；BM25/向量 hybrid 复用个人 Wiki 设施可接，押后。
+- 检索排序 BM25 / 向量 hybrid 复用个人 Wiki 设施可接（向量臂已复用同一 Embeddings 接口）。
 
 ## 五、验收
 

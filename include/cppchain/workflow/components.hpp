@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "cppchain/model/chat_model.hpp"
+#include "cppchain/model/embeddings.hpp"
 #include "cppchain/tool/registry.hpp"
 
 namespace cppchain::workflow {
@@ -18,11 +19,17 @@ namespace cppchain::workflow {
 // 名字 → 组件。全部**非拥有**：宿主保证其生命周期长于编译/运行期。
 struct ComponentRegistry {
   std::unordered_map<std::string, model::ChatModel*> models;           // model 组件
+  std::unordered_map<std::string, model::Embeddings*> embeddings;      // embedding 组件（语义检索）
   std::unordered_map<std::string, std::vector<std::string>> toolsets;  // 工具集：名字 → 工具名列表
 
   [[nodiscard]] model::ChatModel* model(std::string const& name) const {
     auto const it = models.find(name);
     return it == models.end() ? nullptr : it->second;
+  }
+
+  [[nodiscard]] model::Embeddings* embedding(std::string const& name) const {
+    auto const it = embeddings.find(name);
+    return it == embeddings.end() ? nullptr : it->second;
   }
 
   [[nodiscard]] std::vector<std::string> const* toolset(std::string const& name) const {

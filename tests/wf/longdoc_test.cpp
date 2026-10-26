@@ -519,3 +519,95 @@ TEST(WfLongdoc, fixed_window_boundaries_utf8_safe) {
   }
 }
 }  // namespace
+
+// ================= 向量臂（arch 28 下一刀）：blurb 语义检索 =================
+
+namespace {
+// 确定性假 embedding：256 维"字符袋"向量（字节索引计数）。共享字符 → 余弦高，够测语义命中。
+class BagEmbeddings final : public model::Embeddings {
+ public:
+  std::expected<std::vector<model::Embedding>, model::ModelError> embed(
+      std::span<std::string const> texts) override {
+    std::vector<model::Embedding> out;
+    for (std::string const& t : texts) out.push_back(vector_for(t));
+    return out;
+  }
+  std::size_t dimension() const override { return 256; }
+  std::size_t max_batch_size() const override { return 1000; }
+  static model::Embedding vector_for(std::string_view s) {
+    model::Embedding v(256, 0.0f);
+    for (unsigned char c : s) v[c] += 1.0f;
+    return v;
+  }
+};
+}  // namespace
+
+// ingest 带向量：units 每项出 emb、meta.embed 记组件名。
+TEST(WfLongdoc, ingest_vector_embeds_unit_blurbs) {
+  LongdocFixture fx;
+  BagEmbeddings bag;
+  ComponentRegistry comps;
+  comps.embeddings["bag"] = &bag;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire(ingest_ir(),
+                 Json{{"longdoc_root", fx.corpus.string()},
+                      {"longdoc_index", fx.index_path().string()},
+                      {"longdoc_embed", "bag"}},
+                 copts);
+  ASSERT_TRUE(st.state) << st.error;
+  Json const idx = fx.read_index();
+  EXPECT_EQ(idx["meta"]["embed"], "bag");
+  ASSERT_EQ(idx["units"].size(), 3u);
+  for (Json const& u : idx["units"]) {
+    ASSERT_TRUE(u.contains("emb"));
+    EXPECT_EQ(u["emb"].size(), 256u);
+  }
+}
+
+// 泛问：关键词在 keys 里没有（中文规则档 keys 空），但"女儿"与 a.txt blurb 字面重叠
+// → 向量路径命中 a.txt（纯向量，无关键词命中也能答）。
+TEST(WfLongdoc, retrieve_vector_resolves_abstract_query) {
+  LongdocFixture fx;
+  BagEmbeddings bag;
+  ComponentRegistry comps;
+  comps.embeddings["bag"] = &bag;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire(ingest_ir(),
+                 Json{{"longdoc_root", fx.corpus.string()},
+                      {"longdoc_index", fx.index_path().string()},
+                      {"longdoc_embed", "bag"}},
+                 copts);
+  ASSERT_TRUE(st.state) << st.error;
+  auto q = fire(retrieve_ir(),
+                Json{{"longdoc_index", fx.index_path().string()},
+                     {"query", "女儿"}, {"longdoc_topk", 3},
+                     {"longdoc_slice_chars", 2000}, {"longdoc_vector_weight", 0.5}},
+                copts);
+  ASSERT_TRUE(q.state) << q.error;
+  Json const& res = (*q.state)["results"]["find"];
+  EXPECT_EQ(res["vector"], true);
+  auto const& hits = res["hits"];
+  ASSERT_GT(hits.size(), 0u);
+  EXPECT_EQ(hits[0]["id"], "a.txt");  // 女儿在 a.txt 的 blurb（首行）
+}
+
+// 无 embedding 组件 → 退纯关键词：泛问"女儿"零命中 + vector=false（向后兼容行为）。
+TEST(WfLongdoc, retrieve_vector_disabled_without_embedder) {
+  LongdocFixture fx;
+  auto st = fire(ingest_ir(),
+                 Json{{"longdoc_root", fx.corpus.string()},
+                      {"longdoc_index", fx.index_path().string()}},
+                 CompileOptions{});
+  ASSERT_TRUE(st.state) << st.error;
+  EXPECT_EQ(fx.read_index()["meta"]["embed"], "");
+  auto q = fire(retrieve_ir(),
+                Json{{"longdoc_index", fx.index_path().string()},
+                     {"query", "女儿"}, {"longdoc_topk", 3}, {"longdoc_slice_chars", 2000}},
+                CompileOptions{});
+  ASSERT_TRUE(q.state) << q.error;
+  Json const& res = (*q.state)["results"]["find"];
+  EXPECT_EQ(res["vector"], false);
+  EXPECT_EQ(res["hits"].size(), 0u);
+}
