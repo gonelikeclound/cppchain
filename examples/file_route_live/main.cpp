@@ -129,6 +129,32 @@ Json route_ir() {
   return Json{{"id", "wf_route_live"}, {"nodes", std::move(nodes)}};
 }
 
+// 混合臂：file_context 预取 + 模型仍带工具（判错/没命中时能自己升级）
+Json hybrid_ir() {
+  Json body = Json::array();
+  body.push_back(Json{{"id", "think"}, {"kind", "model"}, {"model", "main"},
+                      {"tools", "chat"},
+                      {"system_prompt",
+                       "你是严谨的助手。【文件取数路由】的片段就是已取到的素材：只要素材里"
+                       "能找到答案，直接回答，**不要再调用工具**；只有素材明显缺失/未命中时，"
+                       "才调用工具（file_grep / file_extract / file_read / file_sample）补齐，"
+                       "不要编造。"},
+                      {"next", "route"}});
+  body.push_back(Json{{"id", "route"}, {"kind", "route"}, {"on", "last_ai_outcome"},
+                      {"cases", Json{{"tool_calls", "act"}, {"text", "_break"}}},
+                      {"default", "_break"}});
+  body.push_back(Json{{"id", "act"}, {"kind", "run_tools"}, {"next", "_continue"}});
+
+  Json nodes = Json::array();
+  nodes.push_back(Json{{"id", "recall"}, {"kind", "load_history"},
+                       {"path", "@config.workspace"}, {"session", "@config.session"},
+                       {"next", "files"}});
+  nodes.push_back(Json{{"id", "files"}, {"kind", "file_context"}, {"next", "loop"}});
+  nodes.push_back(Json{{"id", "loop"}, {"kind", "loop"}, {"max", 4},
+                       {"next", "_turn_end"}, {"body", std::move(body)}});
+  return Json{{"id", "wf_hybrid_live"}, {"nodes", std::move(nodes)}};
+}
+
 Json base_ir() {
   Json body = Json::array();
   body.push_back(Json{{"id", "think"}, {"kind", "model"}, {"model", "main"},
@@ -161,6 +187,7 @@ struct ArmResult {
   long in_tokens = 0;
   long out_tokens = 0;
   std::string route = "-";
+  std::string context;  // 预取注入的 system_context（失败时打印，判断"漏读 vs 利用率"）
 };
 
 std::string last_ai_text(Json const& st) {
@@ -204,6 +231,11 @@ ArmResult run(CompiledWorkflow& wf, std::string const& question, fs::path const&
   if (auto const it = st.find("results"); it != st.end() && it->is_object())
     if (it->contains("files") && (*it)["files"].is_object())
       r.route = (*it)["files"].value("route", "-");
+  if (auto const it = st.find("system_context"); it != st.end() && it->is_array())
+    for (Json const& m : *it)
+      if (m.contains("content") && m["content"].is_array())
+        for (Json const& b : m["content"])
+          if (b.is_object() && b.contains("text")) r.context += b["text"].get<std::string>() + "\n";
   if (auto const it = st.find("messages"); it != st.end() && it->is_array()) {
     for (Json const& m : *it) {
       if (m.value("type", "") != "ai") continue;
@@ -254,7 +286,7 @@ int main() {
   components.models["main"] = &llm;
   components.toolsets["chat"] = tool_names;
 
-  state::MemoryCheckpointer cp_route, cp_base;
+  state::MemoryCheckpointer cp_route, cp_base, cp_hybrid;
   CompileOptions co;
   co.components = &components;
 
@@ -283,7 +315,8 @@ int main() {
 
   auto route_wf = compile(route_ir(), registry, cp_route);
   auto base_wf = compile(base_ir(), registry, cp_base);
-  if (!route_wf || !base_wf) return 1;
+  auto hybrid_wf = compile(hybrid_ir(), registry, cp_hybrid);
+  if (!route_wf || !base_wf || !hybrid_wf) return 1;
 
   std::vector<Question> const questions = {
       {"config.json 的 /services/3/ports/1 是多少？只回答数字。", "8443", "JSON 指针"},
@@ -298,44 +331,62 @@ int main() {
   Json const cfg_on{{"file_route", Json{{"enabled", true}}}};
   Json const cfg_off{{"file_route", Json{{"enabled", false}}}};
 
-  int route_ok = 0, base_ok = 0;
-  long route_tokens = 0, base_tokens = 0;
-  long route_calls = 0, base_calls = 0;
-  std::println("{:<18} {:<6} {:<8} {:<10} {:<8} {}", "问题", "臂", "正确", "route", "工具轮", "tok(in/out)");
+  int route_ok = 0, base_ok = 0, hybrid_ok = 0;
+  long route_tokens = 0, base_tokens = 0, hybrid_tokens = 0;
+  long route_calls = 0, base_calls = 0, hybrid_calls = 0;
+  std::println("{:<18} {:<6} {:<8} {:<10} {:<8} {}", "问题", "臂", "正确", "route", "工具轮",
+               "tok(in/out)");
+  // 调试/省费用：FILE_ROUTE_LIVE_ONLY=<下标> 只跑一题（默认全跑）
+  std::size_t only = 999;
+  if (char const* e = std::getenv("FILE_ROUTE_LIVE_ONLY")) only = static_cast<std::size_t>(std::atoi(e));
+  std::size_t n = 0;
   for (std::size_t i = 0; i < questions.size(); ++i) {
+    if (only != 999 && i != only) continue;
+    ++n;
     Question const& q = questions[i];
     ArmResult const a = run(*route_wf, q.prompt, ws_root(), "route_" + std::to_string(i), cfg_on);
     ArmResult const b = run(*base_wf, q.prompt, ws_root(), "base_" + std::to_string(i), cfg_off);
+    ArmResult const h = run(*hybrid_wf, q.prompt, ws_root(), "hybrid_" + std::to_string(i), cfg_on);
 
     auto correct = [&](ArmResult const& r) {
       return r.ok && r.answer.find(q.expected) != std::string::npos;
     };
-    bool const ac = correct(a), bc = correct(b);
+    bool const ac = correct(a), bc = correct(b), hc = correct(h);
     route_ok += ac ? 1 : 0;
     base_ok += bc ? 1 : 0;
+    hybrid_ok += hc ? 1 : 0;
     route_tokens += a.in_tokens + a.out_tokens;
     base_tokens += b.in_tokens + b.out_tokens;
+    hybrid_tokens += h.in_tokens + h.out_tokens;
     route_calls += a.total_calls;
     base_calls += b.total_calls;
+    hybrid_calls += h.total_calls;
 
     std::println("{:<18} {:<6} {:<8} {:<10} {:<8} {}/{}", q.kind, "route", ac ? "✓" : "✗",
                  a.route, a.tool_rounds, a.in_tokens, a.out_tokens);
     std::println("{:<18} {:<6} {:<8} {:<10} {:<8} {}/{}", "", "base", bc ? "✓" : "✗", "-",
                  b.tool_rounds, b.in_tokens, b.out_tokens);
-    if (!ac) std::println("    route 答案：{}", a.answer.substr(0, 120));
-    if (!bc) std::println("    base  答案：{}", b.answer.substr(0, 120));
+    std::println("{:<18} {:<6} {:<8} {:<10} {:<8} {}/{}", "", "hybrid", hc ? "✓" : "✗",
+                 h.route, h.tool_rounds, h.in_tokens, h.out_tokens);
+    if (!ac) std::println("    route  答案：{}｜预取含答案={}｜预取尾部：{}", a.answer.substr(0, 120),
+                          a.context.find(q.expected) != std::string::npos,
+                          a.context.size() > 200 ? a.context.substr(a.context.size() - 200)
+                                                 : a.context);
+    if (!bc) std::println("    base   答案：{}", b.answer.substr(0, 120));
+    if (!hc) std::println("    hybrid 答案：{}｜预取：{}", h.answer.substr(0, 120),
+                          h.context.substr(0, 160));
   }
 
-  std::size_t const n = questions.size();
   std::println("\n== 汇总 ==");
-  std::println("route 臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
+  std::println("route  臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
                route_ok, n, route_calls, route_tokens);
-  std::println("base  臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
+  std::println("base   臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
                base_ok, n, base_calls, base_tokens);
+  std::println("hybrid 臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
+               hybrid_ok, n, hybrid_calls, hybrid_tokens);
   std::println("\n注：真机结果受模型随机性影响；本台只断言「答案含预埋事实」，"
                "不评风格。漏读率 = route 臂错误且 route=none/未命中；利用率 = route 命中但答案错。");
-  std::println("验收结论：{}", route_ok == static_cast<int>(n)
-                                   ? "route 臂全对（harness 预取够用，模型无需自选工具）"
-                                   : "route 臂有未命中，见上方 ✗（先看 route 列再判断是漏读还是利用率）");
+  std::println("验收结论：route {} · hybrid {}", route_ok == static_cast<int>(n) ? "全对" : "有未命中",
+               hybrid_ok >= route_ok ? "不劣于 route（兜底可用）" : "劣于 route（需查提示词/工具选择）");
   return route_ok == static_cast<int>(n) ? 0 : 1;
 }

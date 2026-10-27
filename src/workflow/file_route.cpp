@@ -285,8 +285,9 @@ FileRouteOutcome route_file_question(tool::ToolRegistry const& reg, std::string 
     record("file_extract", path + " · " + sel, found, text.size());
     if (!found) return false;
     out.route = "extract";
+    // 显式标「提取结果」：真机暴露过模型看到裸值（如 "443"）反而怀疑"素材没给值"
     add_text("【" + path + " · selector=" + sel + " · format=" + r->value("format", "") +
-             "】\n" + text);
+             "】\n提取结果：\n" + text);
     return true;
   };
 

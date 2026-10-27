@@ -32,7 +32,7 @@ libstdc++ 的 `GLIBCXX_3.4.35` 符号，系统 libstdc++ 14 不够），并在**
 | `tools_frontline` | 第一档内置工具：`get_datetime`（当前时间/时区）、`calculator`（精确计算兜底，安全求值非 eval）、`fetch_url`（网页正文提取，补全 搜索→打开详情页 闭环）；离线可跑 | `Calculator` / 自研时间工具 / `WebPageContentExtractor` |
 | `tools_files` | 第二档文件工具六件套：`file_read` / `file_write` / `list_dir` / `file_grep` / `file_extract` / `file_sample`（沙箱根目录限定）；**写工具 `read_only=false`**——越界/绝对路径/符号链接逃逸三重拒绝；演示分页、grep 定位、结构化提取（json/yaml/md/xml）与采样跳读 | `FileManagementToolkit`（`ReadFileTool`/`WriteFileTool`/`ListDirectoryTool`） |
 | `file_retrieval_eval` | **problems/02 七法统一评测**（离线确定性）：6 份可控语料 × 8 任务，横向对比 grep / 结构化提取 / 采样 / 翻页 / 混合路由的命中、轮数与返回字节；断言"各法各就各位"（grep 6/6·56B、extract 5/5·581B、sample 3/8、paging 8/8·96.9KB） | — |
-| `file_route_live` | **problems/02 S6 真机评测**（需 LLM 端点）：同一批 6 题跑"路由预取（file_context → model 单次）"与"模型自选工具（循环）"两臂；实测 route 6/6·0 工具轮·2.4k token vs base 6/6·15 轮·39.6k token（约 16×） | — |
+| `file_route_live` | **problems/02 S6 真机评测**（需 LLM 端点）：同一批 6 题跑三臂——路由预取 / 预取+工具兜底（hybrid）/ 纯模型自选工具（base）；实测 route 6/6·0 调用·2.2k token｜hybrid 6/6·1 调用·16.1k｜base 5/6·17 调用·48.3k（约 22×） | — |
 | `bash_sidefx_analysis` | bash 工具**副作用分析**（wfr-㊸ L2）：对 15 条代表性命令跑词面静态分类器，打印 类别（ReadOnly/Write/Risky/Unknown）+ 依据 + 处置，自带断言（预期不符即非零退出）；**不执行任何命令** | 词面分类器 `classify_bash_command_detail`（01-discuss/06 §5 L2） |
 | `tools_arxiv` | 第三档：`arxiv_search` 论文检索（arXiv Atom API，**内置 XML 解析**，免费无 key）；离线演示查询 URL 构造/解析/空结果回喂 | `ArxivQueryRun` |
 | `tools_approval` | M7：真实 `file_write` 副作用审批端到端——名单拒绝/回调按参数放行（只许 `notes/`）/**同 call 崩溃重启重放不重复写盘**，硬断言全部基于真实磁盘状态 | LangGraph interrupt 审批前身 + 幂等约束 |
