@@ -78,36 +78,75 @@ std::optional<std::string> validate_json(nlohmann::json const& schema,
   return std::nullopt;
 }
 
-CallOptions StructuredOutput::prepare(CallOptions opts, std::vector<Message>& convo) const {
-  if (opts_.mode == StructuredMode::ToolCall) {
-    nlohmann::json fn = {{"name", opts_.tool_name},
+namespace {
+
+// 按策略装配请求（准备阶段用；两条路径都从这里生成，保证 fallback 与正常路径同形）
+CallOptions build_structured_request(StructuredMode mode, std::string const& tool_name,
+                                     nlohmann::json const& schema, CallOptions opts,
+                                     std::vector<Message>& convo) {
+  if (mode == StructuredMode::ToolCall) {
+    nlohmann::json fn = {{"name", tool_name},
                          {"description", "Return the answer as structured data."},
-                         {"parameters", schema_}};
+                         {"parameters", schema}};
     opts.tools = nlohmann::json::array({nlohmann::json{{"type", "function"}, {"function", fn}}});
-    opts.tool_choice = nlohmann::json{{"type", "function"}, {"function", {{"name", opts_.tool_name}}}};
+    opts.tool_choice = nlohmann::json{{"type", "function"}, {"function", {{"name", tool_name}}}};
   } else {
     opts.response_format = nlohmann::json{{"type", "json_object"}};
+    // 注意：DeepSeek 等端点要求 json_object 模式下**提示词里出现小写 "json"**，
+    // 否则直接 400（"Prompt must contain the word 'json'"）。这里显式带上小写 json。
     convo.push_back(message::system_message(
-        "你必须只输出一个 JSON 对象，且满足以下 JSON Schema（不要输出解释文字）：\n" +
-        schema_.dump()));
+        "你必须只输出一个 json 对象，且满足以下 JSON Schema（不要输出解释文字）：\n" +
+        schema.dump()));
   }
   return opts;
 }
 
+// 端点拒绝强制 tool_choice（如 DeepSeek thinking 模式："Thinking mode does not
+// support this tool_choice"）→ 应回退到 JsonObject 策略，而不是把整次调用判死。
+bool tool_choice_rejected(ModelError const& e) {
+  if (e.http_status != 400) return false;
+  std::string body;
+  if (e.raw.is_object() && e.raw.contains("body") && e.raw["body"].is_string())
+    body = e.raw["body"].get<std::string>();
+  return body.find("tool_choice") != std::string::npos ||
+         body.find("Thinking mode") != std::string::npos ||
+         e.message.find("tool_choice") != std::string::npos;
+}
+
+}  // namespace
+
+CallOptions StructuredOutput::prepare(CallOptions opts, std::vector<Message>& convo) const {
+  return build_structured_request(opts_.mode, opts_.tool_name, schema_, std::move(opts), convo);
+}
+
 std::expected<nlohmann::json, ModelError> StructuredOutput::invoke(
     std::span<Message const> msgs, CallOptions opts) {
+  CallOptions const base_opts = opts;
   std::vector<Message> convo(msgs.begin(), msgs.end());
-  opts = prepare(std::move(opts), convo);
+  StructuredMode mode = opts_.mode;
+  CallOptions call = build_structured_request(mode, opts_.tool_name, schema_, opts, convo);
+  bool fell_back = false;
 
   std::string last_violation = "no attempt made";
 
   for (int attempt = 0; attempt <= opts_.max_retries; ++attempt) {
-    auto reply = model_->invoke(convo, opts);
-    if (!reply) return std::unexpected(reply.error());
+    auto reply = model_->invoke(convo, call);
+    if (!reply) {
+      // 端点不支持强制 tool_choice（thinking 模式）→ 自动降级到 json_object 再试一次。
+      if (!fell_back && mode == StructuredMode::ToolCall && tool_choice_rejected(reply.error())) {
+        fell_back = true;
+        mode = StructuredMode::JsonObject;
+        convo.assign(msgs.begin(), msgs.end());
+        call = build_structured_request(mode, opts_.tool_name, schema_, base_opts, convo);
+        --attempt;  // 这次不算 schema 重试次数
+        continue;
+      }
+      return std::unexpected(reply.error());
+    }
 
     // 取候选 JSON（两种策略来源不同）
     std::optional<nlohmann::json> candidate;
-    if (opts_.mode == StructuredMode::ToolCall) {
+    if (mode == StructuredMode::ToolCall) {
       if (reply->tool_calls.empty()) {
         last_violation = "model did not call the structured output tool";
       } else {

@@ -515,10 +515,16 @@ int main() {
   bool const memory_grows =
       st.history_sent.size() >= 2 && st.history_sent.front() < st.history_sent.back();
   bool const guarantee_met = st.unretrieved == 0;
-  std::println("结构断言   : 连续记忆递增 {} | research 检索保证达成 {}",
-               memory_grows ? "✓" : "✗", guarantee_met ? "✓" : "✗");
+  // 防空真：如果意图路由全判 casual（端点坏了/模型不遵循），research=0 时
+  // "检索保证达成"是空转通过——必须要求本轮确实走到 research 且真的取到数。
+  bool const exercised = st.n_research > 0 && total_hits > 0;
+  std::println("结构断言   : 连续记忆递增 {} | research 检索保证达成 {} | research 真被走到 {}",
+               memory_grows ? "✓" : "✗", guarantee_met ? "✓" : "✗", exercised ? "✓" : "✗");
+  if (!exercised)
+    std::println("  ⚠ research 轮数={}、成功取数={}——检查意图路由/端点（全 casual 时断言会空转）",
+                 st.n_research, total_hits);
 
-  std::println("\n=== 结果: {} ===",
-               (failures == 0 && memory_grows && guarantee_met) ? "全部通过 ✓" : "有失败项 ✗");
-  return (failures == 0 && memory_grows && guarantee_met) ? 0 : 1;
+  bool const ok = failures == 0 && memory_grows && guarantee_met && exercised;
+  std::println("\n=== 结果: {} ===", ok ? "全部通过 ✓" : "有失败项 ✗");
+  return ok ? 0 : 1;
 }
