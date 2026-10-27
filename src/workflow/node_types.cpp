@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "cppchain/agent/agent.hpp"
+#include "cppchain/agent/artifact.hpp"
 #include "cppchain/agent/history.hpp"
 #include "cppchain/agent/tokens.hpp"
 #include "cppchain/message/content_block.hpp"
@@ -1112,8 +1113,9 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
   tool::ToolNode tn(ctx.registry);  // 复用 M3 的实现（并行、顺序对齐、错误回喂）——内置 registry 兜底
   tool::ExecutionGuard const* guard = ctx.guard;  // wfr-㊷：副作用防护（null = 不防护）
   tool::ToolRegistry const* reg = ctx.registry;
+  auto sink_p = ctx.sink;
   ctx.graph.add_node(
-      n.id, [tn, guard, reg, node_id = n.id](Json const& state, NodeContext& nc) {
+      n.id, [tn, guard, reg, sink_p, node_id = n.id](Json const& state, NodeContext& nc) {
         // wfr-㊹ 治理（problems/34）：共享工具优先 + 内置兜底（nc.shared_tools 由 tool_registry 注入）
         tool::ToolRegistry const* shared =
             (nc.shared_tools != nullptr) ? static_cast<tool::ToolRegistry const*>(nc.shared_tools)
@@ -1295,6 +1297,60 @@ void c_run_tools(NodeIR const& n, NodeType::CompileContext& ctx) {
                 all_calls[i].id, "error"));
           else
             tool_msgs.push_back(std::move(exec_msgs[ei++]));
+        }
+        // ---- problems/02 追加 S3：大结果**执行时**自动句柄化（不等历史处理）----
+        // 两种配置形态：
+        //   @config.tool_result_artifact = {enabled, max_inline_tokens?, dir?}   （程序化/测试）
+        //   @config.tool_result_artifact_enabled / _budget / _dir                （wfr --set 平铺键）
+        // 超预算结果 → 全文落盘（缺省 <workspace>/.wfr/artifacts/tool）+ 引用行 + message.artifact；
+        // agent 用 file_read(offset)/file_grep 回读。默认关 → 旧路径零回归。
+        Json const tra = resolve_parameter(Json("@config.tool_result_artifact"), state);
+        bool s3_on = false;
+        long long budget = 200;
+        std::string dir;
+        if (tra.is_object()) {
+          s3_on = tra.value("enabled", false);
+          budget = tra.value("max_inline_tokens", 200LL);
+          dir = tra.value("dir", std::string{});
+        } else {
+          // wfr --set 只给字符串：`tool_result_artifact=on` 或其 _enabled 平铺键；
+          // on/true/1 视为开；预算按数字或数字字符串解析
+          std::string flag = tra.is_string() ? tra.get<std::string>() : std::string{};
+          if (flag.empty())
+            flag = resolve_text_parameter("@config.tool_result_artifact_enabled", state);
+          s3_on = (flag == "on" || flag == "true" || flag == "1");
+          Json const b = resolve_parameter(Json("@config.tool_result_artifact_budget"), state);
+          if (b.is_number_integer()) {
+            budget = b.get<long long>();
+          } else if (b.is_string()) {
+            try { budget = std::stoll(b.get<std::string>()); } catch (...) { budget = 200; }
+          }
+          Json const d = resolve_parameter(Json("@config.tool_result_artifact_dir"), state);
+          if (d.is_string()) dir = d.get<std::string>();
+        }
+        if (s3_on) {
+          budget = std::max<long long>(1, budget);
+          Json const ws = resolve_parameter(Json("@config.workspace"), state);
+          std::string const ws_abs =
+              (ws.is_string() && !ws.get<std::string>().empty())
+                  ? std::filesystem::absolute(ws.get<std::string>()).generic_string()
+                  : std::string{};
+          if (dir.empty())
+            dir = ws_abs.empty() ? std::string(".wfr/artifacts/tool")
+                                 : ws_abs + "/.wfr/artifacts/tool";
+          std::size_t spilled = 0;
+          for (std::size_t i = 0; i < tool_msgs.size(); ++i) {
+            // 编号带 step：同一 act 节点在多轮里不覆盖上一轮的文件
+            std::size_t const idx =
+                static_cast<std::size_t>(std::max(0, nc.step)) * 100 + i + 1;
+            if (agent::write_tool_artifact(tool_msgs[i], dir,
+                                           static_cast<std::size_t>(budget), idx, ws_abs))
+              ++spilled;
+          }
+          if (spilled > 0 && sink_p)
+            sink_p->log_node(nc.node_name, "info",
+                             "工具结果落盘 " + std::to_string(spilled) + " 条（" + dir + "）",
+                             Json{{"spilled", spilled}, {"dir", dir}});
         }
         Json arr = Json::array();
     for (message::Message& m : tool_msgs) {

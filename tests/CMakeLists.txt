@@ -185,6 +185,7 @@ add_executable(workflow_tests
   wf/tool_registry_select_test.cpp
   wf/sidefx_notify_test.cpp
   wf/tool_loop_test.cpp
+  wf/tool_result_artifact_test.cpp
   wf/phantasma_wiring_test.cpp
   wf/verify_agent_test.cpp
   wf/artifact_ver_test.cpp
