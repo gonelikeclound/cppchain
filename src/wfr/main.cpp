@@ -2,7 +2,7 @@
 // wfr —— workflow runner（正式 CLI）：按名执行 workflow（绑定工作目录 + .wfr meta 目录）。
 //
 // 用法:
-//   wfr <name-or-path> [--workdir DIR] [--session NAME] [--set k=v]... [--reset]
+//   wfr <name-or-path> [--workdir DIR] [--session NAME] [--set k=v]... [--reset] [--wait]
 //       [--allow-import] <query>...
 //   wfr list [--workdir DIR]
 //   wfr debug <name-or-path> [--session N|--all] [--out F] [--open]
@@ -39,6 +39,7 @@
 #include <cppchain/workflow/import.hpp>
 #include <cppchain/workflow/ir.hpp>
 #include <cppchain/workflow/ir_walk.hpp>
+#include <cppchain/workflow/session_lock.hpp>
 #include <cppchain/workflow/session_log.hpp>
 #include <cppchain/workflow/wfr.hpp>
 #include <cppchain/workflow/wfr_lookup.hpp>
@@ -56,6 +57,8 @@
 #include <print>
 #include <string>
 #include <thread>
+
+#include <unistd.h>  // getpid（会话锁持有者标识）
 #include <vector>
 
 using namespace cppchain;
@@ -180,6 +183,7 @@ bool has_model_node(Json const& ir_json) {
 int main(int argc, char** argv) {
   std::string workdir = ".", session = "default", name_or_path, input;
   bool reset = false, allow_import = false;
+  bool wait_lock = false;       // --wait：会话被占用时轮询等待（默认直接拒绝）
   bool stream_events = false;  // --stream：把引擎事件（node_start/node_end）逐条打 JSON 行到 stdout
   std::size_t max_parallel = 1;  // wfr-㊾ 批③：Send 并行波宽度（编译期选项）
   std::map<std::string, std::string> sets;
@@ -188,7 +192,7 @@ int main(int argc, char** argv) {
     std::println(
         "用法:\n"
         "  wfr <name-or-path> [--workdir DIR] [--session NAME] [--set key=value]... "
-        "[--max-parallel N] [--reset] [--allow-import] [--stream] <query>...\n"
+        "[--max-parallel N] [--reset] [--allow-import] [--stream] [--wait] <query>...\n"
         "  wfr list [--workdir DIR]\n"
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
@@ -354,6 +358,7 @@ int main(int argc, char** argv) {
       auto const eq = kv.find('=');
       sets[kv.substr(0, eq)] = eq == std::string::npos ? std::string{} : kv.substr(eq + 1);
     } else if (a == "--reset") reset = true;
+    else if (a == "--wait") wait_lock = true;  // 会话忙时排队等待（默认拒绝）
     else if (a == "--allow-import") allow_import = true;
     else if (a == "--stream") stream_events = true;
     else if (a == "--max-parallel" && i + 1 < argc) {
@@ -466,6 +471,45 @@ int main(int argc, char** argv) {
       if (once || (max_rounds > 0 && rounds >= max_rounds)) return 0;
       std::this_thread::sleep_for(std::chrono::seconds(sleep_secs));
     }
+  }
+
+  // ---- problems/07 §8 P0：会话单飞锁 ----
+  // 同一 session 同一时刻只允许一轮 query：默认 busy 直接拒绝（fail-closed）；
+  // --wait 则轮询等待（≤600s）。锁在进程退出/异常时由 RAII 释放；崩溃残留由 stale 回收。
+  struct SessionLockReleaser {
+    std::string ws;
+    std::string session;
+    bool held = false;
+    ~SessionLockReleaser() {
+      if (held) release_session_lock(ws, session);
+    }
+  } lock_releaser{workdir, session, false};
+  {
+    std::string const lock_run = "cli-" + std::to_string(static_cast<long>(::getpid()));
+    SessionLockAcquire lk = acquire_session_lock(workdir, session, lock_run);
+    if (!lk.acquired && lk.holder) {
+      if (!wait_lock) {
+        std::println(
+            "会话 '{}' 正被另一轮查询占用（pid={} run={}）；可加 --wait 等待，或取消该轮后重试。",
+            session, lk.holder->pid, lk.holder->run);
+        return 2;
+      }
+      std::println("会话 '{}' 正被 pid={} run={} 占用，等待中（最多 600s）…", session,
+                   lk.holder->pid, lk.holder->run);
+      for (int i = 0; i < 3000 && !lk.acquired && lk.error.empty(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        lk = acquire_session_lock(workdir, session, lock_run);
+      }
+    }
+    if (!lk.acquired) {
+      if (lk.holder)
+        std::println("等待超时：会话 '{}' 仍被 pid={} run={} 占用", session, lk.holder->pid,
+                     lk.holder->run);
+      else
+        std::println("会话锁获取失败：{}", lk.error.empty() ? "未知原因" : lk.error);
+      return 2;
+    }
+    lock_releaser.held = true;  // 生命周期到 main 结束（覆盖后续所有 return）
   }
 
   // ---- 定位 workflow（settings.workflow_dirs → ws → 全局 → 发布自带）----
