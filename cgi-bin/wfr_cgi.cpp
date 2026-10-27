@@ -32,6 +32,7 @@
 
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/tool/spawn_runner.hpp"
+#include "cppchain/workflow/session_lock.hpp"
 #include "cppchain/workflow/session_log.hpp"
 #include "wfr_cgi_lib.hpp"  // 纯逻辑（parse_session_id / default_sets_for / 枚举等，测试共用）
 
@@ -422,6 +423,23 @@ void action_debug(std::vector<std::pair<std::string, std::string>> const& q) {
 
 }  // namespace
 
+// cancel：请求取消当前轮（problems/07 §8 P1）。不阻塞等待——wfr 在节点边界退出，
+// 前端随后会看到流结束；返回持有者信息便于提示。
+Json action_cancel(std::vector<std::pair<std::string, std::string>> const& q) {
+  std::string const ws = param(q, "ws");
+  std::string const s = param(q, "s");
+  if (ws.empty() || s.empty()) return Json{{"error", "missing ws/s"}};
+  auto const lock = cppchain::workflow::read_session_lock(ws, s);
+  if (!lock.has_value())
+    return Json{{"ok", true}, {"cancelled", false}, {"msg", "没有进行中的查询"}};
+  bool const ok = cppchain::workflow::write_session_cancel(ws, s, lock->pid, lock->run);
+  return Json{{"ok", ok},
+              {"cancelled", ok},
+              {"pid", lock->pid},
+              {"run", lock->run},
+              {"msg", ok ? "取消请求已发送（节点边界生效）" : "写取消标记失败"}};
+}
+
 int main() {
   // CGI 进程 cwd 是 web server 的工作目录（如 web/），所有相对路径（workspaces.json/ws/wfr）
   // 要在**仓库根**下解析才算对。定位：WFR_ROOT 环境变量 > 向上找含 web/workspaces.json 的目录。
@@ -460,6 +478,7 @@ int main() {
   else if (action == "workspaces") result = action_workspaces();
   else if (action == "workflows") result = action_workflows(q);
   else if (action == "workspace_create") result = action_workspace_create(q);
+  else if (action == "cancel") result = action_cancel(q);
   else result = Json{{"error", "unknown action: " + action}};
   json_out(result);
   return 0;

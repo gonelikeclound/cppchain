@@ -387,6 +387,13 @@ std::expected<Json, GraphError> CompiledGraph::invoke(Json const& input,
     std::string const node = std::move(pkt.node);
     if (node == kEnd) break;
 
+    // problems/07 §8 P1：宿主取消（节点边界）。已执行节点的 update 已在 state/snapshot 里；
+    // 之后不再跑任何节点，以 Cancelled 结束（由宿主决定落 _cancelled 档/退出码）。
+    if (opts.should_stop && opts.should_stop()) {
+      finish();
+      return std::unexpected(GraphError{GraphError::Kind::Cancelled, "cancelled by host"});
+    }
+
     auto const it = nodes_.find(node);
     if (it == nodes_.end()) {
       finish();

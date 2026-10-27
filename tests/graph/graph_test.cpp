@@ -282,3 +282,36 @@ TEST(Graph, state_stays_json_serializable) {
   ASSERT_TRUE(snap.has_value());
   EXPECT_EQ(Json::parse(snap->values.dump()), snap->values);  // dump→parse 语义不变
 }
+// problems/07 §8 P1：宿主取消钩子在**节点边界**生效（已执行节点保留，后续节点不跑）。
+TEST(Graph, should_stop_cancels_at_node_boundary) {
+  StateGraph g(trace_schema());
+  int a = 0, b = 0, c = 0;
+  g.add_node("a", [&](Json const& st, NodeContext&) {
+     ++a;
+     return Command::with_update(append_visited(st, "a"));
+   })
+      .add_node("b", [&](Json const& st, NodeContext&) {
+        ++b;
+        return Command::with_update(append_visited(st, "b"));
+      })
+      .add_node("c", [&](Json const& st, NodeContext&) {
+        ++c;
+        return Command::with_update(append_visited(st, "c"));
+      })
+      .add_edge("a", "b")
+      .add_edge("b", "c")
+      .add_edge("c", kEnd)
+      .set_entry_point("a");
+
+  auto compiled = g.compile();
+  ASSERT_TRUE(compiled.has_value());
+  int checks = 0;
+  InvokeOptions opts;
+  opts.should_stop = [&checks] { return ++checks > 1; };  // a 前 false，b 前 true
+  auto out = compiled->invoke(Json::object(), "", opts);
+  ASSERT_FALSE(out.has_value());
+  EXPECT_EQ(out.error().kind, GraphError::Kind::Cancelled);
+  EXPECT_EQ(a, 1);
+  EXPECT_EQ(b, 0);
+  EXPECT_EQ(c, 0);
+}

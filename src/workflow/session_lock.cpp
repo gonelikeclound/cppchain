@@ -113,4 +113,53 @@ void release_session_lock(std::filesystem::path const& workspace, std::string co
   if (info.has_value() && info->pid == static_cast<long>(::getpid())) ::unlink(lock.c_str());
 }
 
+// ---- P1：取消标记 ----
+std::filesystem::path session_cancel_path(std::filesystem::path const& workspace,
+                                          std::string const& session) {
+  std::string const name = session.empty() ? "session" : "session-" + session;
+  return workspace / ".wfr" / "sessions" / (name + ".cancel");
+}
+
+bool write_session_cancel(std::filesystem::path const& workspace, std::string const& session,
+                          long target_pid, std::string const& run) {
+  auto const path = session_cancel_path(workspace, session);
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  auto const tmp = path.string() + ".tmp." + std::to_string(::getpid());
+  {
+    std::ofstream o(tmp, std::ios::trunc);
+    if (!o) return false;
+    o << Json{{"pid", target_pid},
+              {"run", run},
+              {"requested_epoch", static_cast<long>(std::time(nullptr))}}
+             .dump();
+    o.close();
+  }
+  std::filesystem::rename(tmp, path, ec);
+  if (ec) {
+    ::unlink(tmp.c_str());
+    return false;
+  }
+  return true;
+}
+
+std::optional<SessionCancelRequest> read_session_cancel(std::filesystem::path const& workspace,
+                                                        std::string const& session) {
+  std::ifstream in(session_cancel_path(workspace, session));
+  if (!in) return std::nullopt;
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>{});
+  Json j = Json::parse(text, nullptr, false);
+  if (j.is_discarded() || !j.is_object() || !j.contains("pid") || !j["pid"].is_number_integer())
+    return std::nullopt;
+  SessionCancelRequest req;
+  req.pid = j.value("pid", 0L);
+  req.run = j.value("run", std::string{});
+  req.requested_epoch = j.value("requested_epoch", 0L);
+  return req;
+}
+
+void clear_session_cancel(std::filesystem::path const& workspace, std::string const& session) {
+  ::unlink(session_cancel_path(workspace, session).c_str());
+}
+
 }  // namespace cppchain::workflow

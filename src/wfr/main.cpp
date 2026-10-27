@@ -48,9 +48,12 @@
 #include "util.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>  // wfr-㊸ @②：人审 stdin
 #include <map>
 #include <memory>
@@ -80,6 +83,10 @@ using cppchain::wfr::env_or;
 using cppchain::wfr::load_dotenv;
 
 namespace {
+
+// problems/07 §8 P1：SIGINT/SIGTERM → 节点边界优雅取消（handler 只做原子写，不碰 I/O）
+std::atomic<bool> g_cancel_requested{false};
+extern "C" void handle_cancel_signal(int) { g_cancel_requested.store(true); }
 
 
 // --stream 的辅助：StreamEvent → JSON（node_start/node_end/interrupt/values + payload）
@@ -197,6 +204,9 @@ int main(int argc, char** argv) {
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
         "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏、或在左栏填日志 URL，即可看日志。\n"
+        "  wfr cancel [--workdir DIR] [--session NAME] [--no-wait]\n"
+        "        请求取消当前轮：写 <session>.cancel，运行中的 wfr 在**节点边界**停止\n"
+        "        （已完成节点保留在会话日志）；默认等待锁释放（≤30s）。\n"
         "  wfr -h | --help\n"
         "--max-parallel N（wfr-㊾ 批③）：Send 并行波宽度（编译期选项，默认 1=串行）。\n"
         "        >1 时 `parallel`/`executor` 编排的同一批 sends 在 worker 线程并发执行（波=屏障，\n"
@@ -224,6 +234,44 @@ int main(int argc, char** argv) {
   std::string const cmd = argv[1];
   if (cmd == "-h" || cmd == "--help") {
     usage();
+    return 0;
+  }
+
+  // ================= 子命令：cancel（取消当前轮，节点边界生效） =================
+  if (cmd == "cancel") {
+    std::string wd = ".", sess = "default";
+    bool wait = true;
+    for (int j = 2; j < argc; ++j) {
+      std::string const a = argv[j];
+      if (a == "--workdir" && j + 1 < argc) wd = argv[++j];
+      else if (a == "--session" && j + 1 < argc) sess = argv[++j];
+      else if (a == "--no-wait") wait = false;
+      else {
+        std::println("cancel：未知参数 '{}'", a);
+        return 2;
+      }
+    }
+    auto const lock = read_session_lock(wd, sess);
+    if (!lock.has_value()) {
+      std::println("会话 '{}' 当前没有进行中的查询。", sess);
+      return 0;
+    }
+    if (!write_session_cancel(wd, sess, lock->pid, lock->run)) {
+      std::println("写取消标记失败：{}", session_cancel_path(wd, sess).string());
+      return 2;
+    }
+    std::println("已请求取消会话 '{}'（pid={} run={}）；将在节点边界生效。", sess, lock->pid,
+                 lock->run);
+    if (wait) {
+      for (int i = 0; i < 300; ++i) {  // ≤30s：等锁释放
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!read_session_lock(wd, sess).has_value()) {
+          std::println("已取消（锁已释放）。");
+          return 0;
+        }
+      }
+      std::println("取消标记已写入，但 30s 内未观察到锁释放（可能正在长节点/模型调用中）。");
+    }
     return 0;
   }
 
@@ -484,8 +532,13 @@ int main(int argc, char** argv) {
       if (held) release_session_lock(ws, session);
     }
   } lock_releaser{workdir, session, false};
+  long const self_pid = static_cast<long>(::getpid());
+  // P1：Ctrl-C / SIGTERM → 节点边界优雅取消（不是硬杀）
+  std::signal(SIGINT, handle_cancel_signal);
+  std::signal(SIGTERM, handle_cancel_signal);
+  std::function<bool()> should_stop;
   {
-    std::string const lock_run = "cli-" + std::to_string(static_cast<long>(::getpid()));
+    std::string const lock_run = "cli-" + std::to_string(self_pid);
     SessionLockAcquire lk = acquire_session_lock(workdir, session, lock_run);
     if (!lk.acquired && lk.holder) {
       if (!wait_lock) {
@@ -511,6 +564,16 @@ int main(int argc, char** argv) {
     }
     lock_releaser.held = true;  // 生命周期到 main 结束（覆盖后续所有 return）
   }
+  // 取消检查：信号标志 或 本会话的 .cancel 标记（pid 必须是自己）
+  should_stop = [workdir, session, self_pid]() -> bool {
+    if (g_cancel_requested.load(std::memory_order_relaxed)) return true;
+    auto const req = read_session_cancel(workdir, session);
+    if (req.has_value() && req->pid == self_pid) {
+      clear_session_cancel(workdir, session);  // 消费掉，避免影响下一轮
+      return true;
+    }
+    return false;
+  };
 
   // ---- 定位 workflow（settings.workflow_dirs → ws → 全局 → 发布自带）----
   Json ir_json;
@@ -779,6 +842,7 @@ int main(int argc, char** argv) {
   FireOptions fo;
   fo.log = &slog;
   fo.thread_id = "fire";  // wfr-㊸ @②：人审悬挂/恢复共用的线程（进程内 cp）
+  fo.should_stop = should_stop;  // problems/07 §8 P1：节点边界取消
   // --stream：引擎事件逐条打 JSON 行到 stdout（CGI/前端流式渲染思考/工具/文本的通道）。
   // 事件含 node_start/node_end + node_kind + step + payload（= 节点 update，model→messages
   // 含 AI/reasoning/tool_calls，run_tools→Tool 消息）。逐行 flush 保证边跑边出。
@@ -819,10 +883,25 @@ int main(int argc, char** argv) {
   // wfr-㊸ @②：一次触发 = fire 循环直至跑完。每逢 approve_tools 悬挂（bash 等
   // NeedHuman 工具），打印待批请求、读一行人工裁决（approve / reject <理由> / abort），
   // 再 resume 续跑。不悬挂的 workflow 只走一次 fire，与既有行为一致。
+  // 取消收尾：落一条可查的终态记录（replay 只读 ok 记录，不影响历史），释放锁由 RAII 完成。
+  auto handle_cancelled = [&]() -> int {
+    std::string const run = "r-cancelled-" + std::to_string(self_pid);
+    slog.engine_enter(run, "__cancelled__", "cancel");
+    slog.engine_exit(run, "__cancelled__", "cancel", /*ok=*/false, "cancelled", 0, std::nullopt);
+    if (stream_events) {  // 流通道给前端一个明确终态（NDJSON）
+      std::cout << Json{{"type", "cancelled"}}.dump() << '\n';
+      std::cout.flush();
+    }
+    std::println("（已取消：节点边界停止；已完成节点的记录保留在会话日志；锁将释放。）");
+    return 130;  // 128 + SIGINT 惯例
+  };
+
   Json result_state;
   for (;;) {
+    if (should_stop && should_stop()) return handle_cancelled();
     auto r = fire_once(*wf, config, fo);
     if (!r) {
+      if (r.error().kind == WorkflowError::Kind::Cancelled) return handle_cancelled();
       std::println("触发失败: {}", r.error().message);
       return 1;
     }

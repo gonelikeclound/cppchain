@@ -48,7 +48,7 @@ void seed_run_seq(std::int64_t base);
 [[nodiscard]] std::int64_t next_artifact_version();
 
 struct WorkflowError {
-  enum class Kind { Invalid, Compile, Runtime };
+  enum class Kind { Invalid, Compile, Runtime, Cancelled };
   Kind kind = Kind::Compile;
   std::string message;
 };
@@ -172,6 +172,8 @@ struct FireOptions {
   // 与 thread_id 配合：带 resume 的第二次 fire 从该线程的悬挂快照恢复续跑，
   // 悬挂节点从头重跑、interrupt() 返回本值（引擎语义见 graph.hpp / 01-discuss/06 §5 L3）。
   std::optional<Json> resume = std::nullopt;
+  // problems/07 §8 P1：宿主取消钩子（节点边界检查）。true → 本轮以 Cancelled 结束。
+  std::function<bool()> should_stop = nullptr;
 };
 
 // 把 graph 运行期事件投影成会话日志记录（供宿主在 FireOptions.stream 里自选落地）。

@@ -490,6 +490,7 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   iopts.mode = graph::EventMode::All;
   iopts.fork = opts.fork;
   iopts.resume = opts.resume;  // wfr-㊸ @②：interrupt 悬挂的答复（人审裁决）
+  iopts.should_stop = std::move(opts.should_stop);  // problems/07 §8 P1：节点边界取消
   // 包装 host 的 stream sink：给事件填 node_kind（引擎不默认图内 kind，kinds 表编译期建立；
   // 投影据此识别 load_history 之类的回声 update 并抑制 —— 与 wrapper 路径一致）
   if (opts.stream) {
@@ -503,7 +504,11 @@ std::expected<Json, WorkflowError> fire_once(CompiledWorkflow& wf, Json const& c
   }
   auto const r = wf.graph.invoke(input, opts.thread_id, iopts);
 
-  if (!r) return std::unexpected(WorkflowError{WorkflowError::Kind::Runtime, r.error().message});
+  if (!r)
+    return std::unexpected(WorkflowError{
+        r.error().kind == graph::GraphError::Kind::Cancelled ? WorkflowError::Kind::Cancelled
+                                                             : WorkflowError::Kind::Runtime,
+        r.error().message});
   return *r;
 }
 

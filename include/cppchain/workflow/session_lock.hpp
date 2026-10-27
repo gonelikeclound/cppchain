@@ -46,4 +46,21 @@ void release_session_lock(std::filesystem::path const& workspace, std::string co
 [[nodiscard]] std::optional<SessionLockInfo> read_session_lock(
     std::filesystem::path const& workspace, std::string const& session);
 
+// ---- P1：取消当前轮（节点边界生效）----
+struct SessionCancelRequest {
+  long pid = 0;
+  std::string run;
+  long requested_epoch = 0;
+};
+
+[[nodiscard]] std::filesystem::path session_cancel_path(std::filesystem::path const& workspace,
+                                                        std::string const& session);
+// 写取消标记（原子：临时文件 + rename）。运行中的 wfr 在**节点边界**读到 pid 匹配即取消。
+[[nodiscard]] bool write_session_cancel(std::filesystem::path const& workspace,
+                                        std::string const& session, long target_pid,
+                                        std::string const& run);
+[[nodiscard]] std::optional<SessionCancelRequest> read_session_cancel(
+    std::filesystem::path const& workspace, std::string const& session);
+void clear_session_cancel(std::filesystem::path const& workspace, std::string const& session);
+
 }  // namespace cppchain::workflow

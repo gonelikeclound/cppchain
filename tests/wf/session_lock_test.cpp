@@ -102,3 +102,16 @@ TEST(WfSessionLock, release_only_removes_own_lock) {
   EXPECT_TRUE(std::filesystem::exists(session_lock_path(tmp.dir, "s1")));  // 不误删
   std::filesystem::remove(session_lock_path(tmp.dir, "s1"));
 }
+
+// P1：取消标记读写/清除
+TEST(WfSessionLock, cancel_marker_roundtrip) {
+  TempDir tmp;
+  EXPECT_FALSE(read_session_cancel(tmp.dir, "s1").has_value());
+  ASSERT_TRUE(write_session_cancel(tmp.dir, "s1", 12345, "run-x"));
+  auto const req = read_session_cancel(tmp.dir, "s1");
+  ASSERT_TRUE(req.has_value());
+  EXPECT_EQ(req->pid, 12345);
+  EXPECT_EQ(req->run, "run-x");
+  clear_session_cancel(tmp.dir, "s1");
+  EXPECT_FALSE(read_session_cancel(tmp.dir, "s1").has_value());
+}

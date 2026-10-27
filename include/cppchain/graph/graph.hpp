@@ -69,6 +69,9 @@ struct InvokeOptions {
   EventMode mode = EventMode::Updates;
   std::optional<Json> resume = std::nullopt;   // 对上次 interrupt 的答复
   std::optional<ForkSpec> fork = std::nullopt; // 时间旅行分叉：从历史 checkpoint 恢复并继续
+  // 宿主取消钩子（problems/07 §8 P1）：**节点边界**检查；返回 true → 不再执行后续节点，
+  // invoke 以 GraphError::Kind::Cancelled 结束（已完成的节点 update 保留在 state/snapshot）。
+  std::function<bool()> should_stop = nullptr;
 };
 
 // 悬挂信号：节点内 interrupt(payload) 首次调用抛出，引擎据此暂停 + 落盘。
@@ -148,7 +151,7 @@ inline Json interrupt(Json const& payload, NodeContext& ctx) {
 struct GraphError {
   enum class Kind { InvalidGraph, UnknownNode, RecursionLimit, NodeError,
                     InterruptUnavailable, ResumeNotInterrupted, CheckpointNotFound,
-                    ConcurrentWriteConflict };
+                    ConcurrentWriteConflict, Cancelled };
   Kind kind = Kind::InvalidGraph;
   std::string message;
 
@@ -165,6 +168,7 @@ inline std::string_view graph_error_kind(GraphError::Kind k) {
     case GraphError::Kind::ResumeNotInterrupted: return "resume_not_interrupted";
     case GraphError::Kind::CheckpointNotFound: return "checkpoint_not_found";
     case GraphError::Kind::ConcurrentWriteConflict: return "concurrent_write_conflict";
+    case GraphError::Kind::Cancelled: return "cancelled";
   }
   return "unknown";
 }

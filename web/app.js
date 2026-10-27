@@ -437,6 +437,10 @@ function appendTool(text) {
 
 // 解析一条事件：把 model/run_tools 的 node_end payload.messages 增量渲染（AI 文本 / 工具结果）
 function renderStreamEvent(e) {
+  if (e.type === "cancelled") {
+    appendMsg("error-line", "已取消（节点边界停止；已完成进度已保留）");
+    return;
+  }
   if (e.type !== "node_end") return;
   // 跳过 load_history：它的 payload.messages 是**整段历史回放**（第 N 轮会把前 N-1 轮全量带上），
   // 若当增量渲染会导致历史反复叠加（"AbCd→AbCad"）。历史由 selectSession 的 renderHistory 负责。
@@ -524,6 +528,19 @@ async function refreshWs(name) {
 function setBusy(b) {
   $("busy").classList.toggle("hidden", !b);
   $("send").disabled = b;
+  $("stop").classList.toggle("hidden", !b);  // 运行中才显示"停止"
+}
+
+// 取消当前轮（problems/07 §8 P1）：写 <session>.cancel，wfr 在节点边界退出。
+async function cancelCurrent() {
+  const w = currentWs();
+  if (!w || !state.session) return;
+  try {
+    const r = await raw("cancel", { ws: w.dir, s: state.session });
+    appendMsg("error-line", r.msg || (r.cancelled ? "已请求取消…" : "没有进行中的查询"));
+  } catch (e) {
+    appendMsg("error-line", "取消失败: " + e.message);
+  }
 }
 
 // ---- 事件 ----
@@ -537,6 +554,7 @@ $("tab-chat").addEventListener("click", () => setTab("chat"));
 $("tab-debug").addEventListener("click", () => setTab("debug"));
 $("dbg-refresh").addEventListener("click", toggleDebug);
 $("send").addEventListener("click", send);
+$("stop").addEventListener("click", cancelCurrent);
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
