@@ -19,11 +19,11 @@ PORT="${1:-8000}"
 BIN="${WFR_BIN:-$PWD/build/dev/bin/wfr}"
 mkdir -p web/cgi-bin
 # wfr_cgi 产物若已构建则软链；未构建则先编
-if [[ ! -x build/dev/examples/wfr_cgi ]]; then
+if [[ ! -x build/dev/bin/wfr_cgi ]]; then
   source ~/opt/gcc16/env.sh
-  cmake --build --preset dev --target wfr_cgi
+  cmake --build --preset dev --target wfr_cgi wfr
 fi
-ln -sf ../../build/dev/examples/wfr_cgi web/cgi-bin/wfr_cgi
+ln -sf ../../build/dev/bin/wfr_cgi web/cgi-bin/wfr_cgi
 ln -sf ../../build/dev/bin/wfr web/wfr_bin          # 供 CGI 默认路径走 web 相对（可选）
 
 export WFR_BIN="${WFR_BIN:-$PWD/build/dev/bin/wfr}"
