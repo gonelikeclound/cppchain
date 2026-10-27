@@ -3,8 +3,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <expected>
 #include <fstream>
+#include <iterator>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -25,12 +28,19 @@ bool is_within(std::filesystem::path const& base, std::filesystem::path const& p
   return ps.compare(0, bs.size(), bs) == 0 && ps[bs.size()] == '/';
 }
 
+// 不切断多字节字符的最大前缀长度（≤ max_bytes）——分页需要精确的字节数做 next_offset
+std::size_t utf8_prefix_len(std::string_view s, std::size_t max_bytes) {
+  if (s.size() <= max_bytes) return s.size();
+  std::size_t end = max_bytes;
+  while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) --end;
+  return end;
+}
+
 // UTF-8 安全截断（不切断多字节字符，尾部加省略号）—— 与 fetch_url 同款，本地复制避免耦合
 std::string utf8_truncate(std::string_view s, std::size_t max_chars) {
-  if (s.size() <= max_chars) return std::string(s);
-  std::size_t end = max_chars;
-  while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) --end;
-  return std::string(s.substr(0, end)) + "…";
+  std::size_t const keep = utf8_prefix_len(s, max_chars);
+  if (keep == s.size()) return std::string(s);
+  return std::string(s.substr(0, keep)) + "…";
 }
 
 std::string kPathError(std::string_view p) {
@@ -73,13 +83,18 @@ ToolSpec make_file_read_tool(FileToolsConfig cfg) {
   ToolSpec spec = make_tool(
       "file_read",
       "读取沙箱内的文本文件内容（只读，无副作用）。路径一律**相对**沙箱根目录，"
-      "例如读取根目录下 notes/a.txt 传 notes/a.txt。返回 {path, size, content, truncated}；"
-      "大文件会按 max_chars 截断并在 truncated 标出。读目录请用 list_dir，"
-      "找文件位置先 list_dir 再看。文件不存在/是目录/二进制 → 报错并说明原因。",
+      "例如读取根目录下 notes/a.txt 传 notes/a.txt。返回 {path, size, offset, next_offset, "
+      "content, truncated}。大文件可用 offset+max_chars 分页：next_offset 非空表示后面还有，"
+      "把它当下一轮 offset 即可顺序读全（content 末尾的「…」是截断标记，不是文件内容）。"
+      "读目录请用 list_dir，找文件位置先 list_dir 或 file_grep。"
+      "文件不存在/是目录/二进制 → 报错并说明原因。",
       SchemaBuilder()
           .prop("path", "string", "相对沙箱根目录的文件路径，如 notes/a.txt")
+          .prop("offset", "integer",
+                "从文件的第几个字节开始读（≥0，默认 0）；配合 next_offset 顺序读全",
+                /*required=*/false)
           .prop("max_chars", "integer",
-                "返回正文的最大字符数（1–8000，默认 4000）；控制上下文占用",
+                "本次返回正文的最大字节数（1–8000，默认 4000）；控制上下文占用",
                 /*required=*/false)
           .build(),
       [cfg, root](nlohmann::json const& args, ToolContext& ctx)
@@ -98,6 +113,13 @@ ToolSpec make_file_read_tool(FileToolsConfig cfg) {
                                              std::to_string(cfg.max_read_chars) + " 的整数"});
           max_chars = it->get<long>();
         }
+        long long offset = 0;
+        if (auto it = args.find("offset"); it != args.end() && !it->is_null()) {
+          if (!it->is_number_integer() || it->get<long long>() < 0)
+            return std::unexpected(
+                ToolError{"argument 'offset' invalid: 需为 ≥0 的整数（字节起点）"});
+          offset = it->get<long long>();
+        }
 
         std::error_code e2;
         if (!std::filesystem::exists(*target, e2))
@@ -113,21 +135,44 @@ ToolSpec make_file_read_tool(FileToolsConfig cfg) {
           return std::unexpected(ToolError{"无法打开文件：「" + *path + "」（不存在或权限不足）。"});
 
         auto const size = std::filesystem::file_size(*target, e2);  // 失败 → 0，仅作展示
-        long const to_read = static_cast<long>(
-            std::min<std::uintmax_t>(size, static_cast<std::uintmax_t>(max_chars + 1)));
+        if (static_cast<std::uintmax_t>(offset) > size)
+          return std::unexpected(ToolError{"argument 'offset' 超出文件大小（" + std::to_string(size) +
+                                           " 字节）：「" + *path + "」"});
+
+        // 多读 4 字节：用于对齐起始字节（offset 可能落在多字节字符中间）并判断"是否还有后文"
+        auto const to_read = static_cast<std::uintmax_t>(std::min<std::uintmax_t>(
+            size - static_cast<std::uintmax_t>(offset),
+            static_cast<std::uintmax_t>(max_chars) + 4));
+        in.seekg(static_cast<std::streamoff>(offset));
         std::string data(static_cast<std::size_t>(to_read), '\0');
-        in.read(data.data(), to_read);
+        in.read(data.data(), static_cast<std::streamsize>(to_read));
         data.resize(static_cast<std::size_t>(in.gcount()));
 
         if (data.find('\0') != std::string::npos)
           return std::unexpected(ToolError{"检测到二进制内容（NUL 字节），不适合按文本读取；"
                                            "请确认路径或换一个文本文件。"});
-        bool const truncated = data.size() > static_cast<std::size_t>(max_chars);
-        if (truncated) data = utf8_truncate(data, static_cast<std::size_t>(max_chars));
-        return nlohmann::json{{"path", *path},
-                              {"size", static_cast<long long>(size)},
-                              {"content", std::move(data)},
-                              {"truncated", truncated}};
+
+        // 起点对齐：offset 落在续字节上时前移到下一个字符边界（保证返回合法 UTF-8）
+        std::size_t start = 0;
+        while (start < data.size() && (static_cast<unsigned char>(data[start]) & 0xC0) == 0x80)
+          ++start;
+        data.erase(0, start);
+        long long const actual_offset = offset + static_cast<long long>(start);
+
+        std::size_t const kept = utf8_prefix_len(data, static_cast<std::size_t>(max_chars));
+        bool const truncated = static_cast<std::uintmax_t>(actual_offset) + kept < size;
+        std::string content = data.substr(0, kept);
+        if (truncated) content += "…";
+        nlohmann::json out{{"path", *path},
+                           {"size", static_cast<long long>(size)},
+                           {"offset", actual_offset},
+                           {"content", std::move(content)},
+                           {"truncated", truncated}};
+        // 分页：next_offset 非空 = 后面还有内容；把它当下一轮 offset 即可顺序读全
+        out["next_offset"] = truncated
+                                 ? nlohmann::json(actual_offset + static_cast<long long>(kept))
+                                 : nlohmann::json(nullptr);
+        return out;
       },
       /*read_only=*/true);
   spec.ttl = cfg.ttl;  // 文件快照 30 秒后视为可能过期
@@ -318,11 +363,179 @@ ToolSpec make_list_dir_tool(FileToolsConfig cfg) {
   return spec;
 }
 
+ToolSpec make_file_grep_tool(FileToolsConfig cfg) {
+  auto const root = std::filesystem::absolute(cfg.root_dir);
+  std::error_code ec;
+  std::filesystem::create_directories(root, ec);
+
+  ToolSpec spec = make_tool(
+      "file_grep",
+      "在沙箱内按行做正则搜索（只读，无副作用）。路径相对沙箱根目录，缺省搜整个沙箱；"
+      "path 可为子目录或单个文件。返回 {pattern, path, matches:[{path, line, text}], "
+      "match_count, files_searched, files_skipped, truncated}；line 为 1 起的行号，"
+      "text 是命中的整行（超长会截断）。正则语法 ECMAScript；二进制与超大文件会跳过并计入 "
+      "files_skipped。**没命中 ≠ 内容不存在**——词面不匹配（同义/变形）时改用其它检索方式，"
+      "别据此断言缺失。已知要找的字面/模式时，优先用它定位，再 file_read 只读命中附近。",
+      SchemaBuilder()
+          .prop("pattern", "string", "正则表达式（ECMAScript 语法），如 \"ERROR|Timeout\"")
+          .prop("path", "string", "相对沙箱根目录的子目录或文件路径，缺省 \".\"（整个沙箱）",
+                /*required=*/false)
+          .prop("ignore_case", "boolean", "true=忽略大小写（默认 false）", /*required=*/false)
+          .prop("max_matches", "integer",
+                "最多返回的命中行数（1–200，默认 50）；达到上限时 truncated=true",
+                /*required=*/false)
+          .prop("max_line_chars", "integer",
+                "单行展示的最大字节数（1–1000，默认 200），超长行截断后附「…」",
+                /*required=*/false)
+          .build(),
+      [cfg, root](nlohmann::json const& args, ToolContext& ctx)
+          -> std::expected<nlohmann::json, ToolError> {
+        (void)ctx;
+        auto pattern = arg<std::string>(args, "pattern");
+        if (!pattern) return std::unexpected(pattern.error());
+        if (pattern->empty())
+          return std::unexpected(ToolError{"argument 'pattern' invalid: 不能为空"});
+
+        std::string rpath = ".";
+        if (auto p = arg<std::string>(args, "path", /*required=*/false); p && !p->empty())
+          rpath = *p;
+        auto const target = resolve_path_in_root(root, rpath);
+        if (!target) return std::unexpected(ToolError{kPathError(rpath)});
+
+        bool ignore_case = false;
+        if (auto it = args.find("ignore_case"); it != args.end() && !it->is_null()) {
+          if (!it->is_boolean())
+            return std::unexpected(ToolError{"argument 'ignore_case' invalid: 需为布尔值"});
+          ignore_case = it->get<bool>();
+        }
+        long max_matches = cfg.default_grep_matches;
+        if (auto it = args.find("max_matches"); it != args.end() && !it->is_null()) {
+          if (!it->is_number_integer() || it->get<long>() < 1 ||
+              it->get<long>() > cfg.max_grep_matches)
+            return std::unexpected(ToolError{"argument 'max_matches' invalid: 需为 1–" +
+                                             std::to_string(cfg.max_grep_matches) + " 的整数"});
+          max_matches = it->get<long>();
+        }
+        long max_line_chars = cfg.default_grep_line_chars;
+        if (auto it = args.find("max_line_chars"); it != args.end() && !it->is_null()) {
+          if (!it->is_number_integer() || it->get<long>() < 1 ||
+              it->get<long>() > cfg.max_grep_line_chars)
+            return std::unexpected(ToolError{"argument 'max_line_chars' invalid: 需为 1–" +
+                                             std::to_string(cfg.max_grep_line_chars) + " 的整数"});
+          max_line_chars = it->get<long>();
+        }
+
+        std::regex re;
+        try {
+          auto flags = std::regex_constants::ECMAScript;
+          if (ignore_case) flags = flags | std::regex_constants::icase;
+          re = std::regex(*pattern, flags);
+        } catch (std::regex_error const& e) {
+          return std::unexpected(ToolError{"正则表达式无效：「" + *pattern + "」——" + e.what()});
+        }
+
+        std::error_code e2;
+        if (!std::filesystem::exists(*target, e2))
+          return std::unexpected(ToolError{"路径不存在：「" + rpath + "」；请先用 list_dir 确认。"});
+
+        // 收集候选文件（确定顺序：按路径字典序；不跟随符号链接，防逃逸）
+        std::vector<std::filesystem::path> files;
+        if (std::filesystem::is_regular_file(*target, e2)) {
+          files.push_back(*target);
+        } else if (std::filesystem::is_directory(*target, e2)) {
+          for (std::filesystem::recursive_directory_iterator
+                   it(*target, std::filesystem::directory_options::skip_permission_denied, e2),
+               end;
+               it != end; it.increment(e2)) {
+            if (e2) { e2.clear(); continue; }  // 权限/竞态错误：跳过该条目，不中断整次搜索
+            auto const st = std::filesystem::symlink_status(*it, e2);
+            if (st.type() == std::filesystem::file_type::symlink) {
+              if (it->is_directory(e2)) it.disable_recursion_pending();  // 目录链接不跟进
+              continue;
+            }
+            if (it->is_regular_file(e2)) files.push_back(it->path());
+          }
+        } else {
+          return std::unexpected(
+              ToolError{"「" + rpath + "」既不是普通文件也不是目录；请确认路径。"});
+        }
+        std::sort(files.begin(), files.end(), [](auto const& a, auto const& b) {
+          return a.generic_string() < b.generic_string();
+        });
+
+        auto arr = nlohmann::json::array();
+        long match_count = 0;
+        long files_searched = 0;
+        long files_skipped = 0;
+        std::uintmax_t bytes_scanned = 0;
+        bool truncated = false;
+        for (auto const& f : files) {
+          if (match_count >= max_matches) { truncated = true; break; }
+          if (bytes_scanned >= cfg.max_grep_scan_bytes) { truncated = true; break; }  // 总预算封顶
+          if (std::filesystem::file_size(f, e2) > cfg.max_grep_file_bytes) {
+            ++files_skipped;  // 超大文件：跳过（避免一次搜索吃掉全部预算）
+            continue;
+          }
+          std::ifstream in(f, std::ios::binary);
+          if (!in) { ++files_skipped; continue; }
+          std::string data((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>{});
+          if (data.find('\0') != std::string::npos) { ++files_skipped; continue; }  // 二进制
+          ++files_searched;
+          bytes_scanned += data.size();
+
+          std::string const rel = [&] {
+            std::error_code re2;
+            auto r = std::filesystem::relative(f, root, re2);
+            return re2 ? f.generic_string() : r.generic_string();
+          }();
+          std::size_t pos = 0;
+          long line_no = 0;
+          while (pos <= data.size()) {
+            std::size_t const nl = data.find('\n', pos);
+            std::size_t const endp = nl == std::string::npos ? data.size() : nl;
+            std::string line = data.substr(pos, endp - pos);
+            if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF
+            ++line_no;
+            bool hit = false;
+            try {
+              hit = std::regex_search(line, re);
+            } catch (std::regex_error const& ex) {
+              // 复杂模式可能在匹配期抛（如复杂度上限）；一次搜索失败不该炸整个工具
+              return std::unexpected(ToolError{"正则匹配失败：「" + *pattern + "」——" + ex.what()});
+            }
+            if (hit) {
+              arr.push_back({{"path", rel},
+                             {"line", line_no},
+                             {"text", utf8_truncate(line, static_cast<std::size_t>(max_line_chars))}});
+              ++match_count;
+              if (match_count >= max_matches) { truncated = true; break; }
+            }
+            if (nl == std::string::npos) break;
+            pos = nl + 1;
+          }
+        }
+
+        return nlohmann::json{{"pattern", *pattern},
+                              {"path", rpath},
+                              {"matches", std::move(arr)},
+                              {"match_count", match_count},
+                              {"files_searched", files_searched},
+                              {"files_skipped", files_skipped},
+                              {"bytes_scanned", bytes_scanned},
+                              {"truncated", truncated}};
+      },
+      /*read_only=*/true);
+  spec.ttl = cfg.ttl;  // 文件内容快照 30 秒后视为可能过期
+  return spec;
+}
+
 std::vector<ToolSpec> make_file_tools(FileToolsConfig cfg) {
   std::vector<ToolSpec> out;
   out.push_back(make_file_read_tool(cfg));
   out.push_back(make_file_write_tool(cfg));
   out.push_back(make_list_dir_tool(cfg));
+  out.push_back(make_file_grep_tool(cfg));
   return out;
 }
 

@@ -64,6 +64,7 @@ using cppchain::tool::make_calculator_tool;
 using cppchain::tool::make_datetime_tool;
 using cppchain::tool::make_sketch_verify_tool;
 using cppchain::tool::make_file_read_tool;
+using cppchain::tool::make_file_grep_tool;
 using cppchain::tool::make_list_dir_tool;
 using cppchain::tool::make_weather_tool;
 using cppchain::tool::make_web_search_tool;
@@ -531,6 +532,7 @@ int main(int argc, char** argv) {
   ft_cfg.root_dir = std::filesystem::absolute(workdir);  // 沙箱根 = 工作区；越界/绝对路径/链接逃逸由工具拒
   registry.add(make_file_read_tool(ft_cfg));
   registry.add(make_list_dir_tool(ft_cfg));
+  registry.add(make_file_grep_tool(ft_cfg));  // problems/02 追加 S2：确定性定位（大文件不整段喂）
   registry.add(make_file_write_tool(ft_cfg));
   // wfr-context（⑤）：HMI 编辑器 skill 文档 + LLM Wiki 检索（目录由 WFR_SKILL_DIR /
   // WFR_WIKI_DIR 指定；未配置 → 工具运行时报错，不影响其它工具）。
@@ -557,27 +559,28 @@ int main(int argc, char** argv) {
   comps.toolsets["all"] = all_tools;
   comps.toolsets["ts"] = all_tools;
   // 内置 chat 专用：常用件 + 文件对（天气/搜索之外，兑现 artifact 引用 + 写文件）
-  comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir", "file_write",
-                            "read_skill", "wiki_search"};
+  comps.toolsets["chat"] = {"get_weather", "web_search", "file_read", "list_dir", "file_grep",
+                            "file_write", "read_skill", "wiki_search"};
   // 题目修订工作流：只给一个自检工具（模型生成 sketch 后必须调用）。
   comps.toolsets["question"] = {"verify_sketch"};
   // wfr-㊸ @②：chat 的增强档 —— 带上 bash（副作用任意 → NeedHuman 人审悬挂）。
   // 独立 toolset，不污染既有 chat 的既有行为（approve_bash_demo 等用它）。
   comps.toolsets["chat_bash"] = {"get_weather", "web_search", "file_read",
-                                 "list_dir",    "file_write", "bash",
-                                 "read_skill", "wiki_search"};
+                                 "list_dir",    "file_grep",  "file_write",
+                                 "bash",        "read_skill", "wiki_search"};
   // B2-B 出行规划工具面：只读业务 DB 查询 + submit_result（自动验证器写 .out/trip_verdict.json）
   {
     auto ts = tool::make_trip_tools();
     std::vector<std::string> names;
     for (auto& t : ts) { names.push_back(t.name); registry.add(std::move(t)); }
     names.push_back("get_weather");
-    names.insert(names.end(), {"file_read", "file_write", "list_dir"});  // A2：D1 L2 用 file 落盘判据
+    // A2：D1 L2 用 file 落盘判据；problems/02 S2：file_grep 供确定性定位
+    names.insert(names.end(), {"file_read", "file_write", "list_dir", "file_grep"});
     comps.toolsets["trip"] = std::move(names);
   }
   // A6（problems/39）：验收 subagent 的只读工具面（verify kind=agent 用）。
   // 只放读工具——写工具不在 registry 里，验收者模型发不出写调用（"不存在而非被拒"）。
-  comps.toolsets["verify_ro"] = {"file_read", "list_dir"};
+  comps.toolsets["verify_ro"] = {"file_read", "list_dir", "file_grep"};
 
   // 治理（problems/33 · G4 包装层自检）：有副作用却未声明效果分类的工具 → 启动即失败。
   // 缺省 Read = 只读；read_only=false 必须显式声明 Idempotent/Irreversible（否则运行期遗漏是静默的）。

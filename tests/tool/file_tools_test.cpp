@@ -257,6 +257,89 @@ TEST_F(FileToolsTest, MissingPathIsArgError) {
   EXPECT_NE(r.error().message.find("path"), std::string::npos);
 }
 
+// ---- file_read 分页（problems/02 追加 S1：offset / next_offset）----
+
+TEST_F(FileToolsTest, ReadOffsetWindowAndNextOffset) {
+  write_file("a.txt", "0123456789");
+  auto spec = make_spec("file_read");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "a.txt"}, {"offset", 3}, {"max_chars", 4}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("content").get<std::string>(), "3456…");  // 「…」是截断标记，不是文件内容
+  EXPECT_EQ(r->at("offset").get<long long>(), 3);
+  EXPECT_EQ(r->at("next_offset").get<long long>(), 7);
+  EXPECT_TRUE(r->at("truncated").get<bool>());
+  EXPECT_EQ(r->at("size").get<long long>(), 10);
+}
+
+TEST_F(FileToolsTest, ReadOffsetAtEndIsEmptyAndDone) {
+  write_file("a.txt", "abc");
+  auto spec = make_spec("file_read");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "a.txt"}, {"offset", 3}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("content").get<std::string>(), "");
+  EXPECT_FALSE(r->at("truncated").get<bool>());
+  EXPECT_TRUE(r->at("next_offset").is_null());
+}
+
+TEST_F(FileToolsTest, ReadOffsetBeyondSizeIsError) {
+  write_file("a.txt", "abc");
+  auto spec = make_spec("file_read");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "a.txt"}, {"offset", 99}}, ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().message.find("offset"), std::string::npos);
+}
+
+TEST_F(FileToolsTest, ReadOffsetSnapsToUtf8Boundary) {
+  write_file("u.txt", "一二三");  // 9 字节
+  auto spec = make_spec("file_read");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "u.txt"}, {"offset", 1}}, ctx);  // 落在「一」的续字节上
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("offset").get<long long>(), 3);  // 前移到下一个字符边界
+  EXPECT_EQ(r->at("content").get<std::string>(), "二三");
+  EXPECT_FALSE(r->at("truncated").get<bool>());
+  EXPECT_TRUE(r->at("next_offset").is_null());
+}
+
+TEST_F(FileToolsTest, ReadPagingReconstructsWholeFile) {
+  std::string const full = "第一段：abc\n第二段：def\n第三行结束";
+  write_file("page.txt", full);
+  auto spec = make_spec("file_read");
+  ToolContext ctx = make_ctx();
+
+  std::string rebuilt;
+  long long offset = 0;
+  for (int guard = 0; guard < 100; ++guard) {
+    auto r = spec.handler(
+        json{{"path", "page.txt"}, {"offset", offset}, {"max_chars", 7}}, ctx);
+    ASSERT_TRUE(r.has_value()) << r.error().message;
+    std::string content = r->at("content").get<std::string>();
+    bool const truncated = r->at("truncated").get<bool>();
+    if (truncated) {
+      ASSERT_FALSE(content.empty());
+      ASSERT_TRUE(content.ends_with("…"));
+      content.resize(content.size() - std::string("…").size());  // 「…」不在文件里
+      ASSERT_FALSE(r->at("next_offset").is_null());
+      long long const next = r->at("next_offset").get<long long>();
+      EXPECT_GT(next, offset);  // 必须前进，否则死循环
+      rebuilt += content;
+      offset = next;
+      continue;
+    }
+    rebuilt += content;
+    EXPECT_TRUE(r->at("next_offset").is_null());
+    break;
+  }
+  EXPECT_EQ(rebuilt, full);
+}
+
 // ---- list_dir ----
 
 TEST_F(FileToolsTest, ListEmptyDir) {
@@ -321,24 +404,131 @@ TEST_F(FileToolsTest, ListRejectsTraversal) {
   EXPECT_NE(r.error().message.find("越界"), std::string::npos);
 }
 
+// ---- file_grep（problems/02 追加 S2：确定性定位）----
+
+TEST_F(FileToolsTest, GrepFindsMatchesWithLineNumbers) {
+  write_file("a.txt", "alpha\nbeta ERROR here\ngamma\n");
+  write_file("sub/b.log", "ok\nERROR second\n");
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", "ERROR"}, {"path", "."}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("match_count").get<long>(), 2);
+  EXPECT_EQ(r->at("files_searched").get<long>(), 2);
+  EXPECT_FALSE(r->at("truncated").get<bool>());
+  auto const& m = r->at("matches");
+  ASSERT_EQ(m.size(), 2u);
+  EXPECT_EQ(m[0].at("path").get<std::string>(), "a.txt");  // 路径字典序
+  EXPECT_EQ(m[0].at("line").get<long>(), 2);               // 行号从 1 起
+  EXPECT_EQ(m[0].at("text").get<std::string>(), "beta ERROR here");
+  EXPECT_EQ(m[1].at("path").get<std::string>(), "sub/b.log");
+  EXPECT_EQ(m[1].at("line").get<long>(), 2);
+}
+
+TEST_F(FileToolsTest, GrepSingleFileAndIgnoreCase) {
+  write_file("a.txt", "first\nSecond Error\nthird\n");
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(
+      json{{"pattern", "error"}, {"path", "a.txt"}, {"ignore_case", true}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("match_count").get<long>(), 1);
+  EXPECT_EQ(r->at("matches")[0].at("line").get<long>(), 2);
+  EXPECT_EQ(r->at("files_searched").get<long>(), 1);
+}
+
+TEST_F(FileToolsTest, GrepRespectsMaxMatches) {
+  write_file("a.txt", "hit 1\nhit 2\nhit 3\n");
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", "hit"}, {"max_matches", 2}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("match_count").get<long>(), 2);
+  EXPECT_TRUE(r->at("truncated").get<bool>());
+}
+
+TEST_F(FileToolsTest, GrepInvalidRegexIsError) {
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", "([unclosed"}}, ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().message.find("正则"), std::string::npos);
+}
+
+TEST_F(FileToolsTest, GrepSkipsBinaryAndReportsIt) {
+  write_file("a.txt", "ok\nERROR text\n");
+  {
+    std::ofstream out(root_ / "bin.dat", std::ios::binary);
+    std::string const s = std::string("ERROR") + '\0' + "tail";
+    out.write(s.data(), static_cast<std::streamsize>(s.size()));
+  }
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", "ERROR"}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("match_count").get<long>(), 1);  // 二进制里的命中不算
+  EXPECT_EQ(r->at("files_skipped").get<long>(), 1);  // 但如实报告跳过
+}
+
+TEST_F(FileToolsTest, GrepHonoursTotalScanBudget) {
+  write_file("a.txt", "nomatch\n");
+  write_file("b.txt", "TARGET\n");  // 本应命中，但总扫描预算在扫完 a 后已耗尽
+  FileToolsConfig cfg = make_cfg();
+  cfg.max_grep_scan_bytes = 1;
+  auto spec = make_file_grep_tool(cfg);
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", "TARGET"}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(r->at("match_count").get<long>(), 0);
+  EXPECT_EQ(r->at("files_searched").get<long>(), 1);
+  EXPECT_TRUE(r->at("truncated").get<bool>());  // 不是"没有"，而是"没扫完"
+}
+
+TEST_F(FileToolsTest, GrepRejectsTraversal) {
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", "x"}, {"path", ".."}}, ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().message.find("越界"), std::string::npos);
+}
+
+TEST_F(FileToolsTest, GrepEmptyPatternIsArgError) {
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", ""}}, ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().message.find("pattern"), std::string::npos);
+}
+
 // ---- 副作用语义 ----
 
 TEST_F(FileToolsTest, ReadOnlyFlagsMatchSideEffectSemantics) {
   EXPECT_TRUE(make_file_read_tool(make_cfg()).read_only);
   EXPECT_TRUE(make_list_dir_tool(make_cfg()).read_only);
+  EXPECT_TRUE(make_file_grep_tool(make_cfg()).read_only);
   EXPECT_FALSE(make_file_write_tool(make_cfg()).read_only);  // 写 = 副作用，走审批 + 防重放
 }
 
 TEST_F(FileToolsTest, SnapshotTtlOnlyOnReadTools) {
   EXPECT_TRUE(make_file_read_tool(make_cfg()).ttl.has_value());
   EXPECT_TRUE(make_list_dir_tool(make_cfg()).ttl.has_value());
+  EXPECT_TRUE(make_file_grep_tool(make_cfg()).ttl.has_value());
   EXPECT_FALSE(make_file_write_tool(make_cfg()).ttl.has_value());
 }
 
 TEST_F(FileToolsTest, BatchFactoryNames) {
   auto tools = make_file_tools(make_cfg());
-  ASSERT_EQ(tools.size(), 3u);
+  ASSERT_EQ(tools.size(), 4u);
   EXPECT_EQ(tools[0].name, "file_read");
   EXPECT_EQ(tools[1].name, "file_write");
   EXPECT_EQ(tools[2].name, "list_dir");
+  EXPECT_EQ(tools[3].name, "file_grep");
 }

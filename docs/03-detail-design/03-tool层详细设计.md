@@ -69,16 +69,21 @@
 **可测性**：纯函数暴露给单测，HTTP 路径复用 `FakeTransport` → 新增 **30 项测试全绿**、`ctest` 全量 210 通过。
 **demo**：`examples/tools_frontline`（离线跑通：时间/时区、精确计算、除零错误回喂、抓页剥标签）。
 
-## 7. 文件系统工具三件套：file_read / file_write / list_dir（第二档）
+## 7. 文件系统工具四件套：file_read / file_write / list_dir / file_grep（第二档）
+
+> 2026-10-27 增补（`04-problems/02` 追加 S1/S2）：`file_read` 加 `offset`/`next_offset`
+> 分页；新增只读 `file_grep`（沙箱内按行正则，返回 `{path,line,text}`）。两者都服务于
+> "超长工具返回不整段进上下文"的定位/取全轴，详见 problems/02 §7。
 
 > 对应 `04-problems/03-工具副作用`。写工具是项目里**第一个 `read_only=false`** 的内置工具：
 > 一进真实 Agent 循环就会被 `ToolApproval` 审批 + `SideEffectGuard` 防重放消费。
 
 | 工具 | langchain 参照 | read_only | 要点 |
 |---|---|---|---|
-| `file_read` | `ReadFileTool` | ✅ 只读 | `max_chars` 截断（UTF-8 安全）、NUL 二进制检测、是目录/不存在给出可自愈错误 |
+| `file_read` | `ReadFileTool` | ✅ 只读 | `offset`+`max_chars` 分页（`next_offset` 顺序读全）、UTF-8 安全截断、NUL 二进制检测、是目录/不存在给出可自愈错误 |
 | `file_write` | `WriteFileTool` | ❌ **false（副作用）** | 覆盖/追加、自动建父目录、`max_write_chars` 上限；返回 `created` 与 `mode` |
 | `list_dir` | `ListDirectoryTool` | ✅ 只读 | 条目按名称排序 + 类型/大小/修改时间；`max_entries` 兜底 |
+| `file_grep` | （无直接对应，`GrepTool` 形态） | ✅ 只读 | 沙箱内递归按行正则（ECMAScript）；返回 `{path,line,text}` + `max_matches`/单行截断；二进制/超大文件跳过并计数；不跟随符号链接 |
 
 **安全边界（本层最重要的设计）**：所有路径**相对沙箱根目录 `root_dir`** 解析，
 `resolve_path_in_root()` 三重拒绝后才会操作：

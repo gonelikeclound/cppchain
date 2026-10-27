@@ -1,7 +1,8 @@
 // cppchain —— tool/file_tools.hpp
-// 文件系统工具三件套（参照 langchain-community FileManagementToolkit）：
-//   file_read  只读：读文本文件（max_chars 截断、二进制检测）
+// 文件系统工具四件套（参照 langchain-community FileManagementToolkit）：
+//   file_read  只读：读文本文件（offset+max_chars 分页、二进制检测）
 //   list_dir   只读：列目录（名称/类型/大小/修改时间）
+//   file_grep  只读：沙箱内按行正则搜索（确定性定位，不把大文件整段喂给模型）
 //   file_write 副作用：写/追加文本文件，自动建父目录 —— read_only=false，
 //              会被 M7 的 ToolApproval 审批中间件拦截 & SideEffectGuard 防重放记账。
 //
@@ -11,6 +12,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -28,6 +30,12 @@ struct FileToolsConfig {
   std::size_t max_write_chars = 100000;  // file_write 单次写入上限（防 LLM 超长输出）
   long default_list_entries = 100;     // list_dir 默认返回条数
   long max_list_entries = 1000;        // list_dir 可请求的上限
+  long default_grep_matches = 50;      // file_grep 默认最多返回的命中行数
+  long max_grep_matches = 200;         // file_grep 可请求的上限
+  long default_grep_line_chars = 200;  // file_grep 单行展示上限（UTF-8 安全截断）
+  long max_grep_line_chars = 1000;     // 单行展示可请求的上限
+  std::uintmax_t max_grep_file_bytes = 2 * 1024 * 1024;  // 单文件扫描上限（超过跳过并计数）
+  std::uintmax_t max_grep_scan_bytes = 64 * 1024 * 1024;  // 单次 grep 总扫描上限（防病态大搜索）
   // 文件/目录快照时效性：30 秒后视为可能已过期（由 agent::StaleStateGuard 消费）。
   std::chrono::seconds ttl = std::chrono::seconds(30);
 };
@@ -37,9 +45,19 @@ struct FileToolsConfig {
 [[nodiscard]] std::optional<std::filesystem::path> resolve_path_in_root(
     std::filesystem::path const& root, std::string_view user_path);
 
-// file_read（只读）。参数：path（必填，相对 root）、max_chars（可选）。返回：
-//   {path, size, content, truncated}。文件不存在/是目录/二进制 → unexpected(ToolError)。
+// file_read（只读）。参数：path（必填，相对 root）、offset（可选，字节起点，缺省 0）、
+//   max_chars（可选，窗口上限）。返回：{path, size, offset, next_offset, content, truncated}。
+// 分页语义：`next_offset` 非空 = 后面还有内容，把它当下一轮 offset 即可顺序读全；
+// content 末尾的「…」是截断标记（不是文件内容）。文件不存在/是目录/二进制 → unexpected。
 [[nodiscard]] ToolSpec make_file_read_tool(FileToolsConfig cfg);
+
+// file_grep（只读）。参数：pattern（必填，ECMAScript 正则）、path（可选，缺省 "."，
+//   可为子目录或单个文件）、ignore_case（可选）、max_matches（可选）、max_line_chars（可选）。
+// 返回：{pattern, path, matches:[{path, line, text}], match_count, files_searched,
+//        files_skipped, bytes_scanned, truncated}。二进制 / 超过 max_grep_file_bytes 的文件
+// 跳过并计数；总扫描超过 max_grep_scan_bytes → 停止并 truncated=true。
+// **没命中 ≠ 不存在**——词面不匹配时应改用向量/语义检索，别据此断言内容缺失。
+[[nodiscard]] ToolSpec make_file_grep_tool(FileToolsConfig cfg);
 
 // file_write（**read_only=false**，副作用）。参数：path（必填）、content（必填）、
 //   append（可选，默认 false=覆盖写）。返回：{path, bytes_written, created, mode}。
@@ -50,7 +68,7 @@ struct FileToolsConfig {
 //   {path, truncated, entries:[{name, type, size, modified}]}（按名称排序）。
 [[nodiscard]] ToolSpec make_list_dir_tool(FileToolsConfig cfg);
 
-// 三件套批量生成（便捷：直接 reg.add() 循环）
+// 四件套批量生成（便捷：直接 reg.add() 循环；顺序 = read / write / list / grep）
 [[nodiscard]] std::vector<ToolSpec> make_file_tools(FileToolsConfig cfg);
 
 }  // namespace cppchain::tool
