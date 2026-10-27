@@ -33,6 +33,7 @@
 #include "cppchain/agent/history.hpp"
 #include "cppchain/agent/tokens.hpp"
 #include "cppchain/message/content_block.hpp"
+#include "cppchain/message/phantasma.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/message/utf8.hpp"
 #include "cppchain/tool/probe.hpp"
@@ -940,6 +941,84 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
       r = m->invoke(msgs, co);
     }
     if (!r) throw tool::ToolException("model 节点调用失败：" + r.error().message);
+    // ---- problems/50 防幻觉信号灯（切片 3 v0）：@config.anti_phantasma.enabled=on 时 ----
+    // 开：① 所有内容块剥标签（Text/Reasoning，防标签泄漏下游/用户）② 首个 TextBlock 出三态
+    //     回执 ③ 回执进 results[node].phantasma + node_log；默认关 → 完全不动（旧路径零回归）。
+    Json pa_evidence = Json::object();
+    Json const pa_cfg = resolve_parameter(Json("@config.anti_phantasma"), state);
+    if (pa_cfg.is_object() && pa_cfg.value("enabled", false)) {
+      message::PhantasmaHookOptions pa_opt;
+      // 范围（切片 5）：@config.anti_phantasma.domains 关键词命中用户提问；域空/缺省 → 全范围
+      {
+        std::string const last_human = [&] {
+          for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit)
+            if (rit->type == message::Role::Human) return rit->text();
+          return std::string{};
+        }();
+        pa_opt.in_scope =
+            message::phantasma_in_scope(pa_cfg.value("domains", Json::array()), last_human);
+      }
+      pa_opt.reason_gate = true;  // 切片 4：reason 走内置对抗特征表（注入文本信号判无效）
+      pa_opt.risk_veto = pa_cfg.value("risk_veto", false);
+      message::PhantasmaEvidence first_ev;
+      bool have_first = false;
+      for (auto& blk : r->content) {
+        if (auto* rb = std::get_if<message::ReasoningBlock>(&blk)) {
+          rb->reasoning = message::strip_phantasma_signal(rb->reasoning);
+        } else if (auto* tb = std::get_if<message::TextBlock>(&blk)) {
+          message::PhantasmaEvidence const e = message::apply_phantasma_signal(tb->text, pa_opt);
+          tb->text = e.cleaned;
+          if (!have_first) {
+            first_ev = e;
+            have_first = true;
+          }
+        }
+      }
+      pa_evidence = message::phantasma_evidence_to_json(first_ev);
+      pa_evidence["node"] = node_id;
+      // —— 强制取数（切片 5 v0）：范围内 + 需查（absent/未通过）+ 配置允许 + 本轮是文本作答
+      //    且工具集里有 web_search 且上一轮没查过 → 把"直接作答"改成"合成 web_search 调用"，
+      //    让循环 act(run_tools) 真去查、下一轮模型拿到 grounding 再答（天然单轮上限）。
+      bool const in_scope_here = pa_opt.in_scope;
+      bool const need_lookup = first_ev.verdict != message::PhantasmaVerdict::Accepted;
+      bool const want_force = pa_cfg.value("force_lookup", true) && in_scope_here && need_lookup &&
+                              have_first && r->tool_calls.empty();
+      if (want_force) {
+        bool const web_search_on = [&] {
+          if (auto act = scan_active_tools(state); act != std::nullopt && !act->empty()) {
+            for (std::string const& nm : act->order)
+              if (nm == "web_search") return true;
+            return false;
+          }
+          for (std::string const& nm : toolset_names)
+            if (nm == "web_search") return true;
+          return false;
+        }();
+        bool const already_searched = [&] {
+          for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit) {
+            if (rit->type != message::Role::Ai) continue;
+            for (auto const& tc : rit->tool_calls)
+              if (tc.name == "web_search") return true;
+            return false;
+          }
+          return false;
+        }();
+        if (web_search_on && !already_searched) {
+          std::string const last_human = [&] {
+            for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit)
+              if (rit->type == message::Role::Human) return rit->text();
+            return std::string{};
+          }();
+          message::ToolCall tc{"pa_force", "web_search",
+                               Json{{"query", last_human.empty() ? std::string("核实") : last_human}}};
+          r->tool_calls.clear();
+          r->tool_calls.push_back(std::move(tc));
+          r->content.clear();  // 无文本、仅工具调用：route 走 tool_calls → act(run_tools)
+          pa_evidence["forced"] = true;
+        }
+      }
+      if (sink_p) sink_p->log_node(nc.node_name, "debug", "phantasma_signal", pa_evidence);
+    }
     // **只发一次**：回复追加进 messages，循环由 route + 回边负责
     sink_p->log_node(nc.node_name, "info", "model '" + model_name + "' 完成一次调用",
                      Json{{"in_msg", msgs.size()},
@@ -962,6 +1041,7 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     frame["text"] = r->text();
     frame["tool_calls"] = std::move(tcalls);
     frame["extra"] = co.extra;  // 生效的厂商参数（调试台/echo 可见）
+    if (!pa_evidence.empty()) frame["phantasma"] = std::move(pa_evidence);
     Json results = Json::object();
     results[node_id] = std::move(frame);
     Json update = Json::object();

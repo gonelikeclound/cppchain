@@ -65,6 +65,7 @@ KNOWN_DEMOS=(
   "m9_budget:M9 压缩成本量化——token 阈值触发 + 摘要真实 usage（需 LLM 端点）"
   "wf_eval:主动智能 Workflow 生成验收——12 例矩阵 + 调度模拟（需 LLM 端点）"
   "proactive:主动智能演示——ask_user 菜单澄清 → 易读 IR；--intent/--cases 批量自动作答（需 LLM 端点）"
+  "phantasma_demo:problems/50 防幻觉信号灯——范围域 + 强制查证 + 豁免信号三场景（离线）"
 )
 
 describe() {

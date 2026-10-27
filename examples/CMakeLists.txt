@@ -43,6 +43,7 @@ set(HITL_EXAMPLE_TARGETS approve_interrupt)
 set(PROXY_EXAMPLE_TARGETS proxy_call)
 # P1.5 声明式配置（arch 25）demo：declarations.configs 三形态 + ${workdir} 运行变量（纯离线）
 set(CONFIG_DECL_EXAMPLE_TARGETS config_decl)
+set(PHANTASMA_EXAMPLE_TARGETS phantasma_demo)
 # arch 26 project 自管理（第一刀）demo：目录化多文件 + 多任务独立对话 + 项目级注入（纯离线）
 set(PROJECT_EXAMPLE_TARGETS project_run)
 # arch 27 自管理 loop（第一刀）demo：project_drive 调度循环（纯离线）
@@ -72,6 +73,7 @@ list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basic
 list(APPEND EXAMPLE_TARGETS approve_interrupt)
 list(APPEND EXAMPLE_TARGETS ${PROXY_EXAMPLE_TARGETS})  # proxy_call：wfr-㊿ 子 workflow 调用（离线）
 list(APPEND EXAMPLE_TARGETS ${CONFIG_DECL_EXAMPLE_TARGETS})  # config_decl：P1.5 声明式配置（离线）
+  list(APPEND EXAMPLE_TARGETS ${PHANTASMA_EXAMPLE_TARGETS})  # phantasma_demo：防幻觉信号灯（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_EXAMPLE_TARGETS})  # project_run：arch 26 project 结构（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_DRIVE_EXAMPLE_TARGETS})  # project_drive：arch 27 调度循环（离线）
 list(APPEND EXAMPLE_TARGETS ${LONGDOC_EXAMPLE_TARGETS})  # longdoc：arch 28 超长内容通用方法（离线）
@@ -126,6 +128,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   elseif(t IN_LIST PROXY_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow Threads::Threads)
   elseif(t IN_LIST CONFIG_DECL_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_workflow)
+  elseif(t IN_LIST PHANTASMA_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)
   elseif(t IN_LIST PROJECT_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)

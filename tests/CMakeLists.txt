@@ -10,7 +10,9 @@ FetchContent_MakeAvailable(googletest)
 add_executable(message_tests
   message/message_serialization_test.cpp
   message/chunk_merge_test.cpp
-  message/utf8_test.cpp)
+  message/utf8_test.cpp
+  message/phantasma_signal_test.cpp
+  message/phantasma_hook_test.cpp)
 
 target_link_libraries(message_tests PRIVATE
   cppchain_message
@@ -183,6 +185,7 @@ add_executable(workflow_tests
   wf/tool_registry_select_test.cpp
   wf/sidefx_notify_test.cpp
   wf/tool_loop_test.cpp
+  wf/phantasma_wiring_test.cpp
   wf/verify_agent_test.cpp
   wf/artifact_ver_test.cpp
   wf/approve_tools_test.cpp
