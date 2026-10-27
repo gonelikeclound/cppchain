@@ -119,6 +119,11 @@ enum class NodeKind {
                    //   截断）→ 写 state[system_context]（供 model 自动带上）+ results.hits。
   LongdocRelation, // 人物关系/故事线索（全局综合）：读索引聚合 rel_net/threads → 写
                    //   state[system_context]（【人物关系网】+【故事线索】+问题）→ model 作答。
+  // ---- problems/02 追加 S6：file_context —— 文件取数路由（规则判定 + 升级阶梯 + 证据）----
+  FileContext,     // 按最后一条用户提问的形态（结构路径 / 代码字面 / 全局词 / 完整性词）
+                   //   选用 file_extract / file_grep / file_sample，失败自动升级；
+                   //   片段写 state[system_context]，路由尝试与命中落 results.<id>。
+                   //   默认关（@config.file_route.enabled）→ 零回归。
   // ---- ⑤ 动态库导入 ----
   Dynamic,   // 内含 kind 名匹配`导入的动态节点`（见 cppchain/workflow/plugin_node.hpp）；
              // 注意：**框架分发一律按名字走**（node_type_of_name），Dynamic 仅供

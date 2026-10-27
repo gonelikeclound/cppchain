@@ -656,7 +656,9 @@ ValidationResult validate(WorkflowIR const& ir, ValidatorOptions opts) {
                                    target.kind == NodeKind::ProjectDrive ||
                                    // arch 28：longdoc 两节点发布检索 hits / 索引统计
                                    target.kind == NodeKind::LongdocIngest ||
-                                   target.kind == NodeKind::LongdocRetrieve;
+                                   target.kind == NodeKind::LongdocRetrieve ||
+                                   // problems/02 S6：file_context 发布路由尝试/命中证据
+                                   target.kind == NodeKind::FileContext;
             if (!result_ok)
               c.err("VR2", "节点 '" + n.id + "' 的 $'" + r.node +
                                "' 指向非 result 节点（仅 tool / model / run_tools / "

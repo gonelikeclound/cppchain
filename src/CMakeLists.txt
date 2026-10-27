@@ -190,6 +190,7 @@ add_library(cppchain_workflow STATIC
   workflow/compiler.cpp
   workflow/session_log.cpp
   workflow/node_types.cpp
+  workflow/file_route.cpp
   workflow/plugin.cpp
   workflow/import.cpp
   workflow/debug_view.cpp

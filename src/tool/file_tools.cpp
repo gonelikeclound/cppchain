@@ -374,7 +374,8 @@ ToolSpec make_file_grep_tool(FileToolsConfig cfg) {
       "path 可为子目录或单个文件。返回 {pattern, path, matches:[{path, line, text}], "
       "match_count, files_searched, files_skipped, truncated}；line 为 1 起的行号，"
       "text 是命中的整行（超长会截断）。正则语法 ECMAScript；二进制与超大文件会跳过并计入 "
-      "files_skipped。**没命中 ≠ 内容不存在**——词面不匹配（同义/变形）时改用其它检索方式，"
+      "files_skipped；运行目录 .wfr/.git 不进搜索面。**没命中 ≠ 内容不存在**——"
+      "词面不匹配（同义/变形）时改用其它检索方式，"
       "别据此断言缺失。已知要找的字面/模式时，优先用它定位，再 file_read 只读命中附近。",
       SchemaBuilder()
           .prop("pattern", "string", "正则表达式（ECMAScript 语法），如 \"ERROR|Timeout\"")
@@ -451,6 +452,13 @@ ToolSpec make_file_grep_tool(FileToolsConfig cfg) {
             auto const st = std::filesystem::symlink_status(*it, e2);
             if (st.type() == std::filesystem::file_type::symlink) {
               if (it->is_directory(e2)) it.disable_recursion_pending();  // 目录链接不跟进
+              continue;
+            }
+            // 运行态/版本库目录不进搜索面：.wfr 里是本会话日志与产物（会自己搜到自己），
+            // .git 是海量对象（噪声 + 无意义）。需要时可显式传更具体的子路径。
+            if (it->is_directory(e2)) {
+              std::string const name = it->path().filename().string();
+              if (name == ".wfr" || name == ".git") it.disable_recursion_pending();
               continue;
             }
             if (it->is_regular_file(e2)) files.push_back(it->path());

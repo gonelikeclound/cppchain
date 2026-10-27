@@ -7,7 +7,8 @@
       "next": "echo_hist" },
     { "id": "echo_hist", "kind": "echo",
       "text": "🏷️ 历史 $recall.result.mode（budget $recall.result.budget）：$recall.result.before_msgs → $recall.result.after_msgs 条 · $recall.result.before_tokens → $recall.result.after_tokens tok · 丢 $recall.result.dropped_msgs 改 $recall.result.rewritten_msgs",
-      "next": "loop" },
+      "next": "files" },
+    { "id": "files", "kind": "file_context", "next": "loop" },
     { "id": "loop", "kind": "loop", "max": 4, "next": "_turn_end",
       "body": [
         { "id": "think", "kind": "model", "model": "main", "tools": "chat",

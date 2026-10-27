@@ -490,6 +490,19 @@ TEST_F(FileToolsTest, GrepHonoursTotalScanBudget) {
   EXPECT_TRUE(r->at("truncated").get<bool>());  // 不是"没有"，而是"没扫完"
 }
 
+TEST_F(FileToolsTest, GrepSkipsRuntimeDirs) {
+  // .wfr（会话日志/产物）与 .git 不进搜索面：否则"搜到自己刚写的提问"会污染路由
+  write_file(".wfr/sessions/s.log", "NEEDLE inside runtime state\n");
+  write_file("a.txt", "NEEDLE real\n");
+  auto spec = make_spec("file_grep");
+
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"pattern", "NEEDLE"}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  ASSERT_EQ(r->at("match_count").get<long>(), 1);
+  EXPECT_EQ(r->at("matches")[0].at("path").get<std::string>(), "a.txt");
+}
+
 TEST_F(FileToolsTest, GrepRejectsTraversal) {
   auto spec = make_spec("file_grep");
 

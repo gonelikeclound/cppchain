@@ -2,7 +2,8 @@
   "id": "builtin_chat",
   "nodes": [
     { "id": "recall", "kind": "load_history",
-      "path": "@config.workspace", "session": "@config.session", "next": "loop" },
+      "path": "@config.workspace", "session": "@config.session", "next": "files" },
+    { "id": "files", "kind": "file_context", "next": "loop" },
     { "id": "loop", "kind": "loop", "max": 4, "next": "_turn_end",
       "body": [
         { "id": "think", "kind": "model", "model": "main", "tools": "chat",

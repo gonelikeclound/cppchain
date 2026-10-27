@@ -32,6 +32,7 @@
 #include "cppchain/agent/agent.hpp"
 #include "cppchain/agent/artifact.hpp"
 #include "cppchain/agent/history.hpp"
+#include "cppchain/workflow/file_route.hpp"
 #include "cppchain/agent/tokens.hpp"
 #include "cppchain/message/content_block.hpp"
 #include "cppchain/message/phantasma.hpp"
@@ -4907,6 +4908,69 @@ void c_longdoc_relation(NodeIR const& n, NodeType::CompileContext& ctx) {
   ++ctx.registered;
 }
 
+// ---- problems/02 追加 S6：file_context —— 文件取数路由（规则判定 + 升级阶梯 + 证据）----
+void v_file_context(NodeIR const& n, NodeType::ValidateContext const&,
+                    NodeType::ErrorSink const& err) {
+  if (n.next.empty()) err("VN41", "file_context 节点 '" + n.id + "' 缺少 next");
+}
+
+void c_file_context(NodeIR const& n, NodeType::CompileContext& ctx) {
+  tool::ToolRegistry const* reg = ctx.registry;
+  auto sink_p = ctx.sink;
+  ctx.graph.add_node(
+      n.id, [reg, sink_p, node_id = n.id](Json const& state, NodeContext& nc) {
+        Json const cfg = resolve_parameter(Json("@config.file_route"), state);
+        bool on = false;
+        FileRouteOptions opts;
+        if (cfg.is_object()) {
+          on = cfg.value("enabled", false);
+          opts.budget_chars = cfg.value("budget_chars", 2000LL);
+          opts.max_files = cfg.value("max_files", 5LL);
+        } else {
+          // wfr --set 平铺形态：file_route=on
+          std::string flag = cfg.is_string() ? cfg.get<std::string>() : std::string{};
+          if (flag.empty()) flag = resolve_text_parameter("@config.file_route", state);
+          on = (flag == "on" || flag == "true" || flag == "1");
+        }
+        if (!on) return Command::with_update(Json::object());  // 默认关：旧路径零回归
+
+        Json update = Json::object();
+        Json results = Json::object();
+        std::string question;
+        for (auto const& m : messages_from_state(state))
+          if (m.type == message::Role::Human) question = m.text();
+        if (question.empty() || reg == nullptr) {
+          results[node_id] = Json{{"action", "skipped"},
+                                  {"reason", question.empty() ? "没有用户提问" : "无工具注册表"}};
+          update[kResultsKey] = std::move(results);
+          return Command::with_update(std::move(update));
+        }
+
+        FileRouteOutcome out = route_file_question(*reg, question, opts);
+        if (!out.context.empty()) {
+          Json sys = Json::array();
+          for (auto const& m : out.context) sys.push_back(m);
+          update[kSystemContextKey] = std::move(sys);  // model 自动带上（同 longdoc_retrieve）
+        }
+        std::size_t const attempts = out.attempts.size();
+        bool const budget_hit = out.budget_hit;
+        results[node_id] = Json{{"action", out.route == "none" ? "noop" : "route"},
+                                {"route", out.route},
+                                {"attempts", std::move(out.attempts)},
+                                {"candidates", std::move(out.candidates)},
+                                {"budget_hit", budget_hit}};
+        update[kResultsKey] = std::move(results);
+        if (sink_p != nullptr)
+          sink_p->log_node(nc.node_name, "info",
+                           "file_context: route=" + out.route + "（尝试 " +
+                               std::to_string(attempts) + " 次" +
+                               (budget_hit ? "，预算截断" : "") + "）");
+        return Command::with_update(std::move(update));
+      });
+  ctx.graph.add_edge(n.id, ctx.resolve(n.next));
+  ++ctx.registered;
+}
+
 }  // namespace
 
 std::vector<NodeType> const& builtin_node_types() {
@@ -5449,6 +5513,16 @@ std::vector<NodeType> const& builtin_node_types() {
                                     (n.longdoc_query.empty() ? "" : " q=" + n.longdoc_query) +
                                     " → " + n.next; },
        v_longdoc_relation, c_longdoc_relation, e_next, t_none},
+      // ---------------- file_context（problems/02 追加 S6）：文件取数路由 ----------------
+      {NodeKind::FileContext, "file_context",
+       [](Json const& nn) { return kind_is(nn, "file_context"); },
+       [](NodeIR& out, Json const& node) { get_str(out, node, "next", out.next); },
+       [](Json& node, NodeIR const& n) {
+         node["kind"] = "file_context";
+         node["next"] = n.next;
+       },
+       [](NodeIR const& n) { return std::string("file_context → ") + n.next; },
+       v_file_context, c_file_context, e_next, t_none},
       // ---------------- subworkflow（wfr-㊿ proxyNode，arch 24）：运行期调用子 workflow ----------------
       {NodeKind::SubWorkflow, "subworkflow",
        [](Json const& n) { return kind_is(n, "subworkflow"); },
