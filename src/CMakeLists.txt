@@ -50,6 +50,7 @@ add_library(cppchain_tool STATIC
   tool/calculator.cpp
   tool/sketch_verify.cpp
   tool/file_tools.cpp
+  tool/file_extract.cpp
   tool/skill_tools.cpp
   tool/probe.cpp
   tool/exec_guard.cpp

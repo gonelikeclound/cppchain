@@ -50,11 +50,13 @@ int main() {
   FileToolsConfig cfg;
   cfg.root_dir = sandbox;
   auto const tools = make_file_tools(cfg);
-  if (tools.size() != 4) return 1;
+  if (tools.size() != 6) return 1;
   auto const& read_tool = tools[0];
   auto const& write_tool = tools[1];
   auto const& list_tool = tools[2];
   auto const& grep_tool = tools[3];
+  auto const& extract_tool = tools[4];
+  auto const& sample_tool = tools[5];
 
   // 副作用标记一览（写工具是 read_only=false → 走 M7 审批 + 防重放）
   std::println("  [标记] {} read_only={}；{} read_only={}；{} read_only={}；{} read_only={}",
@@ -80,4 +82,29 @@ int main() {
   // ⑨ 确定性定位：只回命中行，不把整份文件喂给模型
   run_tool("⑨ 定位 → file_grep(pattern=\"数据驱动\", path=\".\")", grep_tool,
            json{{"pattern", "数据驱动"}, {"path", "."}});
+
+  // S4/S5：结构化提取 + 采样跳读（先落几份结构化样例）
+  run_tool("⑩ 写样例 → config.json", write_tool,
+           json{{"path", "config.json"},
+                {"content", R"({"server":{"host":"localhost","ports":[80,443]}})"}});
+  run_tool("⑪ 写样例 → app.yaml / doc.md / data.xml", write_tool,
+           json{{"path", "app.yaml"},
+                {"content", "server:\n  host: localhost\n  ports:\n    - 80\n    - 443\n"}});
+  run_tool("⑪b 写样例 → doc.md", write_tool,
+           json{{"path", "doc.md"},
+                {"content", "# 标题\n引言\n## 第一节\nalpha\n### 小节\na1\n## 第二节\nbeta\n"}});
+  run_tool("⑪c 写样例 → data.xml", write_tool,
+           json{{"path", "data.xml"},
+                {"content", "<root><item id=\"1\"><name>alpha</name></item>"
+                            "<item id=\"2\"><name>beta</name></item></root>"}});
+  run_tool("⑫ 结构提取 → file_extract(config.json, selector=/server/ports/1)", extract_tool,
+           json{{"path", "config.json"}, {"selector", "/server/ports/1"}});
+  run_tool("⑬ 结构提取 → file_extract(app.yaml, selector=server.ports.0)", extract_tool,
+           json{{"path", "app.yaml"}, {"selector", "server.ports.0"}});
+  run_tool("⑭ 结构提取 → file_extract(doc.md, selector=\"第一节\")", extract_tool,
+           json{{"path", "doc.md"}, {"selector", "第一节"}});
+  run_tool("⑮ 结构提取 → file_extract(data.xml, selector=root/item[2]/name)", extract_tool,
+           json{{"path", "data.xml"}, {"selector", "root/item[2]/name"}});
+  run_tool("⑯ 采样跳读 → file_sample(doc.md, chars_per_window=20)", sample_tool,
+           json{{"path", "doc.md"}, {"chars_per_window", 20}});
 }

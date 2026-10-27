@@ -19,6 +19,7 @@ set(HTTP_EXAMPLE_TARGETS chat_live)
 # 需要工具库的 demo
 set(TOOL_EXAMPLE_TARGETS tools_basic tools_retrieval tools_retrieval_vector
                          tools_frontline tools_files tools_arxiv m9_hybrid
+                         file_retrieval_eval  # problems/02 追加：七法统一评测（离线）
                          bash_sidefx_analysis
                          mcp_provider      # MCP 二期：三路发现 + provider 节点（离线）
                          vision_agent)     # 看图→调工具→回答 组合 demo（离线）
@@ -66,6 +67,7 @@ set(HTTP_NEEDED_EXAMPLES tools_retrieval_vector structured_output agent_loop con
 list(APPEND EXAMPLE_TARGETS tools_basic tools_retrieval state_basics graph_basics side_effect_guard
                             tools_frontline tools_files tools_arxiv tools_approval
                             m9_hybrid m9_approval m9_artifact bash_sidefx_analysis
+                            file_retrieval_eval  # problems/02 追加：七法统一评测（离线）
                             mcp_provider  # MCP 二期离线 demo（三路发现 + provider）
                             mcp_mock      # 自包含 mock MCP server（HTTP/JSON-RPC + SSE 推送）
                             vision_agent   # 多模态 agent 组合（看图→工具→回答）

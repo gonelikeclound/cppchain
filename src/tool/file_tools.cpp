@@ -536,6 +536,8 @@ std::vector<ToolSpec> make_file_tools(FileToolsConfig cfg) {
   out.push_back(make_file_write_tool(cfg));
   out.push_back(make_list_dir_tool(cfg));
   out.push_back(make_file_grep_tool(cfg));
+  out.push_back(make_file_extract_tool(cfg));
+  out.push_back(make_file_sample_tool(cfg));
   return out;
 }
 

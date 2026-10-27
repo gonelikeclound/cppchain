@@ -508,12 +508,175 @@ TEST_F(FileToolsTest, GrepEmptyPatternIsArgError) {
   EXPECT_NE(r.error().message.find("pattern"), std::string::npos);
 }
 
+// ---- file_extract（problems/02 追加 S4：结构化提取）----
+
+TEST_F(FileToolsTest, ExtractJsonPointerAndDotPath) {
+  write_file("cfg.json", R"({"a":{"b":[{"c":1},{"c":2}]},"name":"x"})");
+  auto spec = make_spec("file_extract");
+  ToolContext ctx = make_ctx();
+
+  auto r1 = spec.handler(json{{"path", "cfg.json"}, {"selector", "/a/b/1/c"}}, ctx);
+  ASSERT_TRUE(r1.has_value()) << r1.error().message;
+  EXPECT_TRUE(r1->at("found").get<bool>());
+  EXPECT_EQ(r1->at("text").get<std::string>(), "2");
+
+  auto r2 = spec.handler(json{{"path", "cfg.json"}, {"selector", "a.b[1].c"}}, ctx);
+  ASSERT_TRUE(r2.has_value()) << r2.error().message;
+  EXPECT_EQ(r2->at("text").get<std::string>(), "2");
+
+  auto r3 = spec.handler(json{{"path", "cfg.json"}, {"selector", "name"}}, ctx);
+  ASSERT_TRUE(r3.has_value()) << r3.error().message;
+  EXPECT_EQ(r3->at("text").get<std::string>(), "x");
+
+  auto r4 = spec.handler(json{{"path", "cfg.json"}, {"selector", "a.missing"}}, ctx);
+  ASSERT_TRUE(r4.has_value()) << r4.error().message;
+  EXPECT_FALSE(r4->at("found").get<bool>());
+}
+
+TEST_F(FileToolsTest, ExtractJsonInvalidIsError) {
+  write_file("bad.json", "not json");
+  auto spec = make_spec("file_extract");
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "bad.json"}, {"selector", "a"}}, ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().message.find("JSON"), std::string::npos);
+}
+
+TEST_F(FileToolsTest, ExtractYamlKeyPaths) {
+  write_file("app.yaml",
+             "server:\n  host: localhost\n  ports:\n    - 80\n    - 443\nname: \"web\"\n");
+  auto spec = make_spec("file_extract");
+  ToolContext ctx = make_ctx();
+
+  auto r1 = spec.handler(json{{"path", "app.yaml"}, {"selector", "server.host"}}, ctx);
+  ASSERT_TRUE(r1.has_value()) << r1.error().message;
+  EXPECT_TRUE(r1->at("found").get<bool>());
+  EXPECT_EQ(r1->at("text").get<std::string>(), "localhost");
+
+  auto r2 = spec.handler(json{{"path", "app.yaml"}, {"selector", "server.ports.1"}}, ctx);
+  ASSERT_TRUE(r2.has_value()) << r2.error().message;
+  EXPECT_EQ(r2->at("text").get<std::string>(), "443");
+
+  auto r3 = spec.handler(json{{"path", "app.yaml"}, {"selector", "name"}}, ctx);
+  ASSERT_TRUE(r3.has_value()) << r3.error().message;
+  EXPECT_EQ(r3->at("text").get<std::string>(), "web");
+
+  auto r4 = spec.handler(json{{"path", "app.yaml"}, {"selector", "server.ports"}}, ctx);
+  ASSERT_TRUE(r4.has_value()) << r4.error().message;
+  ASSERT_TRUE(r4->at("found").get<bool>());
+  EXPECT_NE(r4->at("text").get<std::string>().find("80"), std::string::npos);
+  EXPECT_NE(r4->at("text").get<std::string>().find("443"), std::string::npos);
+
+  auto r5 = spec.handler(json{{"path", "app.yaml"}, {"selector", "server.nope"}}, ctx);
+  ASSERT_TRUE(r5.has_value()) << r5.error().message;
+  EXPECT_FALSE(r5->at("found").get<bool>());
+}
+
+TEST_F(FileToolsTest, ExtractMarkdownOutlineAndSection) {
+  write_file("doc.md", "# Title\nintro\n## Part A\nalpha\n### Sub A1\na1\n## Part B\nbeta\n");
+  auto spec = make_spec("file_extract");
+  ToolContext ctx = make_ctx();
+
+  auto outline = spec.handler(json{{"path", "doc.md"}, {"selector", ""}}, ctx);
+  ASSERT_TRUE(outline.has_value()) << outline.error().message;
+  ASSERT_TRUE(outline->at("found").get<bool>());
+  std::string const o = outline->at("text").get<std::string>();
+  EXPECT_NE(o.find("L1 [1] Title"), std::string::npos);
+  EXPECT_NE(o.find("L3 [2] Part A"), std::string::npos);
+  EXPECT_NE(o.find("L5 [3] Sub A1"), std::string::npos);
+  EXPECT_NE(o.find("L7 [2] Part B"), std::string::npos);
+
+  auto a = spec.handler(json{{"path", "doc.md"}, {"selector", "part a"}}, ctx);
+  ASSERT_TRUE(a.has_value()) << a.error().message;
+  ASSERT_TRUE(a->at("found").get<bool>());
+  std::string const ta = a->at("text").get<std::string>();
+  EXPECT_NE(ta.find("## Part A"), std::string::npos);
+  EXPECT_NE(ta.find("### Sub A1"), std::string::npos);  // 子节随父节返回
+  EXPECT_EQ(ta.find("Part B"), std::string::npos);      // 同级下一节不进来
+
+  auto miss = spec.handler(json{{"path", "doc.md"}, {"selector", "nope"}}, ctx);
+  ASSERT_TRUE(miss.has_value()) << miss.error().message;
+  EXPECT_FALSE(miss->at("found").get<bool>());
+  EXPECT_NE(miss->at("hint").get<std::string>().find("Part B"), std::string::npos);
+}
+
+TEST_F(FileToolsTest, ExtractXmlElementPath) {
+  write_file("data.xml",
+             "<root>\n  <item id=\"1\"><name>alpha</name></item>\n"
+             "  <item id=\"2\"><name>beta</name></item>\n</root>\n");
+  auto spec = make_spec("file_extract");
+  ToolContext ctx = make_ctx();
+
+  auto r1 = spec.handler(json{{"path", "data.xml"}, {"selector", "root/item[2]/name"}}, ctx);
+  ASSERT_TRUE(r1.has_value()) << r1.error().message;
+  ASSERT_TRUE(r1->at("found").get<bool>());
+  EXPECT_EQ(r1->at("text").get<std::string>(), "beta");
+
+  auto r2 = spec.handler(json{{"path", "data.xml"}, {"selector", "root/item/name"}}, ctx);
+  ASSERT_TRUE(r2.has_value()) << r2.error().message;
+  EXPECT_EQ(r2->at("text").get<std::string>(), "alpha");
+
+  auto outline = spec.handler(json{{"path", "data.xml"}, {"selector", ""}}, ctx);
+  ASSERT_TRUE(outline.has_value()) << outline.error().message;
+  EXPECT_NE(outline->at("text").get<std::string>().find("root/item[2]/name"),
+            std::string::npos);
+
+  auto miss = spec.handler(json{{"path", "data.xml"}, {"selector", "root/missing"}}, ctx);
+  ASSERT_TRUE(miss.has_value()) << miss.error().message;
+  EXPECT_FALSE(miss->at("found").get<bool>());
+}
+
+// ---- file_sample（problems/02 追加 S5：采样跳读）----
+
+TEST_F(FileToolsTest, SampleSmallFileReturnsWhole) {
+  write_file("s.txt", "hello");
+  auto spec = make_spec("file_sample");
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "s.txt"}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  auto const& w = r->at("windows");
+  ASSERT_EQ(w.size(), 1u);
+  EXPECT_EQ(w[0].at("where").get<std::string>(), "whole");
+  EXPECT_EQ(w[0].at("text").get<std::string>(), "hello");
+}
+
+TEST_F(FileToolsTest, SampleLargeFileReturnsHeadMiddleTail) {
+  std::string big;
+  for (int i = 0; i < 1000; ++i) big += "0123456789";  // 10KB
+  write_file("big.txt", big);
+  auto spec = make_spec("file_sample");
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "big.txt"}, {"chars_per_window", 100}}, ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  auto const& w = r->at("windows");
+  ASSERT_EQ(w.size(), 3u);
+  EXPECT_EQ(w[0].at("where").get<std::string>(), "head");
+  EXPECT_EQ(w[1].at("where").get<std::string>(), "middle");
+  EXPECT_EQ(w[2].at("where").get<std::string>(), "tail");
+  EXPECT_EQ(w[0].at("offset").get<long long>(), 0);
+  EXPECT_GT(w[1].at("offset").get<long long>(), 0);
+  EXPECT_GT(w[2].at("offset").get<long long>(), w[1].at("offset").get<long long>());
+  EXPECT_EQ(w[0].at("text").get<std::string>(), big.substr(0, 100));
+  EXPECT_EQ(w[2].at("text").get<std::string>(), big.substr(big.size() - 100));
+  EXPECT_NE(r->at("note").get<std::string>().find("不保证覆盖"), std::string::npos);
+}
+
+TEST_F(FileToolsTest, SampleRejectsTraversal) {
+  auto spec = make_spec("file_sample");
+  ToolContext ctx = make_ctx();
+  auto r = spec.handler(json{{"path", "../x"}}, ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_NE(r.error().message.find("越界"), std::string::npos);
+}
+
 // ---- 副作用语义 ----
 
 TEST_F(FileToolsTest, ReadOnlyFlagsMatchSideEffectSemantics) {
   EXPECT_TRUE(make_file_read_tool(make_cfg()).read_only);
   EXPECT_TRUE(make_list_dir_tool(make_cfg()).read_only);
   EXPECT_TRUE(make_file_grep_tool(make_cfg()).read_only);
+  EXPECT_TRUE(make_file_extract_tool(make_cfg()).read_only);
+  EXPECT_TRUE(make_file_sample_tool(make_cfg()).read_only);
   EXPECT_FALSE(make_file_write_tool(make_cfg()).read_only);  // 写 = 副作用，走审批 + 防重放
 }
 
@@ -521,14 +684,18 @@ TEST_F(FileToolsTest, SnapshotTtlOnlyOnReadTools) {
   EXPECT_TRUE(make_file_read_tool(make_cfg()).ttl.has_value());
   EXPECT_TRUE(make_list_dir_tool(make_cfg()).ttl.has_value());
   EXPECT_TRUE(make_file_grep_tool(make_cfg()).ttl.has_value());
+  EXPECT_TRUE(make_file_extract_tool(make_cfg()).ttl.has_value());
+  EXPECT_TRUE(make_file_sample_tool(make_cfg()).ttl.has_value());
   EXPECT_FALSE(make_file_write_tool(make_cfg()).ttl.has_value());
 }
 
 TEST_F(FileToolsTest, BatchFactoryNames) {
   auto tools = make_file_tools(make_cfg());
-  ASSERT_EQ(tools.size(), 4u);
+  ASSERT_EQ(tools.size(), 6u);
   EXPECT_EQ(tools[0].name, "file_read");
   EXPECT_EQ(tools[1].name, "file_write");
   EXPECT_EQ(tools[2].name, "list_dir");
   EXPECT_EQ(tools[3].name, "file_grep");
+  EXPECT_EQ(tools[4].name, "file_extract");
+  EXPECT_EQ(tools[5].name, "file_sample");
 }
