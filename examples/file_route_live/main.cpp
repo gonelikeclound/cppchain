@@ -1,8 +1,11 @@
 // demo: file_route_live —— problems/02 S6 真机评测（需要 .env 的 LLM_API_KEY）
 //
-// 对同一批"超长工具返回"任务跑两条臂：
+// 对同一批"超长工具返回"任务跑三条臂：
 //   A route 臂：recall → files(file_context 预取) → model（单次作答，模型不挑工具）
 //   B base  臂：recall → loop{model(带文件工具) → route → act}（模型自己决定调什么）
+//   C hybrid 臂（预算版）：预取 → 带工具答一次（≤1 轮）→ act → 无工具强制收口作答
+//     —— "兜底但不失控"：结构上限定工具轮数，且保证最后一定有一次作答。
+// 第 7 题是**路由盲区**（无结构/字面/全局信号）：route 臂按设计失败，用于验证 hybrid 兜底。
 // 指标：正确（答案含期望事实）、模型工具调用轮数、usage token、路由证据（route/attempts）。
 // 语料与 questions 是确定性的（答案位置预埋），所以"正确率"可直接断言，不依赖 LLM 判分。
 //
@@ -113,6 +116,7 @@ struct Question {
   std::string prompt;
   std::string expected;  // 答案必须包含的事实
   std::string kind;
+  bool route_blind = false;  // true = 故意没有路由信号（检验 hybrid 的工具兜底）
 };
 
 Json route_ir() {
@@ -129,29 +133,32 @@ Json route_ir() {
   return Json{{"id", "wf_route_live"}, {"nodes", std::move(nodes)}};
 }
 
-// 混合臂：file_context 预取 + 模型仍带工具（判错/没命中时能自己升级）
+// 混合臂（预算版）：预取 + **最多一轮工具**，然后强制收口作答。
+// 结构上保证"兜底但不失控"：没有 loop，不会出现反复调工具后空答；
+// 第一轮允许调工具（不限 loop 轮数，最多一次 act），第二轮不带工具、必须给答案。
 Json hybrid_ir() {
-  Json body = Json::array();
-  body.push_back(Json{{"id", "think"}, {"kind", "model"}, {"model", "main"},
-                      {"tools", "chat"},
-                      {"system_prompt",
-                       "你是严谨的助手。【文件取数路由】的片段就是已取到的素材：只要素材里"
-                       "能找到答案，直接回答，**不要再调用工具**；只有素材明显缺失/未命中时，"
-                       "才调用工具（file_grep / file_extract / file_read / file_sample）补齐，"
-                       "不要编造。"},
-                      {"next", "route"}});
-  body.push_back(Json{{"id", "route"}, {"kind", "route"}, {"on", "last_ai_outcome"},
-                      {"cases", Json{{"tool_calls", "act"}, {"text", "_break"}}},
-                      {"default", "_break"}});
-  body.push_back(Json{{"id", "act"}, {"kind", "run_tools"}, {"next", "_continue"}});
-
   Json nodes = Json::array();
   nodes.push_back(Json{{"id", "recall"}, {"kind", "load_history"},
                        {"path", "@config.workspace"}, {"session", "@config.session"},
                        {"next", "files"}});
-  nodes.push_back(Json{{"id", "files"}, {"kind", "file_context"}, {"next", "loop"}});
-  nodes.push_back(Json{{"id", "loop"}, {"kind", "loop"}, {"max", 4},
-                       {"next", "_turn_end"}, {"body", std::move(body)}});
+  nodes.push_back(Json{{"id", "files"}, {"kind", "file_context"}, {"next", "first"}});
+  nodes.push_back(Json{{"id", "first"}, {"kind", "model"}, {"model", "main"},
+                       {"tools", "chat"},
+                       {"system_prompt",
+                        "你是严谨的助手。【文件取数路由】的片段就是已取到的素材：素材里"
+                        "能找到答案就直接回答；只有在素材明显缺失/未命中时，才调用工具"
+                        "（file_grep / file_extract / file_read / file_sample）补查——"
+                        "**最多补查一次**，不要反复查。"},
+                       {"next", "route"}});
+  nodes.push_back(Json{{"id", "route"}, {"kind", "route"}, {"on", "last_ai_outcome"},
+                       {"cases", Json{{"tool_calls", "act"}, {"text", "_turn_end"}}},
+                       {"default", "_turn_end"}});
+  nodes.push_back(Json{{"id", "act"}, {"kind", "run_tools"}, {"next", "final"}});
+  nodes.push_back(Json{{"id", "final"}, {"kind", "model"}, {"model", "main"},
+                       {"system_prompt",
+                        "这是本轮**最终作答**（工具已用完）。依据素材与工具结果直接回答；"
+                        "找不到就直说没找到，不要编造，也不要再要求查资料。"},
+                       {"next", "_turn_end"}});
   return Json{{"id", "wf_hybrid_live"}, {"nodes", std::move(nodes)}};
 }
 
@@ -326,6 +333,8 @@ int main() {
       {"report.md 里 Section 7 的召回率是多少？只回答数字。", "0.83", "章节"},
       {"novel.txt 里有没有提到「李英琼」？回答并给出证据。", "李英琼", "引号字面"},
       {"app.log 的最后一行是什么？原样输出。", "LAST-LINE-尾标记", "全局/结尾"},
+      // 路由盲区：没有结构/字面/全局信号 → file_context 不预取；只能靠模型调工具
+      {"app.yaml 里 host 的值是什么？只回答值。", "localhost", "无路由信号（兜底）", true},
   };
 
   Json const cfg_on{{"file_route", Json{{"enabled", true}}}};
@@ -339,11 +348,12 @@ int main() {
   // 调试/省费用：FILE_ROUTE_LIVE_ONLY=<下标> 只跑一题（默认全跑）
   std::size_t only = 999;
   if (char const* e = std::getenv("FILE_ROUTE_LIVE_ONLY")) only = static_cast<std::size_t>(std::atoi(e));
-  std::size_t n = 0;
+  std::size_t n = 0, route_denom = 0;
   for (std::size_t i = 0; i < questions.size(); ++i) {
     if (only != 999 && i != only) continue;
     ++n;
     Question const& q = questions[i];
+    if (!q.route_blind) ++route_denom;
     ArmResult const a = run(*route_wf, q.prompt, ws_root(), "route_" + std::to_string(i), cfg_on);
     ArmResult const b = run(*base_wf, q.prompt, ws_root(), "base_" + std::to_string(i), cfg_off);
     ArmResult const h = run(*hybrid_wf, q.prompt, ws_root(), "hybrid_" + std::to_string(i), cfg_on);
@@ -352,7 +362,7 @@ int main() {
       return r.ok && r.answer.find(q.expected) != std::string::npos;
     };
     bool const ac = correct(a), bc = correct(b), hc = correct(h);
-    route_ok += ac ? 1 : 0;
+    if (!q.route_blind) route_ok += ac ? 1 : 0;  // 盲区题不计入 route 分母
     base_ok += bc ? 1 : 0;
     hybrid_ok += hc ? 1 : 0;
     route_tokens += a.in_tokens + a.out_tokens;
@@ -378,15 +388,20 @@ int main() {
   }
 
   std::println("\n== 汇总 ==");
-  std::println("route  臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
-               route_ok, n, route_calls, route_tokens);
+  std::println("route  臂：正确 {}/{}（有路由信号的题；另有 {} 题是设计上的路由盲区）"
+               "· 模型工具调用 {} 次 · 总 token {}",
+               route_ok, route_denom, n - route_denom, route_calls, route_tokens);
   std::println("base   臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
                base_ok, n, base_calls, base_tokens);
-  std::println("hybrid 臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}",
+  std::println("hybrid 臂：正确 {}/{} · 模型工具调用 {} 次 · 总 token {}（≤1 轮工具 + 强制收口）",
                hybrid_ok, n, hybrid_calls, hybrid_tokens);
   std::println("\n注：真机结果受模型随机性影响；本台只断言「答案含预埋事实」，"
                "不评风格。漏读率 = route 臂错误且 route=none/未命中；利用率 = route 命中但答案错。");
-  std::println("验收结论：route {} · hybrid {}", route_ok == static_cast<int>(n) ? "全对" : "有未命中",
-               hybrid_ok >= route_ok ? "不劣于 route（兜底可用）" : "劣于 route（需查提示词/工具选择）");
-  return route_ok == static_cast<int>(n) ? 0 : 1;
+  std::println("验收结论：route {} · hybrid {}", route_ok == static_cast<int>(route_denom)
+                                                     ? "有信号题全对"
+                                                     : "有信号题有未命中",
+               hybrid_ok == static_cast<int>(n)
+                   ? "全对（盲区题由工具兜底救回，且未失控）"
+                   : "有未命中（看是漏读还是利用率）");
+  return hybrid_ok == static_cast<int>(n) ? 0 : 1;
 }
