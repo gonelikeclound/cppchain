@@ -45,6 +45,8 @@ set(PROXY_EXAMPLE_TARGETS proxy_call)
 # P1.5 声明式配置（arch 25）demo：declarations.configs 三形态 + ${workdir} 运行变量（纯离线）
 set(CONFIG_DECL_EXAMPLE_TARGETS config_decl)
 set(PHANTASMA_EXAMPLE_TARGETS phantasma_demo)
+# problems/02 S6 真机评测：file_context 路由臂 vs 模型自选工具臂（需 .env LLM 端点）
+set(FILE_ROUTE_LIVE_EXAMPLE_TARGETS file_route_live)
 # arch 26 project 自管理（第一刀）demo：目录化多文件 + 多任务独立对话 + 项目级注入（纯离线）
 set(PROJECT_EXAMPLE_TARGETS project_run)
 # arch 27 自管理 loop（第一刀）demo：project_drive 调度循环（纯离线）
@@ -93,6 +95,7 @@ if(CPPCHAIN_BUILD_HTTP)
   list(APPEND EXAMPLE_TARGETS subagent_workers)
   list(APPEND EXAMPLE_TARGETS subagent_handoff)
   list(APPEND EXAMPLE_TARGETS m9_budget)
+  list(APPEND EXAMPLE_TARGETS ${FILE_ROUTE_LIVE_EXAMPLE_TARGETS})
 endif()
 
 if(CPPCHAIN_BUILD_HTTP)
@@ -133,6 +136,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)
   elseif(t IN_LIST PHANTASMA_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)
+  elseif(t IN_LIST FILE_ROUTE_LIVE_EXAMPLE_TARGETS)
+    target_link_libraries(${t} PRIVATE cppchain_workflow cppchain_http_curl)
   elseif(t IN_LIST PROJECT_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_workflow)
   elseif(t IN_LIST PROJECT_DRIVE_EXAMPLE_TARGETS)

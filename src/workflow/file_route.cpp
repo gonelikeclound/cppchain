@@ -221,7 +221,7 @@ FileRouteOutcome route_file_question(tool::ToolRegistry const& reg, std::string 
   std::string const literal = detect_literal(question, files);
   bool const global =
       has_any(question, {"总结", "概括", "讲了什么", "主要内容", "整体", "风格", "结局",
-                         "大概", "主题", "讲的是什么"});
+                         "大概", "主题", "讲的是什么", "最后", "结尾"});
   bool const complete =
       has_any(question, {"全部", "一共", "有没有", "是否提到", "每一条", "逐一", "所有",
                          "核对", "列出来", "列举"});
