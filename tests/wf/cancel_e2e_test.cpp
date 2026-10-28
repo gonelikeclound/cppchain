@@ -328,3 +328,41 @@ TEST(WfInterjectE2E, next_round_env_sees_prev_round) {
   EXPECT_TRUE(seen) << "B 轮的 env 未出现 prev_round";
   clear_session_cancel(tmp.dir, "s");
 }
+
+// SIGINT 全链：对运行中的 wfr 发 SIGINT → 节点边界取消（exit 130 + __cancelled__）
+TEST(WfCancelE2E, sigint_cancels_running_query) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP();
+  TempDir tmp;
+  write_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult res;
+  std::thread runner([&] {
+    res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s", "go"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  std::optional<SessionLockInfo> lock;
+  for (int i = 0; i < 100 && !lock; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    lock = read_session_lock(tmp.dir, "s");
+  }
+  ASSERT_TRUE(lock.has_value());
+  bool act_started = false;
+  for (int i = 0; i < 100 && !act_started; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (auto const& n : node_enters(tmp.dir, "s"))
+      if (n == "act") act_started = true;
+  }
+  ASSERT_TRUE(act_started);
+
+  ASSERT_EQ(::kill(static_cast<pid_t>(lock->pid), SIGINT), 0);
+  runner.join();
+  EXPECT_EQ(res.exit_code, 130) << res.output;
+  bool cancelled = false;
+  for (auto const& n : node_enters(tmp.dir, "s"))
+    if (n == "__cancelled__") cancelled = true;
+  EXPECT_TRUE(cancelled);
+  EXPECT_FALSE(std::filesystem::exists(session_lock_path(tmp.dir, "s")));
+}

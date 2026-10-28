@@ -97,6 +97,27 @@ namespace {
 std::atomic<bool> g_cancel_requested{false};
 extern "C" void handle_cancel_signal(int) { g_cancel_requested.store(true); }
 
+// 审批等待用的可取消 stdin 行读：poll 200ms 检查取消标志（SIGINT/SIGTERM / 服务端转发）。
+enum class StdinLine { Ok, Eof, Cancelled };
+StdinLine read_stdin_line_cancellable(std::string& out) {
+  out.clear();
+  for (;;) {
+    if (g_cancel_requested.load(std::memory_order_relaxed)) return StdinLine::Cancelled;
+    struct pollfd p{STDIN_FILENO, POLLIN, 0};
+    int const pr = ::poll(&p, 1, 200);
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      return StdinLine::Eof;
+    }
+    if (pr == 0) continue;
+    char c = 0;
+    ssize_t const n = ::read(STDIN_FILENO, &c, 1);
+    if (n <= 0) return out.empty() ? StdinLine::Eof : StdinLine::Ok;
+    if (c == '\n') return StdinLine::Ok;
+    out.push_back(c);
+  }
+}
+
 
 // --stream 的辅助：StreamEvent → JSON（node_start/node_end/interrupt/values + payload）
 nlohmann::json ev_json(cppchain::graph::StreamEvent const& ev) {
@@ -227,7 +248,11 @@ std::optional<Json> ask_approval_channel(std::string const& path, std::string co
                  {"payload", payload}};
   if (!ch.write_line(req.dump())) return std::nullopt;
   std::string line;
-  if (!ch.read_line(line, 600000)) return std::nullopt;  // ≤10min
+  // 200ms 轮询：审批等待期间也响应 SIGINT/SIGTERM（服务端 interject 会转发 SIGTERM）。
+  for (;;) {
+    if (g_cancel_requested.load(std::memory_order_relaxed)) return std::nullopt;
+    if (ch.read_line(line, 200)) break;
+  }
   Json const r = Json::parse(line, nullptr, false);
   if (r.is_discarded() || !r.is_object()) return std::nullopt;
   return std::optional<Json>(r);
@@ -464,7 +489,7 @@ int cs_run_server(std::string const& workdir, std::string const& session,
           }
         }
         if (got && decision.value("action", "") == "fallback") got = false;
-        if (!got) {  // 回退服务端 stdin（EOF → reject，fail-closed）
+        if (!got && !stop_reader.load()) {  // 回退服务端 stdin（EOF → reject，fail-closed）
           std::println();
           std::println("⏸ 审批回退到服务端 stdin（节点 {}）：", req.value("node", "?"));
           std::print("  批准？[approve | reject <理由> | abort]：");
@@ -482,9 +507,10 @@ int cs_run_server(std::string const& workdir, std::string const& session,
             else decision = Json{{"action", "abort"}};
           }
         }
-        (void)ch.write_line(Json{{"action", decision.value("action", "reject")},
-                                 {"feedback", decision.value("feedback", "")}}
-                                .dump());
+        if (!stop_reader.load())
+          (void)ch.write_line(Json{{"action", decision.value("action", "reject")},
+                                   {"feedback", decision.value("feedback", "")}}
+                                  .dump());
       }
     });
   }
@@ -762,6 +788,8 @@ int cs_run_client(std::string const& workdir, std::string const& session,
 }  // namespace
 
 int main(int argc, char** argv) {
+  // 写已关闭的 FIFO/socket（客户端走了/服务端退出）不应杀掉进程：统一忽略 SIGPIPE。
+  std::signal(SIGPIPE, SIG_IGN);
   std::string workdir = ".", session = "default", name_or_path, input;
   bool reset = false, allow_import = false;
   // problems/07 §8 P2：会话忙时的策略 reject（默认）/ wait / interject（取消当前轮后接管）
@@ -1663,6 +1691,7 @@ int main(int argc, char** argv) {
       } else {
         std::optional<Json> via_ch;
         if (!approve_path.empty()) via_ch = ask_approval_channel(approve_path, pend.node, pend.payload);
+        if (!via_ch.has_value() && g_cancel_requested.load()) return handle_cancelled();
         if (via_ch.has_value()) {
           std::string const act = via_ch->value("action", "");
           if (act == "continue" || act == "approve") resume = Json{{"action", "continue"}};
@@ -1674,7 +1703,9 @@ int main(int argc, char** argv) {
         std::print("  下一步？[continue | rollback_to <K> | abort]：");
         std::cout.flush();
         std::string line;
-        if (!std::getline(std::cin, line)) {
+        StdinLine const rl = read_stdin_line_cancellable(line);
+        if (rl == StdinLine::Cancelled) return handle_cancelled();
+        if (rl == StdinLine::Eof) {
           std::println();
           // 治理（problems/33）：stdin 结束也走 abort 续跑 → _cancelled 终态成档
           //（不再 return 0 悬挂残留，取消必须是可查的终态）
@@ -1721,6 +1752,7 @@ int main(int argc, char** argv) {
     if (policy == "prompt") {
       std::optional<Json> via_ch;
       if (!approve_path.empty()) via_ch = ask_approval_channel(approve_path, pend.node, pend.payload);
+      if (!via_ch.has_value() && g_cancel_requested.load()) return handle_cancelled();
       if (via_ch.has_value()) {
         std::string const act = via_ch->value("action", "");
         if (act == "approve") resume = Json{{"action", "approve"}};
@@ -1732,7 +1764,9 @@ int main(int argc, char** argv) {
       std::print("  批准？[approve | reject <理由> | abort]：");
       std::cout.flush();
       std::string line;
-      if (!std::getline(std::cin, line)) {
+      StdinLine const rl = read_stdin_line_cancellable(line);
+      if (rl == StdinLine::Cancelled) return handle_cancelled();
+      if (rl == StdinLine::Eof) {
         std::println();
         std::println("（stdin 结束，未获裁决 —— 本次触发止于审批点，可留待下次续审。）");
         return 0;
