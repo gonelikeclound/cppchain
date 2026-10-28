@@ -192,6 +192,7 @@ add_library(cppchain_workflow STATIC
   workflow/node_types.cpp
   workflow/file_route.cpp
   workflow/session_lock.cpp
+  workflow/session_channel.cpp
   workflow/plugin.cpp
   workflow/import.cpp
   workflow/debug_view.cpp

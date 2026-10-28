@@ -32,6 +32,7 @@
 
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/tool/spawn_runner.hpp"
+#include "cppchain/workflow/session_channel.hpp"
 #include "cppchain/workflow/session_lock.hpp"
 #include "cppchain/workflow/session_log.hpp"
 #include "wfr_cgi_lib.hpp"  // 纯逻辑（parse_session_id / default_sets_for / 枚举等，测试共用）
@@ -200,6 +201,8 @@ void action_chat_stream(std::vector<std::pair<std::string, std::string>> const& 
     av.push_back("--set");
     av.push_back(k + "=" + v);
   }
+  // problems/07 §8 P2b：若该会话已有常驻服务端 → 本请求作为客户端投递（事件流由服务端 relay 回来）
+  if (cppchain::workflow::session_server_alive(ws, s)) av.push_back("--as-client");
   // problems/07 §8 P2：忙时策略（前端"插话"传 interject → wfr 取消当前轮后接管）
   std::string const on_busy = param(q, "on_busy");
   if (on_busy == "reject" || on_busy == "wait" || on_busy == "interject")

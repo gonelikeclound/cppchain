@@ -1,0 +1,163 @@
+// tests/wf —— problems/07 §8 P2b：会话 C/S 通道（FIFO 服务端/客户端）。
+// 单测：路径/登记/FIFO 行读写；E2E：--lock-session --as-server + --as-client 往返、
+// --post 投递不等待、--stream 事件透传、SIGTERM 收尾清理。
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <random>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <signal.h>
+#include <unistd.h>
+
+#include "cppchain/tool/spawn_runner.hpp"
+#include "cppchain/workflow/session_channel.hpp"
+#include "cppchain/workflow/session_lock.hpp"
+#include "cppchain/workflow/session_log.hpp"
+
+using namespace cppchain::workflow;
+
+namespace {
+
+struct TempDir {
+  std::filesystem::path dir;
+  TempDir()
+      : dir(std::filesystem::temp_directory_path() /
+            ("wf_chan_" + std::to_string(static_cast<unsigned>(std::random_device{}())))) {
+    std::filesystem::create_directories(dir);
+  }
+  ~TempDir() { std::filesystem::remove_all(dir); }
+};
+
+std::filesystem::path wfr_bin() {
+  char buf[4096];
+  ssize_t const n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0) return {};
+  return std::filesystem::path(std::string(buf, static_cast<std::size_t>(n)))
+             .parent_path()
+             .parent_path() /
+         "bin" / "wfr";
+}
+
+void write_quick_workflow(std::filesystem::path const& ws) {
+  auto const dir = ws / ".wfr" / "workflows";
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir / "wf_quick.json")
+      << R"({"id":"wf_quick","nodes":[{"id":"e","kind":"echo","text":"hello from child","next":"_turn_end"}]})";
+}
+
+int count_echo_enters(std::filesystem::path const& ws, std::string const& session) {
+  std::ifstream in(session_path(ws.string(), session));
+  int n = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    auto const j = nlohmann::json::parse(line, nullptr, false);
+    if (j.is_discarded()) continue;
+    if (j.value("source", "") == "engine" && j.value("phase", "") == "enter" &&
+        j.value("node", "") == "e")
+      ++n;
+  }
+  return n;
+}
+
+}  // namespace
+
+TEST(WfSessionChannel, paths_and_server_info_roundtrip) {
+  TempDir tmp;
+  EXPECT_EQ(session_fifo_path(tmp.dir, "s").filename(), "session-s.fifo");
+  EXPECT_EQ(session_server_path(tmp.dir, "s").filename(), "session-s.server.json");
+  EXPECT_EQ(session_reply_fifo_path(tmp.dir, "s", 42, 3).filename(),
+            "session-s.42.3.reply");
+
+  EXPECT_FALSE(read_server_info(tmp.dir, "s").has_value());
+  ASSERT_TRUE(write_server_info(tmp.dir, "s", SessionServerInfo{12345, "wf", 99}));
+  auto const info = read_server_info(tmp.dir, "s");
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->pid, 12345);
+  EXPECT_EQ(info->workflow, "wf");
+  EXPECT_EQ(info->started_epoch, 99);
+  clear_server_info(tmp.dir, "s");
+  EXPECT_FALSE(read_server_info(tmp.dir, "s").has_value());
+}
+
+TEST(WfSessionChannel, fifo_line_roundtrip) {
+  TempDir tmp;
+  auto const fifo = tmp.dir / "x.fifo";
+  ASSERT_TRUE(ensure_session_fifo(fifo));
+  FifoLineReader reader;
+  ASSERT_TRUE(reader.open(fifo, /*keep_write_end=*/true));
+  EXPECT_TRUE(write_fifo_line(reader.fd(), R"({"a":1})"));
+  EXPECT_TRUE(write_fifo_line(reader.fd(), "second"));
+  std::string line;
+  ASSERT_TRUE(reader.read_line(line, 1000));
+  EXPECT_EQ(line, R"({"a":1})");
+  ASSERT_TRUE(reader.read_line(line, 1000));
+  EXPECT_EQ(line, "second");
+  EXPECT_FALSE(reader.read_line(line, 50));  // 无更多数据
+  remove_session_fifo(fifo);
+}
+
+TEST(WfSessionChannel, server_client_roundtrip_and_post) {
+  if (!std::filesystem::exists(wfr_bin())) GTEST_SKIP() << "wfr 未构建";
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+
+  std::optional<SessionServerInfo> info;
+  for (int i = 0; i < 100 && !info; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    info = read_server_info(tmp.dir, "s");
+  }
+  ASSERT_TRUE(info.has_value()) << "服务端未启动";
+
+  // 同步客户端：拿输出
+  auto const c1 = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+       "--as-client", "hello"},
+      std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  EXPECT_EQ(c1.exit_code, 0) << c1.output;
+  EXPECT_NE(c1.output.find("hello from child"), std::string::npos) << c1.output;
+
+  // 流式客户端：事件行透传（NDJSON 里有 node_end）
+  auto const c2 = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+       "--as-client", "--stream", "hello2"},
+      std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  EXPECT_EQ(c2.exit_code, 0) << c2.output;
+  EXPECT_NE(c2.output.find("\"type\":\"node_end\""), std::string::npos) << c2.output;
+
+  // --post：不等结果
+  auto const c3 = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+       "--as-client", "--post", "hello3"},
+      std::nullopt, {}, std::chrono::seconds(10), 1u << 20);
+  EXPECT_EQ(c3.exit_code, 0) << c3.output;
+  EXPECT_NE(c3.output.find("已投递"), std::string::npos) << c3.output;
+
+  // post 之后服务端仍会执行（轮询日志到 3 次 echo）
+  int enters = 0;
+  for (int i = 0; i < 100 && enters < 3; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    enters = count_echo_enters(tmp.dir, "s");
+  }
+  EXPECT_EQ(enters, 3);
+
+  // SIGTERM 收尾：清 FIFO/登记/锁
+  ::kill(static_cast<pid_t>(info->pid), SIGTERM);
+  server.join();
+  EXPECT_FALSE(std::filesystem::exists(session_fifo_path(tmp.dir, "s")));
+  EXPECT_FALSE(std::filesystem::exists(session_server_path(tmp.dir, "s")));
+  EXPECT_FALSE(std::filesystem::exists(session_lock_path(tmp.dir, "s")));
+}

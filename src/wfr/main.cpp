@@ -39,6 +39,7 @@
 #include <cppchain/workflow/import.hpp>
 #include <cppchain/workflow/ir.hpp>
 #include <cppchain/workflow/ir_walk.hpp>
+#include <cppchain/workflow/session_channel.hpp>
 #include <cppchain/workflow/session_lock.hpp>
 #include <cppchain/workflow/session_log.hpp>
 #include <cppchain/workflow/wfr.hpp>
@@ -49,8 +50,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <csignal>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -61,6 +64,9 @@
 #include <string>
 #include <thread>
 
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/wait.h>
 #include <unistd.h>  // getpid（会话锁持有者标识）
 #include <vector>
 
@@ -185,6 +191,275 @@ bool has_model_node(Json const& ir_json) {
   return has_model_node_in(ir_json.value("nodes", Json::array()));
 }
 
+// ---- problems/07 §8 P2b：会话 C/S（FIFO 服务端/客户端）----
+
+std::filesystem::path self_exe_path() {
+  char buf[4096];
+  ssize_t const n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0) return {};
+  return std::filesystem::path(std::string(buf, static_cast<std::size_t>(n)));
+}
+
+// 取消来源：SIGINT/SIGTERM 标志，或 .cancel 标记明确指向 server_pid
+bool cs_cancel_requested(std::string const& ws, std::string const& session, long server_pid) {
+  if (g_cancel_requested.load(std::memory_order_relaxed)) return true;
+  auto const req = read_session_cancel(ws, session);
+  if (req.has_value() && req->pid == server_pid) {
+    clear_session_cancel(ws, session);
+    return true;
+  }
+  return false;
+}
+
+std::vector<std::string> cs_child_argv(std::string const& workflow, std::string const& workdir,
+                                       std::string const& session,
+                                       std::map<std::string, std::string> const& sets,
+                                       bool stream, std::string const& query) {
+  std::vector<std::string> argv{self_exe_path().string(), workflow, "--workdir", workdir,
+                                "--session", session, "--no-session-lock"};
+  for (auto const& [k, v] : sets) {
+    argv.push_back("--set");
+    argv.push_back(k + "=" + v);
+  }
+  if (stream) argv.push_back("--stream");
+  argv.push_back(query);
+  return argv;
+}
+
+// fork/exec 子进程，逐行读 stdout（relay），期间轮询取消（标记/信号）→ SIGTERM 子进程。
+int cs_spawn_relay(std::vector<std::string> const& argv, std::string const& ws,
+                   std::string const& session, long server_pid,
+                   std::function<void(std::string const&)> const& on_line, bool& cancelled) {
+  int p[2];
+  if (::pipe(p) != 0) return -1;
+  ::fcntl(p[0], F_SETFD, FD_CLOEXEC);
+  ::fcntl(p[1], F_SETFD, FD_CLOEXEC);
+  pid_t const pid = ::fork();
+  if (pid == 0) {
+    int const devnull = ::open("/dev/null", O_RDONLY);
+    if (devnull >= 0) ::dup2(devnull, STDIN_FILENO);
+    ::dup2(p[1], STDOUT_FILENO);  // dup2 会清 FD_CLOEXEC
+    ::close(p[0]);
+    ::close(p[1]);
+    if (devnull > 2) ::close(devnull);
+    std::vector<char*> av;
+    for (auto const& s : argv) av.push_back(const_cast<char*>(s.c_str()));
+    av.push_back(nullptr);
+    ::execvp(av[0], av.data());
+    ::_exit(127);
+  }
+  ::close(p[1]);
+  if (pid < 0) {
+    ::close(p[0]);
+    return -1;
+  }
+  std::string buf;
+  bool killed = false;
+  for (;;) {
+    struct pollfd pf{p[0], POLLIN, 0};
+    int const pr = ::poll(&pf, 1, 200);
+    if (pr < 0 && errno == EINTR) continue;
+    if (pr > 0) {
+      char tmp[4096];
+      ssize_t const n = ::read(p[0], tmp, sizeof(tmp));
+      if (n > 0) {
+        buf.append(tmp, static_cast<std::size_t>(n));
+        std::size_t pos;
+        while ((pos = buf.find('\n')) != std::string::npos) {
+          on_line(buf.substr(0, pos));
+          buf.erase(0, pos + 1);
+        }
+        continue;
+      }
+      if (n == 0) break;
+      if (errno == EAGAIN || errno == EINTR) continue;
+      break;
+    }
+    if (!killed && cs_cancel_requested(ws, session, server_pid)) {
+      ::kill(pid, SIGTERM);
+      killed = true;
+      cancelled = true;
+    }
+  }
+  if (!buf.empty()) on_line(buf);
+  ::close(p[0]);
+  int status = 0;
+  ::waitpid(pid, &status, 0);
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return -1;
+}
+
+// 执行一轮 query（子进程），把 stdout 行 relay 给本地 stdout / 回包 FIFO。
+int cs_dispatch(std::string const& workflow, std::string const& workdir,
+                std::string const& session, std::map<std::string, std::string> const& sets,
+                bool stream, std::string const& query, int reply_fd, bool local,
+                long server_pid) {
+  bool cancelled = false;
+  auto const argv = cs_child_argv(workflow, workdir, session, sets, stream, query);
+  int const code = cs_spawn_relay(
+      argv, workdir, session, server_pid,
+      [&](std::string const& line) {
+        if (local) {
+          std::cout << line << '\n';
+          std::cout.flush();
+        }
+        if (reply_fd >= 0)
+          write_fifo_line(reply_fd, Json{{"type", "out"}, {"line", line}}.dump());
+      },
+      cancelled);
+  if (reply_fd >= 0)
+    write_fifo_line(reply_fd,
+                    Json{{"type", "end"}, {"exit", code}, {"cancelled", cancelled}}.dump());
+  return code;
+}
+
+int cs_run_server(std::string const& workdir, std::string const& session,
+                  std::string const& workflow, std::map<std::string, std::string> const& sets,
+                  bool stream, bool stay_alive, int idle_timeout_s,
+                  std::string const& own_query) {
+  long const self_pid = static_cast<long>(::getpid());
+  auto const lk = acquire_session_lock(workdir, session, "server-" + std::to_string(self_pid));
+  if (!lk.acquired) {
+    if (lk.holder)
+      std::println("会话 '{}' 已被 pid={} run={} 占用，无法成为服务端", session, lk.holder->pid,
+                   lk.holder->run);
+    else
+      std::println("会话锁获取失败：{}", lk.error.empty() ? "未知原因" : lk.error);
+    return 2;
+  }
+  struct Cleanup {
+    std::string ws, session;
+    std::filesystem::path fifo;
+    ~Cleanup() {
+      remove_session_fifo(fifo);
+      clear_server_info(ws, session);
+      release_session_lock(ws, session);
+    }
+  } cleanup{workdir, session, session_fifo_path(workdir, session)};
+
+  if (!ensure_session_fifo(cleanup.fifo)) {
+    std::println("无法创建会话 FIFO：{}", cleanup.fifo.string());
+    return 2;
+  }
+  if (!write_server_info(workdir, session,
+                         SessionServerInfo{self_pid, workflow,
+                                           static_cast<long>(std::time(nullptr))})) {
+    std::println("无法写服务端登记：{}", session_server_path(workdir, session).string());
+    return 2;
+  }
+  std::signal(SIGINT, handle_cancel_signal);
+  std::signal(SIGTERM, handle_cancel_signal);
+  std::println("会话服务端已启动：pid={} session='{}' fifo={}{}", self_pid, session,
+               cleanup.fifo.string(),
+               stay_alive ? "（常驻，Ctrl-C 退出）" : "（本轮结束 + 500ms 后退出）");
+
+  int rc = 0;
+  if (!own_query.empty())
+    rc = cs_dispatch(workflow, workdir, session, sets, stream, own_query, /*reply_fd=*/-1,
+                     /*local=*/true, self_pid);
+
+  FifoLineReader reader;
+  if (!reader.open(cleanup.fifo, /*keep_write_end=*/true)) return rc;
+  using clock = std::chrono::steady_clock;
+  auto deadline = clock::now() + (stay_alive ? (idle_timeout_s > 0
+                                                    ? std::chrono::seconds(idle_timeout_s)
+                                                    : std::chrono::hours(24 * 365))
+                                             : std::chrono::milliseconds(500));
+  while (!g_cancel_requested) {
+    std::string line;
+    if (!reader.read_line(line, 200)) {
+      if (!stay_alive && clock::now() >= deadline) break;
+      continue;
+    }
+    Json const req = Json::parse(line, nullptr, false);
+    if (req.is_discarded() || !req.is_object()) continue;
+    std::string const q = req.value("query", "");
+    if (q.empty()) continue;
+    bool const req_stream = req.value("stream", false);
+    std::map<std::string, std::string> merged = sets;
+    if (req.contains("sets") && req["sets"].is_object())
+      for (auto const& [k, v] : req["sets"].items())
+        if (v.is_string()) merged[k] = v.get<std::string>();
+    std::string const reply = req.value("reply", "");
+    int rfd = -1;
+    if (!reply.empty()) rfd = ::open(reply.c_str(), O_WRONLY | O_CLOEXEC);
+    cs_dispatch(workflow, workdir, session, merged, req_stream, q, rfd, /*local=*/false,
+                self_pid);
+    if (rfd >= 0) ::close(rfd);
+    deadline = clock::now() + (stay_alive ? (idle_timeout_s > 0
+                                                 ? std::chrono::seconds(idle_timeout_s)
+                                                 : std::chrono::hours(24 * 365))
+                                          : std::chrono::milliseconds(500));
+  }
+  return rc;
+}
+
+int cs_run_client(std::string const& workdir, std::string const& session,
+                  std::map<std::string, std::string> const& sets, bool stream, bool post,
+                  std::string const& query) {
+  auto const info = read_server_info(workdir, session);
+  if (!info.has_value() || !session_server_alive(workdir, session)) {
+    std::println("会话 '{}' 没有运行中的服务端（先用 --lock-session/--as-server 启动）", session);
+    return 2;
+  }
+  long const self_pid = static_cast<long>(::getpid());
+  std::filesystem::path reply;
+  std::unique_ptr<FifoLineReader> reader;
+  if (!post) {
+    reply = session_reply_fifo_path(workdir, session, self_pid, 0);
+    ensure_session_fifo(reply);
+    reader = std::make_unique<FifoLineReader>();
+    if (!reader->open(reply, /*keep_write_end=*/false)) {
+      std::println("无法打开回包 FIFO：{}", reply.string());
+      return 2;
+    }
+  }
+  int const wfd = ::open(session_fifo_path(workdir, session).c_str(), O_WRONLY | O_CLOEXEC);
+  if (wfd < 0) {
+    std::println("无法连接服务端 FIFO：{}", session_fifo_path(workdir, session).string());
+    if (!post) remove_session_fifo(reply);
+    return 2;
+  }
+  Json const req{{"id", std::to_string(self_pid) + "-0"},
+                 {"query", query},
+                 {"reply", post ? std::string{} : reply.string()},
+                 {"stream", stream},
+                 {"sets", Json(sets)}};
+  bool const sent = write_fifo_line(wfd, req.dump());
+  ::close(wfd);
+  if (!sent) {
+    std::println("发送请求失败（服务端 FIFO 关闭？）");
+    if (!post) remove_session_fifo(reply);
+    return 2;
+  }
+  if (post) {
+    std::println("已投递到会话服务端（pid={}，不等待结果）", info->pid);
+    return 0;
+  }
+  int rc = 0;
+  for (;;) {
+    std::string line;
+    if (!reader->read_line(line, 600000)) {
+      std::println("等待服务端响应超时/服务端已退出");
+      rc = 1;
+      break;
+    }
+    Json const m = Json::parse(line, nullptr, false);
+    if (m.is_discarded() || !m.is_object()) continue;
+    std::string const type = m.value("type", "");
+    if (type == "out") {
+      std::cout << m.value("line", "") << '\n';
+      std::cout.flush();
+    } else if (type == "end") {
+      rc = m.value("exit", 0);
+      break;
+    }
+  }
+  remove_session_fifo(reply);
+  return rc;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -192,6 +467,10 @@ int main(int argc, char** argv) {
   bool reset = false, allow_import = false;
   // problems/07 §8 P2：会话忙时的策略 reject（默认）/ wait / interject（取消当前轮后接管）
   std::string on_busy = "reject";
+  // problems/07 §8 P2b：会话 C/S（FIFO）
+  bool lock_session = false, as_server = false, as_client = false, post_only = false;
+  bool no_session_lock = false;   // 内部：子进程不取锁（父服务端持有）
+  int server_idle_timeout = 0;    // --as-server 空闲退出秒数（0 = 常驻）
   bool stream_events = false;  // --stream：把引擎事件（node_start/node_end）逐条打 JSON 行到 stdout
   std::size_t max_parallel = 1;  // wfr-㊾ 批③：Send 并行波宽度（编译期选项）
   std::map<std::string, std::string> sets;
@@ -201,7 +480,8 @@ int main(int argc, char** argv) {
         "用法:\n"
         "  wfr <name-or-path> [--workdir DIR] [--session NAME] [--set key=value]... "
         "[--max-parallel N] [--reset] [--allow-import] [--stream] "
-        "[--on-busy=reject|wait|interject] <query>...\n"
+        "[--on-busy=reject|wait|interject] "
+        "[--lock-session [--as-server|--as-client] [--post]] <query>...\n"
         "  wfr list [--workdir DIR]\n"
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
@@ -209,6 +489,9 @@ int main(int argc, char** argv) {
         "  wfr cancel [--workdir DIR] [--session NAME] [--no-wait]\n"
         "--on-busy（problems/07 §8 P2）：reject（默认，直接拒绝）/ wait（排队等待）/\n"
         "        interject（取消当前轮→等它停→接管会话跑新查询；等价 --wait + cancel）。\n"
+        "会话 C/S（P2b）：--lock-session 首个进程成为服务端（持会话锁 + FIFO），\n"
+        "        后来者自动/显式 --as-client 投递 query；--post 只投递不等待；\n"
+        "        --as-server 常驻（--server-idle-timeout N 空闲退出）。\n"
         "        请求取消当前轮：写 <session>.cancel，运行中的 wfr 在**节点边界**停止\n"
         "        （已完成节点保留在会话日志）；默认等待锁释放（≤30s）。\n"
         "  wfr -h | --help\n"
@@ -411,6 +694,15 @@ int main(int argc, char** argv) {
       sets[kv.substr(0, eq)] = eq == std::string::npos ? std::string{} : kv.substr(eq + 1);
     } else if (a == "--reset") reset = true;
     else if (a == "--wait") on_busy = "wait";  // 兼容旧写法 = --on-busy=wait
+    else if (a == "--lock-session") lock_session = true;
+    else if (a == "--as-server") { as_server = true; lock_session = true; }
+    else if (a == "--as-client") { as_client = true; lock_session = true; }
+    else if (a == "--post") post_only = true;
+    else if (a == "--no-session-lock") no_session_lock = true;
+    else if (a == "--server-idle-timeout" && i + 1 < argc) {
+      try { server_idle_timeout = std::stoi(argv[++i]); }
+      catch (std::exception const&) { std::println("--server-idle-timeout 需要整数秒"); return 2; }
+    }
     else if (a == "--on-busy" && i + 1 < argc) on_busy = argv[++i];
     else if (a.starts_with("--on-busy=")) on_busy = a.substr(std::string("--on-busy=").size());
     else if (a == "--allow-import") allow_import = true;
@@ -531,6 +823,38 @@ int main(int argc, char** argv) {
     std::println("--on-busy 只支持 reject | wait | interject，收到 '{}'", on_busy);
     return 2;
   }
+  if (post_only && !lock_session) {
+    std::println("--post 需要配合 --lock-session / --as-client");
+    return 2;
+  }
+
+  // ---- problems/07 §8 P2b：会话 C/S（FIFO） ----
+  if (lock_session) {
+    if (as_client) {
+      if (input.empty()) {
+        std::println("--as-client 需要一条 query");
+        return 2;
+      }
+      return cs_run_client(workdir, session, sets, stream_events, post_only, input);
+    }
+    if (session_server_alive(workdir, session)) {
+      if (as_server) {
+        std::println("会话 '{}' 已有服务端在运行；要接管请先让它退出（Ctrl-C / kill）", session);
+        return 2;
+      }
+      if (input.empty()) {
+        std::println("会话服务端已在运行：请给出 query（自动作为客户端投递）");
+        return 2;
+      }
+      return cs_run_client(workdir, session, sets, stream_events, post_only, input);
+    }
+    return cs_run_server(workdir, session, name_or_path, sets, stream_events, as_server,
+                         server_idle_timeout, input);
+  }
+  if (as_server || as_client || post_only) {
+    std::println("--as-server / --as-client / --post 需要配合 --lock-session");
+    return 2;
+  }
 
   // ---- problems/07 §8 P0：会话单飞锁 ----
   // 同一 session 同一时刻只允许一轮 query：默认 busy 直接拒绝（fail-closed）；
@@ -548,7 +872,7 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, handle_cancel_signal);
   std::signal(SIGTERM, handle_cancel_signal);
   std::function<bool()> should_stop;
-  {
+  if (!no_session_lock) {  // C/S 子进程：父服务端已持锁
     std::string const lock_run = "cli-" + std::to_string(self_pid);
     bool interjected = false;
     SessionLockAcquire lk = acquire_session_lock(workdir, session, lock_run);

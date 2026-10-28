@@ -20,6 +20,7 @@
 #include "cppchain/message/message.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/tool/spawn_runner.hpp"
+#include "cppchain/workflow/session_channel.hpp"
 #include "cppchain/workflow/session_lock.hpp"
 #include "cppchain/workflow/session_log.hpp"
 
@@ -209,4 +210,57 @@ TEST(WfInterjectE2E, new_query_interjects_and_takes_over) {
   EXPECT_FALSE(has("after"));         // 第一轮取消点之后不再执行
 
   clear_session_cancel(tmp.dir, "s");
+}
+
+// P2b：取消经由服务端传播到子进程（wfr cancel 目标是服务端 pid）。
+TEST(WfCancelViaServerE2E, cancel_targets_server_and_propagates_to_child) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP() << "wfr / libslow_tools.so 未构建";
+
+  TempDir tmp;
+  write_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server", "go"},
+        std::nullopt, {}, std::chrono::seconds(40), 1u << 20);
+  });
+
+  std::optional<SessionServerInfo> info;
+  for (int i = 0; i < 100 && !info; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    info = read_server_info(tmp.dir, "s");
+  }
+  ASSERT_TRUE(info.has_value()) << "服务端未启动";
+  bool act_started = false;
+  for (int i = 0; i < 100 && !act_started; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (auto const& n : node_enters(tmp.dir, "s"))
+      if (n == "act") act_started = true;
+  }
+  ASSERT_TRUE(act_started);
+
+  // wfr cancel：读锁拿服务端 pid → 写 cancel → 服务端在派发循环里 SIGTERM 子进程
+  auto const cc = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "cancel", "--workdir", tmp.dir.string(), "--session", "s",
+       "--no-wait"},
+      std::nullopt, {}, std::chrono::seconds(10), 1u << 20);
+  EXPECT_EQ(cc.exit_code, 0) << cc.output;
+
+  bool cancelled_seen = false;
+  for (int i = 0; i < 100 && !cancelled_seen; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (auto const& n : node_enters(tmp.dir, "s"))
+      if (n == "__cancelled__") cancelled_seen = true;
+  }
+  EXPECT_TRUE(cancelled_seen);
+  for (auto const& n : node_enters(tmp.dir, "s")) EXPECT_NE(n, "after");
+
+  ::kill(static_cast<pid_t>(info->pid), SIGTERM);
+  server.join();
+  EXPECT_FALSE(std::filesystem::exists(session_fifo_path(tmp.dir, "s")));
+  EXPECT_FALSE(std::filesystem::exists(session_server_path(tmp.dir, "s")));
 }

@@ -198,6 +198,7 @@ add_executable(workflow_tests
   wf/wfr_cancel_cli_test.cpp
   wf/wfr_cgi_cancel_test.cpp
   wf/cancel_e2e_test.cpp
+  wf/session_channel_test.cpp
   wf/phantasma_wiring_test.cpp
   wf/verify_agent_test.cpp
   wf/artifact_ver_test.cpp
