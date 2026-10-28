@@ -169,6 +169,12 @@ target_include_directories(sidefx_notify PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(sidefx_notify SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
 target_compile_options(sidefx_notify PRIVATE -Wall -Wextra -Wpedantic)
 
+# problems/07 §9.4：取消端到端用例的"慢工具"库（slow_sleep，只读）；wfr 经 WFR_TOOL_LIB_DIRS 找到
+add_library(slow_tools SHARED plugin_demo/slow_tools.cpp)
+target_include_directories(slow_tools PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(slow_tools SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(slow_tools PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(workflow_tests
   wf/expr_test.cpp
   wf/context_node_test.cpp
@@ -191,6 +197,7 @@ add_executable(workflow_tests
   wf/fire_cancel_test.cpp
   wf/wfr_cancel_cli_test.cpp
   wf/wfr_cgi_cancel_test.cpp
+  wf/cancel_e2e_test.cpp
   wf/phantasma_wiring_test.cpp
   wf/verify_agent_test.cpp
   wf/artifact_ver_test.cpp
@@ -243,7 +250,7 @@ target_compile_definitions(workflow_tests PRIVATE
   CPPCHAIN_MOCK_TOOLS_DIR="$<TARGET_FILE_DIR:mock_tools>"
   # 副作用场景 mock 库目录（sidefx_notify_test.cpp 用它定位 + state_reset 隔离）
   CPPCHAIN_SIDEFX_NOTIFY_DIR="$<TARGET_FILE_DIR:sidefx_notify>")
-add_dependencies(workflow_tests node_demo_plugin node_enum_plugin mock_tools sidefx_notify)
+add_dependencies(workflow_tests node_demo_plugin node_enum_plugin mock_tools sidefx_notify slow_tools wfr)
 
 target_compile_options(workflow_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(workflow_tests)
