@@ -725,7 +725,10 @@ int cs_run_client(std::string const& workdir, std::string const& session,
     if (m.is_discarded() || !m.is_object()) continue;
     std::string const type = m.value("type", "");
     if (type == "queued") {
-      if (!stream) {
+      if (stream) {
+        std::cout << line << '\n';  // Web/CGI：原样转发排队事件
+        std::cout.flush();
+      } else {
         std::println("排队第 {} 位…", m.value("position", 0));
         std::cout.flush();
       }

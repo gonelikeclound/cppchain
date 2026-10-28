@@ -78,10 +78,21 @@ void build_corpus() {
   for (int i = 0; i < 300; ++i) yaml += "filler_" + std::to_string(i) + ": \"填充 " + std::to_string(i) + "\"\n";
   write_text(ws_root() / "app.yaml", yaml);
 
+  std::string xml = "<feed>\n";
+  for (int i = 1; i <= 20; ++i) {
+    xml += "  <entry><id>" + std::to_string(i) + "</id><title>";
+    xml += (i == 15) ? "量子计算取得突破" : ("新闻条目 " + std::to_string(i));
+    xml += "</title><body>正文 " + std::to_string(i) + "</body></entry>\n";
+  }
+  xml += "</feed>\n";
+  write_text(ws_root() / "feed.xml", xml);
+
   std::string log;
   for (int i = 0; i < 800; ++i) {
     if (i == 520)
       log += "2026-10-27T12:00:00Z ERROR code=0x9F3A handler=payment retry=3\n";
+    if (i == 300)
+      log += "2026-10-27T12:00:00Z WARN code=0xABC1 handler=search retry=0\n";
     else
       log += "2026-10-27T12:00:00Z INFO request id=" + std::to_string(100000 + i) +
              " status=200 path=/api/v1/orders\n";
@@ -333,6 +344,13 @@ int main() {
       {"report.md 里 Section 7 的召回率是多少？只回答数字。", "0.83", "章节"},
       {"novel.txt 里有没有提到「李英琼」？回答并给出证据。", "李英琼", "引号字面"},
       {"app.log 的最后一行是什么？原样输出。", "LAST-LINE-尾标记", "全局/结尾"},
+      {"config.json 的 /services/7/ports/0 是多少？只回答数字。", "8007", "JSON 深层数组"},
+      {"app.yaml 里 server.ports.0 是什么？只回答数字。", "80", "YAML 列表首项"},
+      {"feed.xml 的 /feed/entry[4]/title 是什么？只回答标题。", "新闻条目 4", "XML 元素路径"},
+      {"report.md 里 Section 3 的第一段正文是什么？原样输出前 20 字。", "本节正文段落 3-0",
+       "Markdown 章节"},
+      {"app.log 里 code=0xABC1 对应的 handler 是什么？只回答 handler 名。", "search",
+       "第二处字面定位"},
       // 路由盲区：没有结构/字面/全局信号 → file_context 不预取；只能靠模型调工具
       {"app.yaml 里 host 的值是什么？只回答值。", "localhost", "无路由信号（兜底）", true},
   };

@@ -543,3 +543,73 @@ TEST(WfSessionChannel, queue_positions_increment_and_full_errors) {
       std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
   server.join();
 }
+
+// P2/P3：并发压测——慢请求占住服务端，4 个客户端同时到达：
+// 各自拿到唯一的排队位次 1..4，最终全部成功。
+TEST(WfSessionChannel, concurrent_clients_get_unique_queue_positions) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP();
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+  write_slow_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server"},
+        std::nullopt, {}, std::chrono::seconds(40), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (read_server_info(tmp.dir, "s").has_value()) break;
+  }
+
+  cppchain::tool::ExecResult slow;
+  std::thread slow_client([&] {
+    slow = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "slow"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (count_node_enters(tmp.dir, "s", "act") > 0) break;
+  }
+
+  constexpr int kN = 4;
+  std::vector<cppchain::tool::ExecResult> results(kN);
+  std::vector<std::thread> clients;
+  for (int i = 0; i < kN; ++i) {
+    clients.emplace_back([&, i] {
+      results[static_cast<std::size_t>(i)] = cppchain::tool::detail::run_argv(
+          {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+           "--as-client", "--request-id", "c" + std::to_string(i), "q" + std::to_string(i)},
+          std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+    });
+  }
+  for (auto& t : clients) t.join();
+  slow_client.join();
+
+  EXPECT_EQ(slow.exit_code, 0) << slow.output;
+  std::vector<int> positions;
+  for (auto const& r : results) {
+    EXPECT_EQ(r.exit_code, 0) << r.output;
+    auto const at = r.output.find("排队第 ");
+    ASSERT_NE(at, std::string::npos) << r.output;
+    int pos = 0;
+    for (std::size_t i = at + std::string("排队第 ").size(); i < r.output.size(); ++i) {
+      if (r.output[i] < '0' || r.output[i] > '9') break;
+      pos = pos * 10 + (r.output[i] - '0');
+    }
+    positions.push_back(pos);
+  }
+  std::sort(positions.begin(), positions.end());
+  EXPECT_EQ(positions, (std::vector<int>{1, 2, 3, 4}));
+
+  (void)cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  server.join();
+}

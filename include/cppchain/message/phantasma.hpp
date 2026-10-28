@@ -26,6 +26,7 @@
 #pragma once
 
 #include <cstddef>
+#include <ctime>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -188,6 +189,78 @@ struct PhantasmaHookOptions {
   return false;
 }
 
+// —— P0 范围机械化：时间窗（"近一年"/日期提问）——
+// 命中判据（months_back>0 时）：问题里出现相对时间词（今年/去年/最近/最新/本月/上月），
+// 或出现 19xx/20xx 年份（可带 -MM / /MM / 年MM），且该年月 ≥ 当前年月 - months_back。
+// 未来日期视为在窗内（时效性问题）。解析失败/无日期 → false（不回退成全范围）。
+[[nodiscard]] inline bool phantasma_time_in_window(std::string_view text, std::time_t now,
+                                                   int months_back) {
+  if (months_back <= 0) return false;
+  std::tm tmv{};
+  ::localtime_r(&now, &tmv);
+  int const now_ym = (tmv.tm_year + 1900) * 12 + (tmv.tm_mon + 1);
+  int const floor_ym = now_ym - months_back;
+  for (std::string_view const w : {"今年", "去年", "最近", "近期", "最新", "本月", "上个月",
+                                   "本月", "近一年"})
+    if (text.find(w) != std::string_view::npos) return true;
+
+  auto const is_digit = [](char c) { return c >= '0' && c <= '9'; };
+  for (std::size_t i = 0; i + 4 <= text.size(); ++i) {
+    if (!is_digit(text[i]) || (text[i] != '1' && text[i] != '2')) continue;
+    int year = 0;
+    bool ok = true;
+    for (std::size_t k = 0; k < 4; ++k) {
+      if (!is_digit(text[i + k])) { ok = false; break; }
+      year = year * 10 + (text[i + k] - '0');
+    }
+    if (!ok || year < 1900 || year > 2100) continue;
+    int month = 1;
+    bool has_month = false;
+    std::size_t j = i + 4;
+    std::size_t k = j;
+    if (k < text.size() && (text[k] == '-' || text[k] == '/')) {
+      ++k;
+    } else if (text.substr(k, 3) == "\xE5\xB9\xB4") {  // 年
+      k += 3;
+    } else {
+      k = 0;
+    }
+    if (k != 0) {
+      int m = 0;
+      std::size_t digits = 0;
+      while (k < text.size() && digits < 2 && is_digit(text[k])) {
+        m = m * 10 + (text[k] - '0');
+        ++k;
+        ++digits;
+      }
+      if (digits > 0 && m >= 1 && m <= 12) {
+        month = m;
+        has_month = true;
+        j = k;
+      }
+    }
+    // 只给年份（"2025 年"）→ 按整年判：年份 ≥ 窗口起始年份即在窗内；
+    // 给了月份 → 按年月精确比较。
+    if (!has_month) {
+      if (year >= floor_ym / 12) return true;
+    } else if (year * 12 + month >= floor_ym) {
+      return true;
+    }
+    i = (j > i ? j - 1 : i);
+  }
+  return false;
+}
+
+// —— P0 范围机械化：模型自评"不确定" ——
+// 命中后即使信号有效也**不豁免**（照查）：过度自信与幻觉同源，自称不确定时宁查。
+[[nodiscard]] inline bool phantasma_uncertainty_detected(std::string_view text) {
+  for (std::string_view const w :
+       {"不确定", "不太确定", "无法确定", "没把握", "记不清", "也许", "或许", "大概是",
+        "应该是", "印象中"})
+    if (text.find(w) != std::string_view::npos) return true;
+  return false;
+}
+
 // 三态回执：决定“查还是不查”。
 enum class PhantasmaVerdict : unsigned char { Accepted, Vetoed, Absent };
 
@@ -252,6 +325,21 @@ struct PhantasmaEvidence {
                         {"reason", ev.reason},
                         {"seen", ev.seen},
                         {"at_start", ev.at_start}};
+}
+
+// 落账行（plan_log kind=phantasma）；step 由调用方填。
+[[nodiscard]] inline nlohmann::json phantasma_plan_log_entry(
+    PhantasmaEvidence const& ev, std::string const& node, int step, bool in_scope, bool forced) {
+  return nlohmann::json{{"kind", "phantasma"},
+                        {"node", node},
+                        {"step", step},
+                        {"verdict", phantasma_verdict_name(ev.verdict)},
+                        {"accepted", ev.verdict == PhantasmaVerdict::Accepted},
+                        {"reason", ev.reason},
+                        {"seen", ev.seen},
+                        {"at_start", ev.at_start},
+                        {"in_scope", in_scope},
+                        {"forced", forced}};
 }
 
 }  // namespace cppchain::message

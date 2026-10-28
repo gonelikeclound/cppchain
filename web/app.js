@@ -441,6 +441,10 @@ function renderStreamEvent(e) {
     renderApproval(e);
     return;
   }
+  if (e.type === "queued") {
+    appendMsg("error-line", "排队第 " + (e.position || "?") + " 位…");
+    return;
+  }
   if (e.type === "cancelled") {
     appendMsg("error-line", "已取消（节点边界停止；已完成进度已保留）");
     return;
@@ -574,17 +578,26 @@ function renderApproval(e) {
     box.appendChild(pre);
   }
 
+  const feedback = document.createElement("input");
+  feedback.type = "text";
+  feedback.placeholder = "拒绝理由（可选，随 reject 一起提交）";
+  feedback.className = "approval-feedback";
+  box.appendChild(feedback);
+
   const actions = document.createElement("div");
   actions.className = "approval-actions";
   const submit = async (decision) => {
     actions.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    feedback.disabled = true;
     try {
       const r = await raw("approve", {
         ws: w.dir, s: state.session, request: e.request, decision,
+        feedback: decision === "reject" ? feedback.value.trim() : "",
       });
-      appendMsg("error-line", r.ok ? ("审批已提交：" + decision) : ("审批失败：" + (r.error || "")));
+      const label = r.ok ? ("已提交：" + decision) : ("提交失败：" + (r.error || ""));
+      box.appendChild(elDiv("approval-result", label));
     } catch (err) {
-      appendMsg("error-line", "审批失败: " + err.message);
+      box.appendChild(elDiv("approval-result", "提交失败: " + err.message));
     }
   };
   for (const [label, decision, cls] of [["批准", "approve", "primary"], ["拒绝", "reject", "ghost"], ["中止", "abort", "ghost"]]) {

@@ -337,3 +337,15 @@ TEST(WfPhantasma, out_of_scope_domain_fast_no_lookup) {
   EXPECT_EQ(last_ai_text(*st), "iPhone16 发布时间未知。");   // 快答
   EXPECT_EQ((*st)["results"]["think"]["phantasma"]["verdict"].get<std::string>(), "absent");
 }
+
+// P0：自评不确定 → 即使信号有效也不豁免（absent，reason=uncertainty_gate）
+TEST(WfPhantasma, uncertainty_vetoes_valid_signal) {
+  Fixture f;
+  f.model.replies.push_back(
+      ai_message("<anti-phantasma-off reason=\"well-known\"/>\n我不确定，小米 15 可能是 2024 年发布。"));
+  auto st = f.run(cfg_on);
+  ASSERT_TRUE(st) << st.error().message;
+  Json const pa = (*st)["results"]["m0"]["phantasma"];
+  EXPECT_EQ(pa["verdict"].get<std::string>(), "absent");
+  EXPECT_EQ(pa["reason"].get<std::string>(), "uncertainty_gate");
+}

@@ -131,3 +131,38 @@ TEST(PhantasmaSignal, missing_selfclose_ignored) {
   EXPECT_EQ(strip_phantasma_signal(t, &s), t);
   EXPECT_FALSE(s.seen);
 }
+// P0 范围机械化：时间窗 / 自评不确定 / plan_log 行
+TEST(PhantasmaScope, time_window_detects_recent_dates_and_relative_words) {
+  std::tm tmv{};
+  tmv.tm_year = 2026 - 1900;
+  tmv.tm_mon = 10 - 1;  // 10 月
+  tmv.tm_mday = 28;
+  std::time_t const now = std::mktime(&tmv);
+  EXPECT_TRUE(phantasma_time_in_window("2025 年发生了什么？", now, 12));
+  EXPECT_TRUE(phantasma_time_in_window("2026-03 的数据", now, 12));
+  EXPECT_TRUE(phantasma_time_in_window("今年的进展", now, 12));
+  EXPECT_FALSE(phantasma_time_in_window("2019 年的历史", now, 12));
+  EXPECT_FALSE(phantasma_time_in_window("2025 年发生了什么？", now, 0));  // 未启用
+}
+
+TEST(PhantasmaScope, uncertainty_detector_conservative) {
+  EXPECT_TRUE(phantasma_uncertainty_detected("我不确定它的发布时间。"));
+  EXPECT_TRUE(phantasma_uncertainty_detected("大概是 2024 年。"));
+  EXPECT_TRUE(phantasma_uncertainty_detected("记不清了。"));
+  EXPECT_FALSE(phantasma_uncertainty_detected("小米 15 于 2025 年发布。"));
+}
+
+TEST(PhantasmaScope, plan_log_entry_shape) {
+  PhantasmaEvidence ev;
+  ev.verdict = PhantasmaVerdict::Absent;
+  ev.reason = "uncertainty_gate";
+  ev.seen = true;
+  auto const j = phantasma_plan_log_entry(ev, "think", 7, true, false);
+  EXPECT_EQ(j["kind"], "phantasma");
+  EXPECT_EQ(j["node"], "think");
+  EXPECT_EQ(j["step"], 7);
+  EXPECT_EQ(j["verdict"], "absent");
+  EXPECT_EQ(j["reason"], "uncertainty_gate");
+  EXPECT_EQ(j["in_scope"], true);
+  EXPECT_EQ(j["forced"], false);
+}

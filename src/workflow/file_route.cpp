@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -198,6 +201,85 @@ std::string detect_literal(std::string_view q, std::vector<FileEntry> const& fil
   return {};
 }
 
+// ---- ⑤ BM25 / ⑥ 向量：检索臂（grep/extract 未命中时的兜底）----
+
+bool is_cjk(unsigned cp) { return cp >= 0x4E00 && cp <= 0x9FFF; }
+
+// ASCII 词 + CJK 单字 + CJK 相邻二字（bigram）——中文无空格，bigram 提供词面重叠。
+std::vector<std::string> retrieval_tokens(std::string_view s) {
+  std::vector<std::string> out;
+  std::string ascii, prev_cjk;
+  auto flush = [&] {
+    if (!ascii.empty()) {
+      out.push_back(ascii);
+      ascii.clear();
+    }
+  };
+  for (std::size_t i = 0; i < s.size();) {
+    unsigned char const c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) {
+      if (std::isalnum(c)) {
+        ascii.push_back(static_cast<char>(std::tolower(c)));
+        prev_cjk.clear();
+        ++i;
+        continue;
+      }
+      flush();
+      prev_cjk.clear();
+      ++i;
+      continue;
+    }
+    std::size_t const len = c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    if (i + len > s.size()) break;
+    unsigned cp = c & (len == 2 ? 0x1F : len == 3 ? 0x0F : 0x07);
+    for (std::size_t k = 1; k < len; ++k)
+      cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+    if (is_cjk(cp)) {
+      flush();
+      std::string const ch(s.substr(i, len));
+      out.push_back(ch);
+      if (!prev_cjk.empty()) out.push_back(prev_cjk + ch);
+      prev_cjk = ch;
+    } else {
+      flush();
+      prev_cjk.clear();
+    }
+    i += len;
+  }
+  flush();
+  return out;
+}
+
+// 用 file_read 分页把文件读进内存（受 max_bytes 限制；UTF-8 安全截断）。
+std::string read_file_paged(tool::ToolRegistry const& reg, std::string const& path,
+                            long max_bytes) {
+  auto const* rd = reg.find("file_read");
+  if (rd == nullptr) return {};
+  std::string out;
+  long long offset = 0;
+  for (int guard = 0; guard < 64 && static_cast<long>(out.size()) < max_bytes; ++guard) {
+    tool::ToolContext ctx;
+    auto r = rd->handler(Json{{"path", path}, {"offset", offset}, {"max_chars", 8000}}, ctx);
+    if (!r) break;
+    std::string c = r->value("content", "");
+    if (c.size() >= 3 && c.compare(c.size() - 3, 3, "…") == 0) c.resize(c.size() - 3);
+    out += c;
+    if (!r->contains("next_offset") || r->at("next_offset").is_null()) break;
+    offset = r->at("next_offset").get<long long>();
+  }
+  return clip_utf8(out, static_cast<std::size_t>(max_bytes));
+}
+
+struct RetrievalChunk {
+  std::string path;
+  std::size_t offset = 0;
+  std::string text;
+  std::vector<std::string> toks;
+  double bm25 = 0.0;
+  double vec = 0.0;
+  double score = 0.0;
+};
+
 std::string join_names(Json const& arr) {
   std::string out;
   for (Json const& n : arr) out += (out.empty() ? "" : "、") + n.get<std::string>();
@@ -313,6 +395,125 @@ FileRouteOutcome route_file_question(tool::ToolRegistry const& reg, std::string 
     return hit;
   };
 
+  // ⑤/⑥：字面/structure 未命中时的检索升级（BM25；配置 embedder 时混合向量）。
+  auto do_retrieve = [&]() -> bool {
+    std::vector<std::string> targets = mentioned;
+    if (targets.empty())
+      for (auto const& f : files) {
+        auto const e = ext_of(f.name);
+        if (is_structured_ext(e) || e == ".log" || e == ".csv") targets.push_back(f.name);
+      }
+    if (opts.max_files > 0 && targets.size() > static_cast<std::size_t>(opts.max_files))
+      targets.resize(static_cast<std::size_t>(opts.max_files));
+    if (targets.empty()) {
+      record("retrieve", "无候选文件", false, 0);
+      return false;
+    }
+
+    std::vector<RetrievalChunk> chunks;
+    for (auto const& path : targets) {
+      std::string const text = read_file_paged(reg, path, opts.retrieve_max_bytes);
+      if (text.empty()) continue;
+      std::size_t const win = 800, step = 600;
+      for (std::size_t pos = 0; pos < text.size(); pos += step) {
+        std::size_t end = std::min(pos + win, text.size());
+        while (end > pos && end < text.size() &&
+               (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80)
+          --end;
+        std::size_t start = pos;
+        while (start < text.size() &&
+               (static_cast<unsigned char>(text[start]) & 0xC0) == 0x80)
+          ++start;
+        if (end <= start) continue;
+        RetrievalChunk ch;
+        ch.path = path;
+        ch.offset = start;
+        ch.text = text.substr(start, end - start);
+        ch.toks = retrieval_tokens(ch.text);
+        chunks.push_back(std::move(ch));
+        if (end == text.size()) break;
+      }
+    }
+    auto const qt = retrieval_tokens(question);
+    if (chunks.empty() || qt.empty()) {
+      record("retrieve", "无候选片段/查询词", false, 0);
+      return false;
+    }
+
+    // BM25（k1=1.2, b=0.75）；df 只统计 query 词
+    std::unordered_map<std::string, std::size_t> df;
+    for (auto const& t : qt) df[t] = 0;
+    std::size_t total_toks = 0;
+    for (auto const& ch : chunks) {
+      std::unordered_map<std::string, std::size_t> tf;
+      for (auto const& t : ch.toks) ++tf[t];
+      for (auto& [t, c] : df)
+        if (tf.count(t) > 0) ++c;
+      total_toks += ch.toks.size();
+    }
+    double const avgdl = static_cast<double>(total_toks) / static_cast<double>(chunks.size());
+    constexpr double k1 = 1.2, b = 0.75;
+    double max_bm25 = 0.0;
+    for (auto& ch : chunks) {
+      std::unordered_map<std::string, std::size_t> tf;
+      for (auto const& t : ch.toks) ++tf[t];
+      double s = 0.0;
+      for (auto const& [t, d] : df) {
+        auto const it = tf.find(t);
+        if (it == tf.end()) continue;
+        double const idf =
+            std::log(1.0 + (static_cast<double>(chunks.size()) - d + 0.5) / (d + 0.5));
+        double const dl = static_cast<double>(ch.toks.size());
+        s += idf * (it->second * (k1 + 1.0)) /
+             (it->second + k1 * (1.0 - b + b * dl / (avgdl > 0 ? avgdl : 1.0)));
+      }
+      ch.bm25 = s;
+      max_bm25 = std::max(max_bm25, s);
+    }
+
+    // 可选向量臂：query 与 chunk 余弦，与归一化 BM25 混合
+    bool vec_ok = false;
+    if (opts.embedder != nullptr) {
+      auto const qe = opts.embedder->embed_query(question);
+      if (qe) {
+        std::vector<std::string> texts;
+        texts.reserve(chunks.size());
+        for (auto const& c : chunks)
+          texts.push_back(c.text.substr(0, std::min<std::size_t>(c.text.size(), 800)));
+        auto const em = opts.embedder->embed(texts);
+        if (em && em->size() == chunks.size()) {
+          for (std::size_t i = 0; i < chunks.size(); ++i)
+            chunks[i].vec =
+                std::max(0.0, model::cosine_similarity(*qe, (*em)[i]));
+          vec_ok = true;
+        }
+      }
+    }
+    for (auto& ch : chunks) {
+      double const kb = max_bm25 > 0 ? ch.bm25 / max_bm25 : 0.0;
+      ch.score = vec_ok ? opts.vector_weight * ch.vec + (1.0 - opts.vector_weight) * kb : kb;
+    }
+    std::sort(chunks.begin(), chunks.end(),
+              [](RetrievalChunk const& a, RetrievalChunk const& b) { return a.score > b.score; });
+
+    std::string text;
+    std::size_t bytes = 0;
+    bool any = false;
+    std::size_t const take = std::min(opts.retrieve_top_k, chunks.size());
+    for (std::size_t i = 0; i < take; ++i) {
+      if (chunks[i].score <= 1e-9) break;
+      any = true;
+      text += "【" + chunks[i].path + " · offset=" + std::to_string(chunks[i].offset) + " · " +
+              (vec_ok ? "bm25+vector" : "bm25") + "】\n" + chunks[i].text + "\n";
+      bytes += chunks[i].text.size();
+    }
+    record("retrieve", vec_ok ? "bm25+vector" : "bm25", any, bytes);
+    if (!any) return false;
+    out.route = "retrieve";
+    add_text("【检索结果（字面/structure 未命中时升级）】\n" + text);
+    return true;
+  };
+
   auto sample_target = [&]() -> std::string {
     if (!mentioned.empty()) return mentioned.front();
     std::string best;
@@ -340,10 +541,10 @@ FileRouteOutcome route_file_question(tool::ToolRegistry const& reg, std::string 
       }
     if (!ok) {
       bool const g = do_grep(selector);
-      if (!g) do_sample(sample_target());
+      if (!g && !do_retrieve()) do_sample(sample_target());
     }
   } else if (!literal.empty()) {
-    if (!do_grep(literal)) do_sample(sample_target());
+    if (!do_grep(literal) && !do_retrieve()) do_sample(sample_target());
   } else if (global) {
     do_sample(sample_target());
   } else if (complete) {

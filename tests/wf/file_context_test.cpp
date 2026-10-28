@@ -12,6 +12,8 @@
 #include "cppchain/message/message.hpp"
 #include "cppchain/message/serializer.hpp"
 #include "cppchain/state/checkpointer.hpp"
+#include "cppchain/model/embeddings.hpp"
+#include "cppchain/workflow/file_route.hpp"
 #include "cppchain/tool/file_tools.hpp"
 #include "cppchain/tool/tool.hpp"
 #include "cppchain/workflow/compiler.hpp"
@@ -163,13 +165,15 @@ TEST(WfFileContext, extract_miss_escalates_to_grep_then_sample) {
   ASSERT_TRUE(st) << st.error().message;
   EXPECT_EQ(route_frame(*st).at("route").get<std::string>(), "sample");
   auto const& a = route_frame(*st).at("attempts");
-  ASSERT_GE(a.size(), 3u);
+  ASSERT_GE(a.size(), 4u);
   EXPECT_EQ(a[0].at("tool").get<std::string>(), "file_extract");
   EXPECT_FALSE(a[0].at("hit").get<bool>());
   EXPECT_EQ(a[1].at("tool").get<std::string>(), "file_grep");
   EXPECT_FALSE(a[1].at("hit").get<bool>());
-  EXPECT_EQ(a[2].at("tool").get<std::string>(), "file_sample");
-  EXPECT_TRUE(a[2].at("hit").get<bool>());
+  EXPECT_EQ(a[2].at("tool").get<std::string>(), "retrieve");  // BM25/向量升级
+  EXPECT_FALSE(a[2].at("hit").get<bool>());
+  EXPECT_EQ(a[3].at("tool").get<std::string>(), "file_sample");
+  EXPECT_TRUE(a[3].at("hit").get<bool>());
 }
 
 TEST(WfFileContext, global_word_routes_to_sample) {
@@ -223,4 +227,46 @@ TEST(WfFileContext, no_signal_is_noop) {
   EXPECT_EQ(route_frame(*st).at("route").get<std::string>(), "none");
   EXPECT_EQ(route_frame(*st).at("action").get<std::string>(), "noop");
   EXPECT_FALSE(st->contains("system_context"));
+}
+
+
+// ⑤ BM25：字面 grep 未命中（"召回率" vs 正文"召回指标"）→ 检索升级命中
+TEST(WfFileContext, bm25_escalates_when_grep_misses) {
+  Fixture f;
+  write_text(f.ws.dir / "notes.txt", "背景说明。\n召回指标：0.83，精确率 0.91。\n其他内容。\n");
+  auto st = f.run("「召回率」是多少？", Json{{"file_route", Json{{"enabled", true}}}});
+  ASSERT_TRUE(st) << st.error().message;
+  EXPECT_EQ(route_frame(*st).at("route").get<std::string>(), "retrieve");
+  EXPECT_NE(context_text(*st).find("0.83"), std::string::npos);
+  auto const& a = route_frame(*st).at("attempts");
+  ASSERT_FALSE(a.empty());
+  EXPECT_EQ(a.back().at("tool").get<std::string>(), "retrieve");
+  EXPECT_TRUE(a.back().at("hit").get<bool>());
+}
+
+// ⑥ 向量：query 与正文无词面重叠（BM25=0），向量臂命中 → retrieve
+namespace {
+class FakeEmbedder final : public model::Embeddings {
+ public:
+  std::expected<std::vector<model::Embedding>, model::ModelError> embed(
+      std::span<std::string const> texts) override {
+    std::vector<model::Embedding> out;
+    for (std::size_t i = 0; i < texts.size(); ++i) out.push_back(model::Embedding{1.0f, 0.0f});
+    return out;
+  }
+  std::size_t dimension() const override { return 2; }
+  std::size_t max_batch_size() const override { return 64; }
+};
+}  // namespace
+
+TEST(WfFileContext, vector_arm_hits_without_token_overlap) {
+  Fixture f;
+  write_text(f.ws.dir / "notes.txt", "完全不相关的正文，没有任何共同词。\n");
+  FakeEmbedder emb;
+  FileRouteOptions opts;
+  opts.embedder = &emb;
+  opts.vector_weight = 1.0;
+  auto const out = route_file_question(f.registry, "「XYZQUERY」是什么？", opts);
+  EXPECT_EQ(out.route, "retrieve");
+  EXPECT_FALSE(out.context.empty());
 }

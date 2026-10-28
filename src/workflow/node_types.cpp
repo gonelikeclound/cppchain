@@ -947,37 +947,56 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     // 开：① 所有内容块剥标签（Text/Reasoning，防标签泄漏下游/用户）② 首个 TextBlock 出三态
     //     回执 ③ 回执进 results[node].phantasma + node_log；默认关 → 完全不动（旧路径零回归）。
     Json pa_evidence = Json::object();
+    Json pa_plan_log = Json(nullptr);  // 若 state 已有 plan_log，追加 kind=phantasma 行
     Json const pa_cfg = resolve_parameter(Json("@config.anti_phantasma"), state);
     if (pa_cfg.is_object() && pa_cfg.value("enabled", false)) {
       message::PhantasmaHookOptions pa_opt;
-      // 范围（切片 5）：@config.anti_phantasma.domains 关键词命中用户提问；域空/缺省 → 全范围
+      std::string const last_human = [&] {
+        for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit)
+          if (rit->type == message::Role::Human) return rit->text();
+        return std::string{};
+      }();
+      // 范围：domains 关键词；P0 机械化「近一年 / 日期提问」时间窗（time_window_months>0 时启用）
       {
-        std::string const last_human = [&] {
-          for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit)
-            if (rit->type == message::Role::Human) return rit->text();
-          return std::string{};
-        }();
-        pa_opt.in_scope =
+        bool in_scope =
             message::phantasma_in_scope(pa_cfg.value("domains", Json::array()), last_human);
+        int const months = pa_cfg.value("time_window_months", 0);
+        if (!in_scope && months > 0)
+          in_scope = message::phantasma_time_in_window(last_human, std::time(nullptr), months);
+        pa_opt.in_scope = in_scope;
       }
       pa_opt.reason_gate = true;  // 切片 4：reason 走内置对抗特征表（注入文本信号判无效）
       pa_opt.risk_veto = pa_cfg.value("risk_veto", false);
       message::PhantasmaEvidence first_ev;
       bool have_first = false;
+      std::string pa_answer_text, pa_reasoning_text;
       for (auto& blk : r->content) {
         if (auto* rb = std::get_if<message::ReasoningBlock>(&blk)) {
           rb->reasoning = message::strip_phantasma_signal(rb->reasoning);
+          pa_reasoning_text += rb->reasoning;
         } else if (auto* tb = std::get_if<message::TextBlock>(&blk)) {
           message::PhantasmaEvidence const e = message::apply_phantasma_signal(tb->text, pa_opt);
           tb->text = e.cleaned;
+          pa_answer_text += tb->text;
           if (!have_first) {
             first_ev = e;
             have_first = true;
           }
         }
       }
+      // P0 机械化「自评不确定」：过度自信与幻觉同源——自称拿不准时即使有灯也不豁免。
+      bool uncertainty_veto = false;
+      if (first_ev.verdict == message::PhantasmaVerdict::Accepted &&
+          pa_cfg.value("uncertainty_gate", true) &&
+          message::phantasma_uncertainty_detected(pa_answer_text + "\n" + pa_reasoning_text)) {
+        first_ev.verdict = message::PhantasmaVerdict::Absent;
+        first_ev.reason = "uncertainty_gate";
+        uncertainty_veto = true;
+      }
       pa_evidence = message::phantasma_evidence_to_json(first_ev);
       pa_evidence["node"] = node_id;
+      pa_evidence["in_scope"] = pa_opt.in_scope;
+      if (uncertainty_veto) pa_evidence["uncertainty_veto"] = true;
       // —— 强制取数（切片 5 v0）：范围内 + 需查（absent/未通过）+ 配置允许 + 本轮是文本作答
       //    且工具集里有 web_search 且上一轮没查过 → 把"直接作答"改成"合成 web_search 调用"，
       //    让循环 act(run_tools) 真去查、下一轮模型拿到 grounding 再答（天然单轮上限）。
@@ -985,6 +1004,7 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
       bool const need_lookup = first_ev.verdict != message::PhantasmaVerdict::Accepted;
       bool const want_force = pa_cfg.value("force_lookup", true) && in_scope_here && need_lookup &&
                               have_first && r->tool_calls.empty();
+      bool forced = false;
       if (want_force) {
         bool const web_search_on = [&] {
           if (auto act = scan_active_tools(state); act != std::nullopt && !act->empty()) {
@@ -1016,8 +1036,17 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
           r->tool_calls.clear();
           r->tool_calls.push_back(std::move(tc));
           r->content.clear();  // 无文本、仅工具调用：route 走 tool_calls → act(run_tools)
+          forced = true;
           pa_evidence["forced"] = true;
         }
+      }
+      // P0 落账：state 已有 plan_log（plan/verify 编排）→ 追加 kind=phantasma 行；
+      // 非 plan 工作流（chat 等）没有该键 → 不制造。
+      if (auto const it = state.find("plan_log"); it != state.end() && it->is_array()) {
+        Json log = *it;
+        log.push_back(message::phantasma_plan_log_entry(first_ev, node_id, nc.step,
+                                                        pa_opt.in_scope, forced));
+        pa_plan_log = std::move(log);
       }
       if (sink_p) sink_p->log_node(nc.node_name, "debug", "phantasma_signal", pa_evidence);
     }
@@ -1049,6 +1078,7 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
     Json update = Json::object();
     update[kMessagesKey] = Json::array({*r});
     update[kResultsKey] = std::move(results);
+    if (!pa_plan_log.is_null()) update["plan_log"] = std::move(pa_plan_log);
     return Command::with_update(std::move(update));
   });
   ctx.graph.add_edge(n.id, ctx.resolve(n.next));
@@ -4935,9 +4965,10 @@ void v_file_context(NodeIR const& n, NodeType::ValidateContext const&,
 
 void c_file_context(NodeIR const& n, NodeType::CompileContext& ctx) {
   tool::ToolRegistry const* reg = ctx.registry;
+  ComponentRegistry const* comps = ctx.components;
   auto sink_p = ctx.sink;
   ctx.graph.add_node(
-      n.id, [reg, sink_p, node_id = n.id](Json const& state, NodeContext& nc) {
+      n.id, [reg, comps, sink_p, node_id = n.id](Json const& state, NodeContext& nc) {
         Json const cfg = resolve_parameter(Json("@config.file_route"), state);
         bool on = false;
         FileRouteOptions opts;
@@ -4952,6 +4983,14 @@ void c_file_context(NodeIR const& n, NodeType::CompileContext& ctx) {
           on = (flag == "on" || flag == "true" || flag == "1");
         }
         if (!on) return Command::with_update(Json::object());  // 默认关：旧路径零回归
+        if (cfg.is_object()) {  // ⑤/⑥：可选向量臂 + top_k 配置
+          std::string const embed_name = cfg.value("embed", std::string{});
+          if (comps != nullptr && !embed_name.empty())
+            opts.embedder = comps->embedding(embed_name);
+          opts.vector_weight = cfg.value("vector_weight", 0.5);
+          opts.retrieve_top_k =
+              static_cast<std::size_t>(cfg.value("retrieve_top_k", 3LL));
+        }
 
         Json update = Json::object();
         Json results = Json::object();

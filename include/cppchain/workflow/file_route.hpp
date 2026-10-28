@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cppchain/message/message.hpp"
+#include "cppchain/model/embeddings.hpp"
 #include "cppchain/tool/registry.hpp"
 
 namespace cppchain::workflow {
@@ -20,6 +21,11 @@ namespace cppchain::workflow {
 struct FileRouteOptions {
   long budget_chars = 2000;  // 注入 system_context 的素材总预算（字节）
   long max_files = 5;        // 候选文件上限（list_dir 截断）
+  // ⑤ BM25 / ⑥ 向量升级（grep/extract 未命中时的兜底检索）。
+  model::Embeddings* embedder = nullptr;  // 可选：配置了 embedding 组件才走向量臂
+  double vector_weight = 0.5;             // 混合权重（0 = 纯 BM25，1 = 纯向量）
+  long retrieve_max_bytes = 200000;       // 每文件最多读入的字节（分页 file_read）
+  std::size_t retrieve_top_k = 3;         // 注入片段的条数
 };
 
 struct FileRouteOutcome {
