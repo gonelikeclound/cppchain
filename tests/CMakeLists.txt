@@ -200,6 +200,7 @@ add_executable(workflow_tests
   wf/cancel_e2e_test.cpp
   wf/session_channel_test.cpp
   wf/approve_channel_test.cpp
+  wf/session_state_test.cpp
   wf/phantasma_wiring_test.cpp
   wf/verify_agent_test.cpp
   wf/artifact_ver_test.cpp

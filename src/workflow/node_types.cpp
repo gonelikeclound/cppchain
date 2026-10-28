@@ -4263,6 +4263,15 @@ void c_context(NodeIR const& n, NodeType::CompileContext& ctx) {
           std::string const val = v.is_string() ? v.get<std::string>() : message::utf8_safe_dump(v);
           pairs[it.key()] = val;      // 显式配置覆盖默认（含同名 now/host）
         }
+      // problems/07 §16：内置键 prev_round —— 上一轮是否被新消息打断（优雅取消终态）。
+      // 不依赖模板配置：按 @config.workspace/session 扫会话日志最后一条 run。
+      {
+        Json const ws_v = resolve_parameter(Json("@config.workspace"), state);
+        Json const se_v = resolve_parameter(Json("@config.session"), state);
+        if (ws_v.is_string() && !ws_v.get<std::string>().empty() && se_v.is_string() &&
+            session_last_run_cancelled(ws_v.get<std::string>(), se_v.get<std::string>()))
+          pairs["prev_round"] = "未完成（被新消息打断）";
+      }
       if (!pairs.empty()) {
         std::string block;
         for (auto const& [k, v] : pairs) block += "- " + k + ": " + v + "\n";
@@ -4296,6 +4305,9 @@ void c_context(NodeIR const& n, NodeType::CompileContext& ctx) {
         }
       }
     }
+    // 追加已有 system_context（可能是 file_context 等更早写入的）——避免整键覆盖。
+    if (auto it = state.find(kSystemContextKey); it != state.end() && it->is_array())
+      for (auto const& m : *it) arr.push_back(m);
     if (sink_p)
       sink_p->log_node(nc.node_name, "info",
                        "context: 注入 " + std::to_string(arr.size()) + " 条 system 消息");
@@ -4946,9 +4958,29 @@ void c_file_context(NodeIR const& n, NodeType::CompileContext& ctx) {
           return Command::with_update(std::move(update));
         }
 
+        // problems/07 §16：上一轮被新消息打断 → 跳过预取，交模型结合历史处理
+        //（最后一条 Human 可能是"那明天呢"这类依赖上下文的碎片，硬查没有意义）。
+        {
+          Json const ws_v = resolve_parameter(Json("@config.workspace"), state);
+          Json const se_v = resolve_parameter(Json("@config.session"), state);
+          if (ws_v.is_string() && !ws_v.get<std::string>().empty() && se_v.is_string() &&
+              session_last_run_cancelled(ws_v.get<std::string>(), se_v.get<std::string>())) {
+            results[node_id] =
+                Json{{"action", "skipped"},
+                     {"reason", "上一轮未完成（被新消息打断），跳过预取交模型"}};
+            update[kResultsKey] = std::move(results);
+            if (sink_p != nullptr)
+              sink_p->log_node(nc.node_name, "info", "file_context: 上一轮未完成 → 跳过预取");
+            return Command::with_update(std::move(update));
+          }
+        }
+
         FileRouteOutcome out = route_file_question(*reg, question, opts);
         if (!out.context.empty()) {
           Json sys = Json::array();
+          // 追加已有 system_context（context 节点注入的【当前环境】等），避免整键覆盖
+          if (auto it = state.find(kSystemContextKey); it != state.end() && it->is_array())
+            for (auto const& m : *it) sys.push_back(m);
           for (auto const& m : out.context) sys.push_back(m);
           update[kSystemContextKey] = std::move(sys);  // model 自动带上（同 longdoc_retrieve）
         }

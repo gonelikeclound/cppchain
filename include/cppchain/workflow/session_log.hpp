@@ -32,6 +32,12 @@ namespace cppchain::workflow {
 // （session_path 与旧版同名同语义，仅扩展名从 .json 改为 .log.jsonl）。
 [[nodiscard]] std::string session_path(std::string const& workspace, std::string const& session);
 
+// problems/07 §16：上一轮是否"未完成"（以 __cancelled__ 终态结束）。
+// 取会话日志里**最后一条记录所属的 run**，检查该 run 是否出现过 __cancelled__ 节点记录。
+// 无日志 / 解析失败 → false（首轮/损坏按"上一轮正常"处理）。
+[[nodiscard]] bool session_last_run_cancelled(std::string const& workspace,
+                                              std::string const& session);
+
 // 节点侧写日志的接口（docs/12 §6.4）：引擎实现、触发期注入给节点，不是全局变量。
 struct NodeLog {
   virtual ~NodeLog() = default;

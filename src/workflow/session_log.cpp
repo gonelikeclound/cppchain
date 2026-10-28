@@ -12,6 +12,7 @@
 #include "cppchain/message/utf8.hpp"  // utf8_safe_dump：外部文本坏字节也不让会话日志 dump 崩
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -84,6 +85,22 @@ std::vector<message::Message> messages_from_json(Json const& j) {
 }
 
 }  // namespace
+
+bool session_last_run_cancelled(std::string const& workspace, std::string const& session) {
+  std::ifstream in(session_path(workspace, session));
+  if (!in) return false;
+  std::string last_run;
+  std::unordered_set<std::string> cancelled_runs;
+  std::string line;
+  while (std::getline(in, line)) {
+    Json const j = Json::parse(line, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) continue;
+    std::string const run = j.value("run", "");
+    if (!run.empty()) last_run = run;
+    if (j.value("node", "") == "__cancelled__" && !run.empty()) cancelled_runs.insert(run);
+  }
+  return !last_run.empty() && cancelled_runs.contains(last_run);
+}
 
 std::string session_path(std::string const& workspace, std::string const& session) {
   // .cppchain → .wfr（wfr 工具统一元数据目录）：日志落在 <ws>/.wfr/sessions/。
