@@ -49,6 +49,16 @@ std::filesystem::path self_exe() {
 std::filesystem::path wfr_bin() { return self_exe().parent_path().parent_path() / "bin" / "wfr"; }
 std::filesystem::path slow_lib() { return self_exe().parent_path() / "libslow_tools.so"; }
 
+void write_quick_workflow(std::filesystem::path const& ws) {
+  Json const ir = Json::parse(R"json({
+    "id": "wf_quick",
+    "nodes": [{"id": "e", "kind": "echo", "text": "ok", "next": "_turn_end"}]
+  })json");
+  auto const dir = ws / ".wfr" / "workflows";
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir / "wf_quick.json") << ir.dump(2);
+}
+
 void write_workflow(std::filesystem::path const& ws) {
   Json const ir = Json::parse(R"json({
     "id": "wf_slow",
@@ -136,6 +146,67 @@ TEST(WfCancelE2E, running_query_is_cancelled_at_node_boundary) {
   EXPECT_TRUE(has("act"));         // 慢节点确实执行了（取消发生在它之后）
   EXPECT_FALSE(has("after"));      // 取消点之后不再执行
   EXPECT_TRUE(has("__cancelled__"));  // 终态留痕
+
+  clear_session_cancel(tmp.dir, "s");
+}
+
+// P2：插话（--on-busy=interject）—— 新 query 取消当前轮、等锁释放后自动接管会话。
+TEST(WfInterjectE2E, new_query_interjects_and_takes_over) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP() << "wfr / libslow_tools.so 未构建";
+
+  TempDir tmp;
+  write_workflow(tmp.dir);
+  write_quick_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult first;
+  std::thread runner1([&] {
+    first = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s", "go"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+
+  // 等第一轮进入 act（slow_sleep 3s）
+  std::optional<SessionLockInfo> lock;
+  for (int i = 0; i < 100 && !lock; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    lock = read_session_lock(tmp.dir, "s");
+  }
+  ASSERT_TRUE(lock.has_value()) << "第一轮未在 5s 内启动";
+  bool act_started = false;
+  for (int i = 0; i < 100 && !act_started; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (auto const& n : node_enters(tmp.dir, "s"))
+      if (n == "act") act_started = true;
+  }
+  ASSERT_TRUE(act_started) << "act 未在 10s 内开始";
+
+  // 第二轮：插话（会取消第一轮、等锁、再跑 wf_quick）
+  cppchain::tool::ExecResult second;
+  std::thread runner2([&] {
+    second = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--on-busy=interject", "go2"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+
+  runner1.join();
+  runner2.join();
+
+  EXPECT_EQ(first.exit_code, 130) << first.output;   // 当前轮被取消
+  EXPECT_EQ(second.exit_code, 0) << second.output;   // 插话轮正常完成
+  EXPECT_NE(second.output.find("插话：已请求取消"), std::string::npos) << second.output;
+  EXPECT_FALSE(std::filesystem::exists(session_lock_path(tmp.dir, "s")));
+
+  auto const nodes = node_enters(tmp.dir, "s");
+  auto const has = [&](std::string const& n) {
+    return std::find(nodes.begin(), nodes.end(), n) != nodes.end();
+  };
+  EXPECT_TRUE(has("act"));
+  EXPECT_TRUE(has("__cancelled__"));  // 第一轮取消留痕
+  EXPECT_TRUE(has("e"));              // 第二轮（wf_quick）确实跑了
+  EXPECT_FALSE(has("after"));         // 第一轮取消点之后不再执行
 
   clear_session_cancel(tmp.dir, "s");
 }

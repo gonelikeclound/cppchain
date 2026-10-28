@@ -190,7 +190,8 @@ bool has_model_node(Json const& ir_json) {
 int main(int argc, char** argv) {
   std::string workdir = ".", session = "default", name_or_path, input;
   bool reset = false, allow_import = false;
-  bool wait_lock = false;       // --wait：会话被占用时轮询等待（默认直接拒绝）
+  // problems/07 §8 P2：会话忙时的策略 reject（默认）/ wait / interject（取消当前轮后接管）
+  std::string on_busy = "reject";
   bool stream_events = false;  // --stream：把引擎事件（node_start/node_end）逐条打 JSON 行到 stdout
   std::size_t max_parallel = 1;  // wfr-㊾ 批③：Send 并行波宽度（编译期选项）
   std::map<std::string, std::string> sets;
@@ -199,12 +200,15 @@ int main(int argc, char** argv) {
     std::println(
         "用法:\n"
         "  wfr <name-or-path> [--workdir DIR] [--session NAME] [--set key=value]... "
-        "[--max-parallel N] [--reset] [--allow-import] [--stream] [--wait] <query>...\n"
+        "[--max-parallel N] [--reset] [--allow-import] [--stream] "
+        "[--on-busy=reject|wait|interject] <query>...\n"
         "  wfr list [--workdir DIR]\n"
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
         "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏、或在左栏填日志 URL，即可看日志。\n"
         "  wfr cancel [--workdir DIR] [--session NAME] [--no-wait]\n"
+        "--on-busy（problems/07 §8 P2）：reject（默认，直接拒绝）/ wait（排队等待）/\n"
+        "        interject（取消当前轮→等它停→接管会话跑新查询；等价 --wait + cancel）。\n"
         "        请求取消当前轮：写 <session>.cancel，运行中的 wfr 在**节点边界**停止\n"
         "        （已完成节点保留在会话日志）；默认等待锁释放（≤30s）。\n"
         "  wfr -h | --help\n"
@@ -406,7 +410,9 @@ int main(int argc, char** argv) {
       auto const eq = kv.find('=');
       sets[kv.substr(0, eq)] = eq == std::string::npos ? std::string{} : kv.substr(eq + 1);
     } else if (a == "--reset") reset = true;
-    else if (a == "--wait") wait_lock = true;  // 会话忙时排队等待（默认拒绝）
+    else if (a == "--wait") on_busy = "wait";  // 兼容旧写法 = --on-busy=wait
+    else if (a == "--on-busy" && i + 1 < argc) on_busy = argv[++i];
+    else if (a.starts_with("--on-busy=")) on_busy = a.substr(std::string("--on-busy=").size());
     else if (a == "--allow-import") allow_import = true;
     else if (a == "--stream") stream_events = true;
     else if (a == "--max-parallel" && i + 1 < argc) {
@@ -521,6 +527,11 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (on_busy != "reject" && on_busy != "wait" && on_busy != "interject") {
+    std::println("--on-busy 只支持 reject | wait | interject，收到 '{}'", on_busy);
+    return 2;
+  }
+
   // ---- problems/07 §8 P0：会话单飞锁 ----
   // 同一 session 同一时刻只允许一轮 query：默认 busy 直接拒绝（fail-closed）；
   // --wait 则轮询等待（≤600s）。锁在进程退出/异常时由 RAII 释放；崩溃残留由 stale 回收。
@@ -539,16 +550,29 @@ int main(int argc, char** argv) {
   std::function<bool()> should_stop;
   {
     std::string const lock_run = "cli-" + std::to_string(self_pid);
+    bool interjected = false;
     SessionLockAcquire lk = acquire_session_lock(workdir, session, lock_run);
     if (!lk.acquired && lk.holder) {
-      if (!wait_lock) {
+      if (on_busy == "reject") {
         std::println(
-            "会话 '{}' 正被另一轮查询占用（pid={} run={}）；可加 --wait 等待，或取消该轮后重试。",
+            "会话 '{}' 正被另一轮查询占用（pid={} run={}）；可用 --wait 等待、"
+            "--on-busy=interject 打断后发送，或先取消该轮。",
             session, lk.holder->pid, lk.holder->run);
         return 2;
       }
-      std::println("会话 '{}' 正被 pid={} run={} 占用，等待中（最多 600s）…", session,
-                   lk.holder->pid, lk.holder->run);
+      if (on_busy == "interject") {
+        if (!write_session_cancel(workdir, session, lk.holder->pid, lk.holder->run)) {
+          std::println("插话失败：无法写取消标记（{}）",
+                       session_cancel_path(workdir, session).string());
+          return 2;
+        }
+        interjected = true;
+        std::println("插话：已请求取消当前轮（pid={} run={}），等待其停止…",
+                     lk.holder->pid, lk.holder->run);
+      } else {
+        std::println("会话 '{}' 正被 pid={} run={} 占用，等待中（最多 600s）…", session,
+                     lk.holder->pid, lk.holder->run);
+      }
       for (int i = 0; i < 3000 && !lk.acquired && lk.error.empty(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         lk = acquire_session_lock(workdir, session, lock_run);
@@ -563,6 +587,12 @@ int main(int argc, char** argv) {
       return 2;
     }
     lock_releaser.held = true;  // 生命周期到 main 结束（覆盖后续所有 return）
+    // 清掉"目标不是本进程"的陈旧取消标记（例如 holder 在消费前自然结束）；
+    // 若标记恰好指向本进程（刚接管就被取消），保留给 should_stop 处理。
+    if (auto const stale = read_session_cancel(workdir, session);
+        stale.has_value() && stale->pid != self_pid)
+      clear_session_cancel(workdir, session);
+    if (interjected) std::println("已接管会话，开始新查询。");
   }
   // 取消检查：信号标志 或 本会话的 .cancel 标记（pid 必须是自己）
   should_stop = [workdir, session, self_pid]() -> bool {

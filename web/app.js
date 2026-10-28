@@ -465,8 +465,15 @@ function renderStreamEvent(e) {
   }
 }
 
-async function streamChat(ws, s, q) {
-  const resp = await fetch(qs({ action: "chat", ws, s, q }));
+let streamAbort = null;   // 当前流（"插话"时 abort 旧流，后端 wfr 由 on-busy=interject 收口）
+let streamSeq = 0;        // 防旧流的 finally 把新流的忙碌态清掉
+
+async function streamChat(ws, s, q, onBusy) {
+  const ctrl = new AbortController();
+  streamAbort = ctrl;
+  const params = { action: "chat", ws, s, q };
+  if (onBusy) params.on_busy = onBusy;
+  const resp = await fetch(qs(params), { signal: ctrl.signal });
   if (!resp.ok) throw new Error("HTTP " + resp.status);
   if (!resp.body) { const r = await resp.json(); throw new Error(r.error || "无流"); }
   const reader = resp.body.getReader();
@@ -502,15 +509,25 @@ async function send() {
   }
   appendMsg("user", q, "");
   $("input").value = "";
+  // 上一轮还在跑 → 插话：取消当前轮并由后端（--on-busy=interject）等它停后接管
+  const interject = busySession === state.session;
+  if (interject) {
+    appendMsg("error-line", "插话：取消当前轮，发送新消息…");
+    if (streamAbort) streamAbort.abort();
+  }
+  const mySeq = ++streamSeq;
   setBusy(true);
+  busySession = state.session;
   try {
-    await streamChat(w.dir, state.session, q);
+    await streamChat(w.dir, state.session, q, interject ? "interject" : "");
     // 刷新树：pending 占位被真实条目替换
     await refreshWs(w.name);
   } catch (e) {
-    $("messages").appendChild(elDiv("error-line", "请求失败: " + e.message));
+    if (e.name !== "AbortError") {
+      $("messages").appendChild(elDiv("error-line", "请求失败: " + e.message));
+    }
   } finally {
-    setBusy(false);
+    if (mySeq === streamSeq) { setBusy(false); busySession = null; }
   }
 }
 
@@ -525,10 +542,12 @@ async function refreshWs(name) {
   } catch (e) { /* 目录扫描失败：保留现状 */ }
 }
 
+let busySession = null;  // 当前忙碌的 session（同 session 再发送 = 插话）
+
 function setBusy(b) {
   $("busy").classList.toggle("hidden", !b);
-  $("send").disabled = b;
   $("stop").classList.toggle("hidden", !b);  // 运行中才显示"停止"
+  // 发送按钮保持可用：运行中再发送 = 插话（后端 on-busy=interject）
 }
 
 // 取消当前轮（problems/07 §8 P1）：写 <session>.cancel，wfr 在节点边界退出。

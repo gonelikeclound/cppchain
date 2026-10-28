@@ -200,6 +200,10 @@ void action_chat_stream(std::vector<std::pair<std::string, std::string>> const& 
     av.push_back("--set");
     av.push_back(k + "=" + v);
   }
+  // problems/07 §8 P2：忙时策略（前端"插话"传 interject → wfr 取消当前轮后接管）
+  std::string const on_busy = param(q, "on_busy");
+  if (on_busy == "reject" || on_busy == "wait" || on_busy == "interject")
+    av.push_back("--on-busy=" + on_busy);
   av.push_back("--stream");
   av.push_back(text);
   // argv → C 数组（execvp 用）
