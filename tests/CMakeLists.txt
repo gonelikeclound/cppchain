@@ -188,6 +188,9 @@ add_executable(workflow_tests
   wf/tool_result_artifact_test.cpp
   wf/file_context_test.cpp
   wf/session_lock_test.cpp
+  wf/fire_cancel_test.cpp
+  wf/wfr_cancel_cli_test.cpp
+  wf/wfr_cgi_cancel_test.cpp
   wf/phantasma_wiring_test.cpp
   wf/verify_agent_test.cpp
   wf/artifact_ver_test.cpp
