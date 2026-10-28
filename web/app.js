@@ -437,6 +437,10 @@ function appendTool(text) {
 
 // 解析一条事件：把 model/run_tools 的 node_end payload.messages 增量渲染（AI 文本 / 工具结果）
 function renderStreamEvent(e) {
+  if (e.type === "approve") {
+    renderApproval(e);
+    return;
+  }
   if (e.type === "cancelled") {
     appendMsg("error-line", "已取消（节点边界停止；已完成进度已保留）");
     return;
@@ -543,6 +547,57 @@ async function refreshWs(name) {
 }
 
 let busySession = null;  // 当前忙碌的 session（同 session 再发送 = 插话）
+
+// Web 审批 UI（problems/07 §15）：渲染服务端转发的 approve 事件，决定走 CGI action=approve。
+function renderApproval(e) {
+  const w = currentWs();
+  if (!w) return;
+  const box = document.createElement("div");
+  box.className = "approval-line";
+  const title = document.createElement("div");
+  title.className = "approval-title";
+  title.textContent = "⏸ 待审批（节点 " + (e.node || "?") + "）";
+  box.appendChild(title);
+
+  const payload = e.payload || {};
+  const calls = payload.calls || [];
+  if (calls.length) {
+    for (const c of calls) {
+      const line = document.createElement("div");
+      line.className = "tool-line";
+      line.textContent = "· " + (c.tool || "?") + " " + JSON.stringify(c.args || {}).slice(0, 200);
+      box.appendChild(line);
+    }
+  } else {
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(payload, null, 2);
+    box.appendChild(pre);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "approval-actions";
+  const submit = async (decision) => {
+    actions.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try {
+      const r = await raw("approve", {
+        ws: w.dir, s: state.session, request: e.request, decision,
+      });
+      appendMsg("error-line", r.ok ? ("审批已提交：" + decision) : ("审批失败：" + (r.error || "")));
+    } catch (err) {
+      appendMsg("error-line", "审批失败: " + err.message);
+    }
+  };
+  for (const [label, decision, cls] of [["批准", "approve", "primary"], ["拒绝", "reject", "ghost"], ["中止", "abort", "ghost"]]) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = cls;
+    b.addEventListener("click", () => submit(decision));
+    actions.appendChild(b);
+  }
+  box.appendChild(actions);
+  $("messages").appendChild(box);
+  $("messages").scrollTop = $("messages").scrollHeight;
+}
 
 function setBusy(b) {
   $("busy").classList.toggle("hidden", !b);

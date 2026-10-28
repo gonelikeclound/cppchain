@@ -370,3 +370,41 @@ TEST(WfSessionChannel, cancel_running_request_by_id) {
       std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
   server.join();
 }
+
+// Web 审批 UI 的后端入口：CGI action=approve → 服务端 FIFO approve_response
+TEST(WfSessionChannel, cgi_approve_action_forwards_control) {
+  auto const cgi = wfr_bin().parent_path() / "wfr_cgi";
+  if (!std::filesystem::exists(cgi) || !std::filesystem::exists(wfr_bin())) GTEST_SKIP();
+  auto const repo = wfr_bin().parent_path().parent_path().parent_path().parent_path();
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (read_server_info(tmp.dir, "s").has_value()) break;
+  }
+  std::string const qs = "QUERY_STRING=action=approve&ws=" + tmp.dir.string() +
+                        "&s=s&request=r1&decision=approve";
+  auto const r = cppchain::tool::detail::run_argv({"/usr/bin/env", qs, cgi.string()}, repo,
+                                                  {}, std::chrono::seconds(10), 1u << 20);
+  EXPECT_EQ(r.exit_code, 0) << r.output;
+  EXPECT_NE(r.output.find("\"ok\":true"), std::string::npos) << r.output;
+
+  (void)cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  server.join();
+
+  // 没有服务端 → 明确报错（审批 UI 只适用于 C/S）
+  auto const r2 = cppchain::tool::detail::run_argv({"/usr/bin/env", qs, cgi.string()}, repo,
+                                                   {}, std::chrono::seconds(10), 1u << 20);
+  EXPECT_EQ(r2.exit_code, 0) << r2.output;
+  EXPECT_NE(r2.output.find("没有运行中的服务端"), std::string::npos) << r2.output;
+}

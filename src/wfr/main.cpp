@@ -709,9 +709,16 @@ int cs_run_client(std::string const& workdir, std::string const& session,
       break;
     } else if (type == "approve") {
       std::string const rid = m.value("request", id);
-      std::string action = "fallback";  // 客户端无法交互（--stream/EOF）→ 回退服务端 stdin
+      if (stream) {
+        // Web/CGI：把审批事件原样转发给浏览器；决定由前端 POST
+        // action=approve → 服务端 FIFO 的 approve_response 回传（不在这里替用户决定）。
+        std::cout << line << '\n';
+        std::cout.flush();
+        continue;
+      }
+      std::string action = "fallback";  // 非交互客户端（EOF）→ 回退服务端 stdin
       std::string feedback;
-      if (!stream) {
+      {
         Json const payload = m.value("payload", Json::object());
         std::println();
         std::println("⏸ 待审批（节点 {}）：", m.value("node", "?"));

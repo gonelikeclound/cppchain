@@ -447,6 +447,35 @@ Json action_cancel(std::vector<std::pair<std::string, std::string>> const& q) {
               {"msg", ok ? "取消请求已发送（节点边界生效）" : "写取消标记失败"}};
 }
 
+// approve：Web 审批 UI 的决定回传（problems/07 §15）。写到服务端 FIFO 的控制消息，
+// 由服务端审批中转线程消费；只对 C/S 服务端模式有效。
+Json action_approve(std::vector<std::pair<std::string, std::string>> const& q) {
+  std::string const ws = param(q, "ws");
+  std::string const s = param(q, "s");
+  std::string const request = param(q, "request");
+  std::string const decision = param(q, "decision", "approve");
+  std::string const feedback = param(q, "feedback");
+  if (ws.empty() || s.empty() || request.empty())
+    return Json{{"error", "missing ws/s/request"}};
+  if (decision != "approve" && decision != "reject" && decision != "abort" &&
+      decision != "fallback")
+    return Json{{"error", "decision 需为 approve|reject|abort|fallback"}};
+  if (!cppchain::workflow::session_server_alive(ws, s))
+    return Json{{"error", "该会话没有运行中的服务端（审批 UI 只适用于 C/S 模式）"}};
+  int const fd =
+      ::open(cppchain::workflow::session_fifo_path(ws, s).c_str(), O_WRONLY | O_CLOEXEC);
+  if (fd < 0) return Json{{"error", "无法连接服务端 FIFO"}};
+  bool const ok = cppchain::workflow::write_fifo_line(
+      fd, Json{{"type", "approve_response"},
+               {"request", request},
+               {"action", decision},
+               {"feedback", feedback}}
+              .dump());
+  ::close(fd);
+  if (!ok) return Json{{"error", "发送审批决定失败"}};
+  return Json{{"ok", true}, {"request", request}, {"action", decision}};
+}
+
 int main() {
   // CGI 进程 cwd 是 web server 的工作目录（如 web/），所有相对路径（workspaces.json/ws/wfr）
   // 要在**仓库根**下解析才算对。定位：WFR_ROOT 环境变量 > 向上找含 web/workspaces.json 的目录。
@@ -486,6 +515,7 @@ int main() {
   else if (action == "workflows") result = action_workflows(q);
   else if (action == "workspace_create") result = action_workspace_create(q);
   else if (action == "cancel") result = action_cancel(q);
+  else if (action == "approve") result = action_approve(q);
   else result = Json{{"error", "unknown action: " + action}};
   json_out(result);
   return 0;

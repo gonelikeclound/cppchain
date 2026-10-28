@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "cppchain/message/message.hpp"
@@ -93,6 +94,14 @@ Json last_tool_message(std::filesystem::path const& ws) {
       if (m.value("type", "") == "tool") last = m;
   }
   return last;
+}
+
+bool send_control(std::filesystem::path const& ws, std::string const& session, Json const& msg) {
+  int const fd = ::open(session_fifo_path(ws.string(), session).c_str(), O_WRONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  bool const ok = write_fifo_line(fd, msg.dump());
+  ::close(fd);
+  return ok;
 }
 
 // mock 审批人：监听 socket，读一条 approve_request，回 {action}。
@@ -198,10 +207,9 @@ TEST(WfApproveChannel, server_passes_approve_channel_to_child) {
   EXPECT_EQ(last_tool_message(tmp.dir).value("status", ""), "success");
 }
 
-// ③ 客户端不可用（--stream 无交互）→ 回退服务端 stdin；测试环境 server stdin=/dev/null → reject
-TEST(WfApproveChannel, client_unavailable_falls_back_to_server_stdin) {
-  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
-    GTEST_SKIP();
+// Web 审批路径：--stream 客户端把 approve 事件原样转发（等外部决定，不自动 fallback）。
+static void run_web_approval_case(char const* decision, char const* expect_tool_status) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib())) return;
   TempDir tmp;
   write_workflow(tmp.dir, "slow_sleep_guarded");
   seed(tmp.dir, "slow_sleep_guarded");
@@ -217,14 +225,35 @@ TEST(WfApproveChannel, client_unavailable_falls_back_to_server_stdin) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     if (read_server_info(tmp.dir, "s").has_value()) break;
   }
-  auto const c = cppchain::tool::detail::run_argv(
-      {wfr_bin().string(), "wf_approve", "--workdir", tmp.dir.string(), "--session", "s",
-       "--as-client", "--stream", "go"},
-      std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
-  EXPECT_EQ(c.exit_code, 0) << c.output;
-  auto const st = cppchain::tool::detail::run_argv(
+
+  cppchain::tool::ExecResult client;
+  std::thread runner([&] {
+    client = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_approve", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "--stream", "--request-id", "w1", "go"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  ASSERT_TRUE(send_control(tmp.dir, "s",
+                           Json{{"type", "approve_response"},
+                                {"request", "w1"},
+                                {"action", decision},
+                                {"feedback", ""}}));
+  runner.join();
+  EXPECT_EQ(client.exit_code, 0) << client.output;
+  EXPECT_NE(client.output.find("\"type\":\"approve\""), std::string::npos) << client.output;
+  EXPECT_EQ(last_tool_message(tmp.dir).value("status", ""), expect_tool_status);
+
+  (void)cppchain::tool::detail::run_argv(
       {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
       std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
   server.join();
-  EXPECT_EQ(last_tool_message(tmp.dir).value("status", ""), "error");  // stdin EOF → reject
+}
+
+TEST(WfApproveChannel, web_stream_forwards_event_and_approve_decision) {
+  run_web_approval_case("approve", "success");
+}
+
+TEST(WfApproveChannel, web_stream_fallback_goes_to_server_stdin) {
+  run_web_approval_case("fallback", "error");  // 服务端 stdin=/dev/null → reject
 }
