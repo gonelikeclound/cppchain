@@ -4264,13 +4264,20 @@ void c_context(NodeIR const& n, NodeType::CompileContext& ctx) {
           pairs[it.key()] = val;      // 显式配置覆盖默认（含同名 now/host）
         }
       // problems/07 §16：内置键 prev_round —— 上一轮是否被新消息打断（优雅取消终态）。
-      // 不依赖模板配置：按 @config.workspace/session 扫会话日志最后一条 run。
+      // 宿主（wfr）在本轮写 __input__ 之前已算好 @config.prev_round；没有宿主时
+      // 回退到"扫会话日志最后一条 run"（单测/嵌入式场景）。
       {
-        Json const ws_v = resolve_parameter(Json("@config.workspace"), state);
-        Json const se_v = resolve_parameter(Json("@config.session"), state);
-        if (ws_v.is_string() && !ws_v.get<std::string>().empty() && se_v.is_string() &&
-            session_last_run_cancelled(ws_v.get<std::string>(), se_v.get<std::string>()))
-          pairs["prev_round"] = "未完成（被新消息打断）";
+        std::string prev;
+        Json const pv = resolve_parameter(Json("@config.prev_round"), state);
+        if (pv.is_string()) prev = pv.get<std::string>();
+        if (prev.empty()) {
+          Json const ws_v = resolve_parameter(Json("@config.workspace"), state);
+          Json const se_v = resolve_parameter(Json("@config.session"), state);
+          if (ws_v.is_string() && !ws_v.get<std::string>().empty() && se_v.is_string() &&
+              session_last_run_cancelled(ws_v.get<std::string>(), se_v.get<std::string>()))
+            prev = "未完成（被新消息打断）";
+        }
+        if (!prev.empty()) pairs["prev_round"] = prev;
       }
       if (!pairs.empty()) {
         std::string block;
@@ -4961,10 +4968,17 @@ void c_file_context(NodeIR const& n, NodeType::CompileContext& ctx) {
         // problems/07 §16：上一轮被新消息打断 → 跳过预取，交模型结合历史处理
         //（最后一条 Human 可能是"那明天呢"这类依赖上下文的碎片，硬查没有意义）。
         {
-          Json const ws_v = resolve_parameter(Json("@config.workspace"), state);
-          Json const se_v = resolve_parameter(Json("@config.session"), state);
-          if (ws_v.is_string() && !ws_v.get<std::string>().empty() && se_v.is_string() &&
-              session_last_run_cancelled(ws_v.get<std::string>(), se_v.get<std::string>())) {
+          std::string prev;
+          Json const pv = resolve_parameter(Json("@config.prev_round"), state);
+          if (pv.is_string()) prev = pv.get<std::string>();
+          if (prev.empty()) {
+            Json const ws_v = resolve_parameter(Json("@config.workspace"), state);
+            Json const se_v = resolve_parameter(Json("@config.session"), state);
+            if (ws_v.is_string() && !ws_v.get<std::string>().empty() && se_v.is_string() &&
+                session_last_run_cancelled(ws_v.get<std::string>(), se_v.get<std::string>()))
+              prev = "未完成（被新消息打断）";
+          }
+          if (!prev.empty()) {
             results[node_id] =
                 Json{{"action", "skipped"},
                      {"reason", "上一轮未完成（被新消息打断），跳过预取交模型"}};

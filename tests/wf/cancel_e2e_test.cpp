@@ -264,3 +264,67 @@ TEST(WfCancelViaServerE2E, cancel_targets_server_and_propagates_to_child) {
   EXPECT_FALSE(std::filesystem::exists(session_fifo_path(tmp.dir, "s")));
   EXPECT_FALSE(std::filesystem::exists(session_server_path(tmp.dir, "s")));
 }
+
+// 真实链路：插话取消 A → B 新轮的 env 自动出现 prev_round（不靠种子日志）
+TEST(WfInterjectE2E, next_round_env_sees_prev_round) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP();
+  TempDir tmp;
+  write_workflow(tmp.dir);       // wf_slow
+  seed_tool_call(tmp.dir, "s");
+  {
+    auto const dir = tmp.dir / ".wfr" / "workflows";
+    std::ofstream(dir / "wf_prev.json")
+        << R"({"id":"wf_prev","nodes":[
+             {"id":"recall","kind":"load_history","path":"@config.workspace","session":"@config.session","next":"env"},
+             {"id":"env","kind":"context","next":"_turn_end"}]})";
+  }
+
+  cppchain::tool::ExecResult first;
+  std::thread runner1([&] {
+    first = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s", "go"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  std::optional<SessionLockInfo> lock;
+  for (int i = 0; i < 100 && !lock; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    lock = read_session_lock(tmp.dir, "s");
+  }
+  ASSERT_TRUE(lock.has_value());
+  bool act_started = false;
+  for (int i = 0; i < 100 && !act_started; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (auto const& n : node_enters(tmp.dir, "s"))
+      if (n == "act") act_started = true;
+  }
+  ASSERT_TRUE(act_started);
+
+  cppchain::tool::ExecResult second;
+  std::thread runner2([&] {
+    second = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_prev", "--workdir", tmp.dir.string(), "--session", "s",
+         "--on-busy=interject", "那明天呢？"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  runner1.join();
+  runner2.join();
+  EXPECT_EQ(first.exit_code, 130) << first.output;
+  EXPECT_EQ(second.exit_code, 0) << second.output;
+
+  // B 的 env 节点 exit update 里应带 prev_round 的【当前环境】
+  bool seen = false;
+  std::ifstream in(session_path(tmp.dir.string(), "s"));
+  std::string line;
+  while (std::getline(in, line)) {
+    Json const j = Json::parse(line, nullptr, false);
+    if (j.is_discarded()) continue;
+    if (j.value("node", "") != "env" || j.value("phase", "") != "exit") continue;
+    for (Json const& m : j["update"].value("system_context", Json::array()))
+      for (Json const& b : m.value("content", Json::array()))
+        if (b.contains("text") && b["text"].get<std::string>().find("prev_round") != std::string::npos)
+          seen = true;
+  }
+  EXPECT_TRUE(seen) << "B 轮的 env 未出现 prev_round";
+  clear_session_cancel(tmp.dir, "s");
+}

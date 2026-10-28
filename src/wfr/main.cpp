@@ -1555,6 +1555,9 @@ int main(int argc, char** argv) {
   }
   SessionLog slog(slog_path, wf->ir_id);
   seed_run_seq(slog.max_run_seq());   // 跨进程续编号：本轮 run = 该会话已有最大 + 1（轮次不重号）
+  // problems/07 §16：在本轮写 __input__ **之前**判定上一轮是否被优雅取消
+  //（之后再看会把自己本轮的 __input__ 当成最后一条 run）。
+  bool const prev_round_cancelled = session_last_run_cancelled(workdir, session);
   if (input.empty()) {
     std::println("（未给输入。加一句输入即续跑/聊一句；--reset 清空会话）");
     return 0;
@@ -1586,6 +1589,7 @@ int main(int argc, char** argv) {
   fo.input_messages = std::move(inp);
 
   Json config{{"workspace", workdir}, {"session", session}};
+  if (prev_round_cancelled) config["prev_round"] = "未完成（被新消息打断）";
   for (auto const& [k, v] : sets) config[k] = v;
 
   // wfr-㊸ @④：会话级 allow 前缀（范围不变量）。开关 = `--set allow_prefixes=on`：

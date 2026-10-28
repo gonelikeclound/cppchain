@@ -408,3 +408,138 @@ TEST(WfSessionChannel, cgi_approve_action_forwards_control) {
   EXPECT_EQ(r2.exit_code, 0) << r2.output;
   EXPECT_NE(r2.output.find("没有运行中的服务端"), std::string::npos) << r2.output;
 }
+
+// P2c 边角：服务端空闲超时自动退出并清理
+TEST(WfSessionChannel, idle_timeout_exits_and_cleans) {
+  if (!std::filesystem::exists(wfr_bin())) GTEST_SKIP();
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server", "--server-idle-timeout", "1"},
+        std::nullopt, {}, std::chrono::seconds(20), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (read_server_info(tmp.dir, "s").has_value()) break;
+  }
+  bool gone = false;
+  for (int i = 0; i < 60 && !gone; ++i) {  // ≤6s
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    gone = !read_server_info(tmp.dir, "s").has_value();
+  }
+  EXPECT_TRUE(gone) << "空闲超时未退出";
+  server.join();
+  EXPECT_EQ(server_res.exit_code, 0) << server_res.output;
+  EXPECT_FALSE(std::filesystem::exists(session_fifo_path(tmp.dir, "s")));
+  EXPECT_FALSE(std::filesystem::exists(session_lock_path(tmp.dir, "s")));
+}
+
+// P2c 边角：陈旧服务端登记（死 pid + 残留 FIFO）→ 新进程接管
+TEST(WfSessionChannel, stale_server_registration_is_taken_over) {
+  if (!std::filesystem::exists(wfr_bin())) GTEST_SKIP();
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+  (void)ensure_session_fifo(session_fifo_path(tmp.dir, "s"));
+  ASSERT_TRUE(write_server_info(tmp.dir, "s", SessionServerInfo{2147483647, "ghost", 1}));
+  EXPECT_FALSE(session_server_alive(tmp.dir, "s"));
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server"},
+        std::nullopt, {}, std::chrono::seconds(20), 1u << 20);
+  });
+  std::optional<SessionServerInfo> info;
+  for (int i = 0; i < 100 && !info; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    info = read_server_info(tmp.dir, "s");
+  }
+  ASSERT_TRUE(info.has_value());
+  EXPECT_NE(info->pid, 2147483647);  // 已被新服务端覆盖
+
+  auto const c = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+       "--as-client", "hello"},
+      std::nullopt, {}, std::chrono::seconds(20), 1u << 20);
+  EXPECT_EQ(c.exit_code, 0) << c.output;
+  EXPECT_NE(c.output.find("hello from child"), std::string::npos) << c.output;
+
+  (void)cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  server.join();
+}
+
+// P2c 边角：多客户端 position 递增 + 队列满报错
+TEST(WfSessionChannel, queue_positions_increment_and_full_errors) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP();
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+  write_slow_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server", "--server-max-queue", "2"},
+        std::nullopt, {}, std::chrono::seconds(40), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (read_server_info(tmp.dir, "s").has_value()) break;
+  }
+
+  cppchain::tool::ExecResult slow;
+  std::thread slow_client([&] {
+    slow = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "slow"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (count_node_enters(tmp.dir, "s", "act") > 0) break;
+  }
+
+  cppchain::tool::ExecResult q1, q2;
+  std::thread q1t([&] {
+    q1 = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "--request-id", "q1", "one"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  std::thread q2t([&] {
+    q2 = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "--request-id", "q2", "two"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+  auto const q3 = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+       "--as-client", "--request-id", "q3", "three"},
+      std::nullopt, {}, std::chrono::seconds(20), 1u << 20);
+  EXPECT_EQ(q3.exit_code, 1) << q3.output;
+  EXPECT_NE(q3.output.find("queue full"), std::string::npos) << q3.output;
+
+  slow_client.join();
+  q1t.join();
+  q2t.join();
+  EXPECT_EQ(q1.exit_code, 0) << q1.output;
+  EXPECT_EQ(q2.exit_code, 0) << q2.output;
+  EXPECT_NE(q1.output.find("排队第 1 位"), std::string::npos) << q1.output;
+  EXPECT_NE(q2.output.find("排队第 2 位"), std::string::npos) << q2.output;
+
+  (void)cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  server.join();
+}
