@@ -67,4 +67,31 @@ class FifoLineReader {
 // 向 fd 写一行（阻塞 until 写完；失败返回 false）。
 [[nodiscard]] bool write_fifo_line(int fd, std::string const& line);
 
+// ---- P2：审批通道（UNIX domain socket）----
+// 通用行通道（socket/fd 均可）：read_line 带超时，write_line 整行写出。
+class LineChannel {
+ public:
+  LineChannel() = default;
+  explicit LineChannel(int fd) : fd_(fd) {}
+  ~LineChannel() { close(); }
+  LineChannel(LineChannel const&) = delete;
+  LineChannel& operator=(LineChannel const&) = delete;
+
+  bool open_fd(int fd);  // 接管 fd
+  void close();
+  [[nodiscard]] bool is_open() const { return fd_ >= 0; }
+  [[nodiscard]] int fd() const { return fd_; }
+  [[nodiscard]] bool read_line(std::string& out, int timeout_ms);
+  [[nodiscard]] bool write_line(std::string const& line);
+
+ private:
+  int fd_ = -1;
+  std::string buf_;
+};
+
+// 监听/接受/连接 UNIX domain socket（SOCK_STREAM）。失败 -1。
+[[nodiscard]] int unix_listen(std::string const& path);
+[[nodiscard]] int unix_accept(int listen_fd, int timeout_ms);
+[[nodiscard]] int unix_connect(std::string const& path);
+
 }  // namespace cppchain::workflow

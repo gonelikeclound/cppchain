@@ -263,3 +263,110 @@ TEST(WfSessionChannel, queue_position_and_per_request_workflow) {
   EXPECT_EQ(st.exit_code, 0) << st.output;
   server.join();
 }
+
+// P2c：cancel --request —— 取消排队中的请求
+TEST(WfSessionChannel, cancel_queued_request_by_id) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP();
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+  write_slow_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server"},
+        std::nullopt, {}, std::chrono::seconds(40), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (read_server_info(tmp.dir, "s").has_value()) break;
+  }
+
+  cppchain::tool::ExecResult slow;
+  std::thread slow_client([&] {
+    slow = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "slow"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (count_node_enters(tmp.dir, "s", "act") > 0) break;
+  }
+
+  cppchain::tool::ExecResult queued;
+  std::thread queued_client([&] {
+    queued = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "--request-id", "q1", "queued"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  auto const cc = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "cancel", "--workdir", tmp.dir.string(), "--session", "s",
+       "--request", "q1"},
+      std::nullopt, {}, std::chrono::seconds(10), 1u << 20);
+  EXPECT_EQ(cc.exit_code, 0) << cc.output;
+
+  queued_client.join();
+  EXPECT_EQ(queued.exit_code, 130) << queued.output;  // 排队中被取消
+  slow_client.join();
+  EXPECT_EQ(slow.exit_code, 0) << slow.output;        // 正在跑的不受影响
+
+  (void)cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  server.join();
+}
+
+// P2c：cancel --request —— 取消执行中的请求（服务端 SIGTERM 子进程）
+TEST(WfSessionChannel, cancel_running_request_by_id) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP();
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+  write_slow_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server"},
+        std::nullopt, {}, std::chrono::seconds(40), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (read_server_info(tmp.dir, "s").has_value()) break;
+  }
+
+  cppchain::tool::ExecResult slow;
+  std::thread slow_client([&] {
+    slow = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "--request-id", "s1", "slow"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (count_node_enters(tmp.dir, "s", "act") > 0) break;
+  }
+
+  auto const cc = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "cancel", "--workdir", tmp.dir.string(), "--session", "s",
+       "--request", "s1"},
+      std::nullopt, {}, std::chrono::seconds(10), 1u << 20);
+  EXPECT_EQ(cc.exit_code, 0) << cc.output;
+
+  slow_client.join();
+  EXPECT_EQ(slow.exit_code, 130) << slow.output;
+  EXPECT_GT(count_node_enters(tmp.dir, "s", "__cancelled__"), 0);
+
+  (void)cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  server.join();
+}

@@ -53,3 +53,23 @@ extern "C" CPPCHAIN_TOOL_EXPORT cppchain_tool_descriptor const* tool_slow_sleep_
   d.probe = nullptr;
   return &d;
 }
+
+// 需要人工审批的只读慢工具（用于 --approve 通道测试：approve_tools 会悬挂，
+// 批准后 read_only 早退 → 必执行；拒绝 → 不执行）。
+extern "C" CPPCHAIN_TOOL_EXPORT cppchain_tool_descriptor const* tool_slow_sleep_guarded_creator(
+    void* /*host_ctx*/) {
+  static cppchain_tool_descriptor d{};
+  d = cppchain_tool_descriptor{};
+  d.name = "slow_sleep_guarded";
+  d.version = kToolApiVersion;
+  d.context = nullptr;
+  d.description = "测试用：sleep ms 后返回（只读，但需要人工审批）";
+  d.parameters_json = R"({"type":"object","properties":{"ms":{"type":"integer"}}})";
+  d.read_only = 1;
+  d.effect_class = kToolEffectRead;
+  d.approval = kToolApprovalNeedHuman;
+  d.ttl_ms = 0;
+  d.handler = slow_sleep_run;
+  d.probe = nullptr;
+  return &d;
+}

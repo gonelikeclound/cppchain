@@ -55,6 +55,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -213,10 +214,30 @@ bool cs_cancel_requested(std::string const& ws, std::string const& session, long
   return false;
 }
 
+// 审批通道（--approve <unix socket>）：连上后发一条 approve_request，等一行决定。
+// 连接/读失败 → nullopt（调用方回退 stdin）。
+std::optional<Json> ask_approval_channel(std::string const& path, std::string const& node,
+                                         Json const& payload) {
+  if (path.empty()) return std::nullopt;
+  int const fd = unix_connect(path);
+  if (fd < 0) return std::nullopt;
+  LineChannel ch(fd);
+  Json const req{{"kind", "approve_request"},
+                 {"node", node},
+                 {"payload", payload}};
+  if (!ch.write_line(req.dump())) return std::nullopt;
+  std::string line;
+  if (!ch.read_line(line, 600000)) return std::nullopt;  // ≤10min
+  Json const r = Json::parse(line, nullptr, false);
+  if (r.is_discarded() || !r.is_object()) return std::nullopt;
+  return std::optional<Json>(r);
+}
+
 std::vector<std::string> cs_child_argv(std::string const& workflow, std::string const& workdir,
                                        std::string const& session,
                                        std::map<std::string, std::string> const& sets,
-                                       bool stream, std::string const& query) {
+                                       bool stream, std::string const& approve,
+                                       std::string const& query) {
   std::vector<std::string> argv{self_exe_path().string(), workflow, "--workdir", workdir,
                                 "--session", session, "--no-session-lock"};
   for (auto const& [k, v] : sets) {
@@ -224,6 +245,10 @@ std::vector<std::string> cs_child_argv(std::string const& workflow, std::string 
     argv.push_back(k + "=" + v);
   }
   if (stream) argv.push_back("--stream");
+  if (!approve.empty()) {
+    argv.push_back("--approve");
+    argv.push_back(approve);
+  }
   argv.push_back(query);
   return argv;
 }
@@ -231,7 +256,8 @@ std::vector<std::string> cs_child_argv(std::string const& workflow, std::string 
 // fork/exec 子进程，逐行读 stdout（relay），期间轮询取消（标记/信号）→ SIGTERM 子进程。
 int cs_spawn_relay(std::vector<std::string> const& argv, std::string const& ws,
                    std::string const& session, long server_pid,
-                   std::function<void(std::string const&)> const& on_line, bool& cancelled) {
+                   std::function<void(std::string const&)> const& on_line,
+                   std::function<bool()> const& extra_cancel, bool& cancelled) {
   int p[2];
   if (::pipe(p) != 0) return -1;
   ::fcntl(p[0], F_SETFD, FD_CLOEXEC);
@@ -277,7 +303,8 @@ int cs_spawn_relay(std::vector<std::string> const& argv, std::string const& ws,
       if (errno == EAGAIN || errno == EINTR) continue;
       break;
     }
-    if (!killed && cs_cancel_requested(ws, session, server_pid)) {
+    if (!killed && (cs_cancel_requested(ws, session, server_pid) ||
+                    (extra_cancel && extra_cancel()))) {
       ::kill(pid, SIGTERM);
       killed = true;
       cancelled = true;
@@ -296,9 +323,10 @@ int cs_spawn_relay(std::vector<std::string> const& argv, std::string const& ws,
 int cs_dispatch(std::string const& workflow, std::string const& workdir,
                 std::string const& session, std::map<std::string, std::string> const& sets,
                 bool stream, std::string const& query, int reply_fd, bool local,
-                long server_pid) {
+                long server_pid, std::string const& approve = {},
+                std::function<bool()> const& extra_cancel = {}) {
   bool cancelled = false;
-  auto const argv = cs_child_argv(workflow, workdir, session, sets, stream, query);
+  auto const argv = cs_child_argv(workflow, workdir, session, sets, stream, approve, query);
   int const code = cs_spawn_relay(
       argv, workdir, session, server_pid,
       [&](std::string const& line) {
@@ -309,7 +337,7 @@ int cs_dispatch(std::string const& workflow, std::string const& workdir,
         if (reply_fd >= 0)
           (void)write_fifo_line(reply_fd, Json{{"type", "out"}, {"line", line}}.dump());
       },
-      cancelled);
+      extra_cancel, cancelled);
   if (reply_fd >= 0)
     (void)write_fifo_line(reply_fd,
                     Json{{"type", "end"}, {"exit", code}, {"cancelled", cancelled}}.dump());
@@ -319,7 +347,7 @@ int cs_dispatch(std::string const& workflow, std::string const& workdir,
 int cs_run_server(std::string const& workdir, std::string const& session,
                   std::string const& workflow, std::map<std::string, std::string> const& sets,
                   bool stream, bool stay_alive, int idle_timeout_s, int max_queue,
-                  std::string const& own_query) {
+                  std::string const& approve_path_in, std::string const& own_query) {
   long const self_pid = static_cast<long>(::getpid());
   auto const lk = acquire_session_lock(workdir, session, "server-" + std::to_string(self_pid));
   if (!lk.acquired) {
@@ -333,16 +361,30 @@ int cs_run_server(std::string const& workdir, std::string const& session,
   struct Cleanup {
     std::string ws, session;
     std::filesystem::path fifo;
+    std::filesystem::path approve_sock;
     ~Cleanup() {
       remove_session_fifo(fifo);
+      if (!approve_sock.empty()) ::unlink(approve_sock.c_str());
       clear_server_info(ws, session);
       release_session_lock(ws, session);
     }
-  } cleanup{workdir, session, session_fifo_path(workdir, session)};
+  } cleanup{workdir, session, session_fifo_path(workdir, session), {}};
 
   if (!ensure_session_fifo(cleanup.fifo)) {
     std::println("无法创建会话 FIFO：{}", cleanup.fifo.string());
     return 2;
+  }
+  // 审批通道：--approve 指定外部通道 → 直接透传给子进程；
+  // 未指定 → 服务端自己建一个 UNIX socket，做"客户端 → 服务端 stdin"的代理。
+  std::string approve = approve_path_in;
+  int approve_listen = -1;
+  bool const internal_approve = approve.empty();
+  if (internal_approve) {
+    cleanup.approve_sock = workdir + "/.wfr/sessions/session-" +
+                           (session.empty() ? std::string("session") : "session-" + session) +
+                           ".approve.sock";
+    approve_listen = unix_listen(cleanup.approve_sock.string());
+    if (approve_listen >= 0) approve = cleanup.approve_sock.string();
   }
   if (!write_server_info(workdir, session,
                          SessionServerInfo{self_pid, workflow,
@@ -364,6 +406,8 @@ int cs_run_server(std::string const& workdir, std::string const& session,
   };
   std::mutex mu;
   std::deque<Pending> queue;
+  std::string current_id;                 // 正在执行的请求 id（取消 --request 用）
+  std::atomic<bool> cancel_current{false};
   std::atomic<bool> stop_reader{false};
   int const cap = max_queue > 0 ? max_queue : 32;
   {
@@ -375,6 +419,76 @@ int cs_run_server(std::string const& workdir, std::string const& session,
                                    {"sets", Json(sets)}},
                               -1, true});
   }
+  // 审批中转：客户端应答通过 FIFO 控制消息回来；无客户端应答时回退服务端 stdin。
+  std::mutex ap_mu;
+  std::condition_variable ap_cv;
+  std::map<std::string, Json> ap_resp;
+  std::string ap_current_id;
+  int ap_reply_fd = -1;
+  std::thread approver;
+  if (approve_listen >= 0) {
+    approver = std::thread([&] {
+      while (!stop_reader) {
+        int const c = unix_accept(approve_listen, 200);
+        if (c < 0) continue;
+        LineChannel ch(c);
+        std::string line;
+        if (!ch.read_line(line, 5000)) continue;
+        Json const req = Json::parse(line, nullptr, false);
+        if (req.is_discarded() || !req.is_object()) continue;
+        std::string id;
+        int rfd = -1;
+        {
+          std::lock_guard<std::mutex> lk2(ap_mu);
+          id = ap_current_id;
+          rfd = ap_reply_fd;
+        }
+        Json decision;
+        bool got = false;
+        if (rfd >= 0 && !id.empty()) {
+          (void)write_fifo_line(
+              rfd, Json{{"type", "approve"},
+                        {"request", id},
+                        {"node", req.value("node", "")},
+                        {"payload", req.value("payload", Json::object())}}
+                       .dump());
+          std::unique_lock<std::mutex> lk2(ap_mu);
+          if (ap_cv.wait_for(lk2, std::chrono::seconds(120),
+                             [&] { return ap_resp.contains(id) || stop_reader.load(); })) {
+            auto it = ap_resp.find(id);
+            if (it != ap_resp.end()) {
+              decision = it->second;
+              ap_resp.erase(it);
+              got = true;
+            }
+          }
+        }
+        if (got && decision.value("action", "") == "fallback") got = false;
+        if (!got) {  // 回退服务端 stdin（EOF → reject，fail-closed）
+          std::println();
+          std::println("⏸ 审批回退到服务端 stdin（节点 {}）：", req.value("node", "?"));
+          std::print("  批准？[approve | reject <理由> | abort]：");
+          std::cout.flush();
+          std::string input;
+          if (!std::getline(std::cin, input)) {
+            decision = Json{{"action", "reject"}, {"feedback", "服务端 stdin 已结束"}};
+          } else {
+            std::string const t = cppchain::wfr::trim(input);
+            if (t == "y" || t.starts_with("approve")) decision = Json{{"action", "approve"}};
+            else if (t.starts_with("reject")) {
+              decision = Json{{"action", "reject"},
+                              {"feedback", cppchain::wfr::trim(t.substr(6))}};
+            } else if (t == "n") decision = Json{{"action", "reject"}};
+            else decision = Json{{"action", "abort"}};
+          }
+        }
+        (void)ch.write_line(Json{{"action", decision.value("action", "reject")},
+                                 {"feedback", decision.value("feedback", "")}}
+                                .dump());
+      }
+    });
+  }
+
   std::thread reader([&] {
     FifoLineReader r;
     if (!r.open(cleanup.fifo, /*keep_write_end=*/true)) return;
@@ -382,7 +496,41 @@ int cs_run_server(std::string const& workdir, std::string const& session,
       std::string line;
       if (!r.read_line(line, 200)) continue;
       Json const req = Json::parse(line, nullptr, false);
-      if (req.is_discarded() || !req.is_object() || req.value("query", "").empty()) continue;
+      if (req.is_discarded() || !req.is_object()) continue;
+      if (req.value("type", "") == "approve_response") {
+        std::string const id = req.value("request", "");
+        {
+          std::lock_guard<std::mutex> lk2(ap_mu);
+          ap_resp[id] = req;
+        }
+        ap_cv.notify_all();
+        continue;
+      }
+      // 控制消息：取消某个排队/执行中的请求
+      if (req.value("type", "") == "cancel") {
+        std::string const target = req.value("request", "");
+        if (target.empty()) continue;
+        bool found = false;
+        {
+          std::lock_guard<std::mutex> lk2(mu);
+          for (auto it = queue.begin(); it != queue.end(); ++it) {
+            if (it->req.value("id", "") == target) {
+              if (it->reply_fd >= 0) {
+                (void)write_fifo_line(
+                    it->reply_fd,
+                    Json{{"type", "end"}, {"exit", 130}, {"cancelled", true}}.dump());
+                ::close(it->reply_fd);
+              }
+              queue.erase(it);
+              found = true;
+              break;
+            }
+          }
+          if (!found && current_id == target) cancel_current = true;
+        }
+        continue;
+      }
+      if (req.value("query", "").empty()) continue;
       std::string const reply = req.value("reply", "");
       int rfd = -1;
       if (!reply.empty()) {
@@ -427,6 +575,14 @@ int cs_run_server(std::string const& workdir, std::string const& session,
       if (!queue.empty()) {
         p = std::move(queue.front());
         queue.pop_front();
+        current_id = p.req.value("id", "");
+        cancel_current = false;
+        {
+          std::lock_guard<std::mutex> alk(ap_mu);
+          ap_current_id = current_id;
+          ap_reply_fd = p.reply_fd;
+          ap_resp.erase(current_id);
+        }
         have = true;
       }
     }
@@ -445,13 +601,25 @@ int cs_run_server(std::string const& workdir, std::string const& session,
       for (auto const& [k, v] : p.req["sets"].items())
         if (v.is_string()) merged[k] = v.get<std::string>();
     int const code = cs_dispatch(wf, workdir, session, merged, req_stream, q, p.reply_fd,
-                                 p.local, self_pid);
+                                 p.local, self_pid, approve,
+                                 [&] { return cancel_current.load(); });
     if (p.reply_fd >= 0) ::close(p.reply_fd);
     if (p.local) rc = code;
+    {
+      std::lock_guard<std::mutex> lk2(mu);
+      current_id.clear();
+      cancel_current = false;
+      std::lock_guard<std::mutex> alk(ap_mu);
+      ap_current_id.clear();
+      ap_reply_fd = -1;
+    }
     deadline = clock::now() + idle_span;
   }
   stop_reader = true;
+  ap_cv.notify_all();
   if (reader.joinable()) reader.join();
+  if (approver.joinable()) approver.join();
+  if (approve_listen >= 0) ::close(approve_listen);
   {
     std::lock_guard<std::mutex> lk2(mu);
     for (auto& p : queue) {
@@ -466,10 +634,18 @@ int cs_run_server(std::string const& workdir, std::string const& session,
   return rc;
 }
 
+bool cs_send_control(std::string const& workdir, std::string const& session, Json const& msg) {
+  int const fd = ::open(session_fifo_path(workdir, session).c_str(), O_WRONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  bool const ok = write_fifo_line(fd, msg.dump());
+  ::close(fd);
+  return ok;
+}
+
 int cs_run_client(std::string const& workdir, std::string const& session,
                   std::string const& workflow,
                   std::map<std::string, std::string> const& sets, bool stream, bool post,
-                  std::string const& query) {
+                  std::string const& request_id, std::string const& query) {
   auto const info = read_server_info(workdir, session);
   if (!info.has_value() || !session_server_alive(workdir, session)) {
     std::println("会话 '{}' 没有运行中的服务端（先用 --lock-session/--as-server 启动）", session);
@@ -493,7 +669,8 @@ int cs_run_client(std::string const& workdir, std::string const& session,
     if (!post) remove_session_fifo(reply);
     return 2;
   }
-  Json const req{{"id", std::to_string(self_pid) + "-0"},
+  std::string const id = request_id.empty() ? std::to_string(self_pid) + "-0" : request_id;
+  Json const req{{"id", id},
                  {"query", query},
                  {"workflow", workflow},
                  {"reply", post ? std::string{} : reply.string()},
@@ -530,6 +707,39 @@ int cs_run_client(std::string const& workdir, std::string const& session,
       std::println("服务端错误：{}", m.value("msg", "unknown"));
       rc = 1;
       break;
+    } else if (type == "approve") {
+      std::string const rid = m.value("request", id);
+      std::string action = "fallback";  // 客户端无法交互（--stream/EOF）→ 回退服务端 stdin
+      std::string feedback;
+      if (!stream) {
+        Json const payload = m.value("payload", Json::object());
+        std::println();
+        std::println("⏸ 待审批（节点 {}）：", m.value("node", "?"));
+        if (payload.contains("calls") && payload["calls"].is_array()) {
+          for (Json const& c : payload["calls"])
+            std::println("  · tool={} id={} args={}", c.value("tool", "?"), c.value("id", "?"),
+                         c.value("args", Json::object()).dump());
+        } else {
+          std::println("  {}", payload.dump());
+        }
+        std::print("  批准？[approve | reject <理由> | abort]：");
+        std::cout.flush();
+        std::string line;
+        if (std::getline(std::cin, line)) {
+          std::string const t = cppchain::wfr::trim(line);
+          if (t == "y" || t.starts_with("approve")) action = "approve";
+          else if (t.starts_with("reject")) {
+            action = "reject";
+            feedback = cppchain::wfr::trim(t.substr(6));
+          } else if (t == "n") action = "reject";
+          else action = "abort";
+        }
+      }
+      (void)cs_send_control(workdir, session,
+                            Json{{"type", "approve_response"},
+                                 {"request", rid},
+                                 {"action", action},
+                                 {"feedback", feedback}});
     } else if (type == "out") {
       std::cout << m.value("line", "") << '\n';
       std::cout.flush();
@@ -554,6 +764,8 @@ int main(int argc, char** argv) {
   bool no_session_lock = false;   // 内部：子进程不取锁（父服务端持有）
   int server_idle_timeout = 0;    // --as-server 空闲退出秒数（0 = 常驻）
   int server_max_queue = 32;      // 服务端请求队列上限（超出回 error）
+  std::string request_id;         // --request-id：客户端请求标识（cancel --request 用）
+  std::string approve_path;       // --approve：人工审批的 UNIX socket 通道
   bool stream_events = false;  // --stream：把引擎事件（node_start/node_end）逐条打 JSON 行到 stdout
   std::size_t max_parallel = 1;  // wfr-㊾ 批③：Send 并行波宽度（编译期选项）
   std::map<std::string, std::string> sets;
@@ -571,12 +783,14 @@ int main(int argc, char** argv) {
         "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏、或在左栏填日志 URL，即可看日志。\n"
         "  wfr stop [--workdir DIR] [--session NAME]\n"
         "        停止该会话的服务端或当前进行中的查询（SIGTERM → 节点边界优雅退出）。\n"
-        "  wfr cancel [--workdir DIR] [--session NAME] [--no-wait]\n"
+        "  wfr cancel [--workdir DIR] [--session NAME] [--no-wait] [--request ID]\n"
         "--on-busy（problems/07 §8 P2）：reject（默认，直接拒绝）/ wait（排队等待）/\n"
         "        interject（取消当前轮→等它停→接管会话跑新查询；等价 --wait + cancel）。\n"
         "会话 C/S（P2b）：--lock-session 首个进程成为服务端（持会话锁 + FIFO），\n"
         "        后来者自动/显式 --as-client 投递 query；--post 只投递不等待；\n"
         "        --as-server 常驻（--server-idle-timeout N 空闲退出；--server-max-queue N 队列上限）。\n"
+        "        --request-id ID 指定请求标识（配合 wfr cancel --request ID）。\n"
+        "        --approve <socket> 人工审批走 UNIX socket（无则转客户端；客户端不可用回退 stdin）。\n"
         "        请求取消当前轮：写 <session>.cancel，运行中的 wfr 在**节点边界**停止\n"
         "        （已完成节点保留在会话日志）；默认等待锁释放（≤30s）。\n"
         "  wfr -h | --help\n"
@@ -611,17 +825,31 @@ int main(int argc, char** argv) {
 
   // ================= 子命令：cancel（取消当前轮，节点边界生效） =================
   if (cmd == "cancel") {
-    std::string wd = ".", sess = "default";
+    std::string wd = ".", sess = "default", req_id;
     bool wait = true;
     for (int j = 2; j < argc; ++j) {
       std::string const a = argv[j];
       if (a == "--workdir" && j + 1 < argc) wd = argv[++j];
       else if (a == "--session" && j + 1 < argc) sess = argv[++j];
+      else if (a == "--request" && j + 1 < argc) req_id = argv[++j];
       else if (a == "--no-wait") wait = false;
       else {
         std::println("cancel：未知参数 '{}'", a);
         return 2;
       }
+    }
+    if (!req_id.empty()) {  // 取消指定请求（排队中 → 直接回 end；执行中 → SIGTERM 子进程）
+      if (!session_server_alive(wd, sess)) {
+        std::println("会话 '{}' 没有运行中的服务端；--request 只用于 C/S 模式", sess);
+        return 2;
+      }
+      int const fd = ::open(session_fifo_path(wd, sess).c_str(), O_WRONLY | O_CLOEXEC);
+      if (fd < 0) { std::println("无法连接服务端 FIFO"); return 2; }
+      bool const ok = write_fifo_line(fd, Json{{"type", "cancel"}, {"request", req_id}}.dump());
+      ::close(fd);
+      if (!ok) { std::println("发送取消请求失败"); return 2; }
+      std::println("已请求取消请求 '{}'。", req_id);
+      return 0;
     }
     auto const lock = read_session_lock(wd, sess);
     if (!lock.has_value()) {
@@ -828,6 +1056,9 @@ int main(int argc, char** argv) {
       try { server_idle_timeout = std::stoi(argv[++i]); }
       catch (std::exception const&) { std::println("--server-idle-timeout 需要整数秒"); return 2; }
     }
+    else if (a == "--request-id" && i + 1 < argc) request_id = argv[++i];
+    else if (a == "--approve" && i + 1 < argc) approve_path = argv[++i];
+    else if (a.starts_with("--approve=")) approve_path = a.substr(std::string("--approve=").size());
     else if (a == "--server-max-queue" && i + 1 < argc) {
       try { server_max_queue = std::stoi(argv[++i]); }
       catch (std::exception const&) { std::println("--server-max-queue 需要整数"); return 2; }
@@ -964,7 +1195,7 @@ int main(int argc, char** argv) {
         std::println("--as-client 需要一条 query");
         return 2;
       }
-      return cs_run_client(workdir, session, name_or_path, sets, stream_events, post_only, input);
+      return cs_run_client(workdir, session, name_or_path, sets, stream_events, post_only, request_id, input);
     }
     if (session_server_alive(workdir, session)) {
       if (as_server) {
@@ -975,10 +1206,10 @@ int main(int argc, char** argv) {
         std::println("会话服务端已在运行：请给出 query（自动作为客户端投递）");
         return 2;
       }
-      return cs_run_client(workdir, session, name_or_path, sets, stream_events, post_only, input);
+      return cs_run_client(workdir, session, name_or_path, sets, stream_events, post_only, request_id, input);
     }
     return cs_run_server(workdir, session, name_or_path, sets, stream_events, as_server,
-                         server_idle_timeout, server_max_queue, input);
+                         server_idle_timeout, server_max_queue, approve_path, input);
   }
   if (as_server || as_client || post_only) {
     std::println("--as-server / --as-client / --post 需要配合 --lock-session");
@@ -1419,6 +1650,16 @@ int main(int argc, char** argv) {
         resume = (policy == "allow" || policy == "continue") ? Json{{"action", "continue"}}
                                                              : Json{{"action", "abort"}};
       } else {
+        std::optional<Json> via_ch;
+        if (!approve_path.empty()) via_ch = ask_approval_channel(approve_path, pend.node, pend.payload);
+        if (via_ch.has_value()) {
+          std::string const act = via_ch->value("action", "");
+          if (act == "continue" || act == "approve") resume = Json{{"action", "continue"}};
+          else if (act == "rollback_to")
+            resume = Json{{"action", "rollback_to"}, {"to", via_ch->value("to", 0L)}};
+          else resume = Json{{"action", "abort"}};
+          std::println("  → 裁决（approve 通道）{}", resume.dump());
+        } else {
         std::print("  下一步？[continue | rollback_to <K> | abort]：");
         std::cout.flush();
         std::string line;
@@ -1445,6 +1686,7 @@ int main(int argc, char** argv) {
           }
         }
         std::println("  → 裁决 {}", resume.dump());
+        }
       }
       fo.resume = std::move(resume);
       fo.input_messages.clear();  // 恢复续跑：input 由引擎忽略
@@ -1466,6 +1708,16 @@ int main(int argc, char** argv) {
     std::string const policy = config.value("approve_policy", "prompt");
     Json resume;
     if (policy == "prompt") {
+      std::optional<Json> via_ch;
+      if (!approve_path.empty()) via_ch = ask_approval_channel(approve_path, pend.node, pend.payload);
+      if (via_ch.has_value()) {
+        std::string const act = via_ch->value("action", "");
+        if (act == "approve") resume = Json{{"action", "approve"}};
+        else if (act == "reject")
+          resume = Json{{"action", "reject"}, {"feedback", via_ch->value("feedback", "")}};
+        else resume = Json{{"action", "abort"}};
+        std::println("  → 裁决（approve 通道）{}", resume.dump());
+      } else {
       std::print("  批准？[approve | reject <理由> | abort]：");
       std::cout.flush();
       std::string line;
@@ -1489,6 +1741,7 @@ int main(int argc, char** argv) {
       } else {
         // 未识别输入 → 按拒绝处理（fail-closed：不执行）
         resume = Json{{"action", "reject"}, {"feedback", t}};
+      }
       }
     } else {
       std::println("  批准？[approve | reject <理由> | abort]： → mock 审批（approve_policy={}）", policy);
