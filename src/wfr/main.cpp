@@ -53,7 +53,9 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -305,18 +307,18 @@ int cs_dispatch(std::string const& workflow, std::string const& workdir,
           std::cout.flush();
         }
         if (reply_fd >= 0)
-          write_fifo_line(reply_fd, Json{{"type", "out"}, {"line", line}}.dump());
+          (void)write_fifo_line(reply_fd, Json{{"type", "out"}, {"line", line}}.dump());
       },
       cancelled);
   if (reply_fd >= 0)
-    write_fifo_line(reply_fd,
+    (void)write_fifo_line(reply_fd,
                     Json{{"type", "end"}, {"exit", code}, {"cancelled", cancelled}}.dump());
   return code;
 }
 
 int cs_run_server(std::string const& workdir, std::string const& session,
                   std::string const& workflow, std::map<std::string, std::string> const& sets,
-                  bool stream, bool stay_alive, int idle_timeout_s,
+                  bool stream, bool stay_alive, int idle_timeout_s, int max_queue,
                   std::string const& own_query) {
   long const self_pid = static_cast<long>(::getpid());
   auto const lk = acquire_session_lock(workdir, session, "server-" + std::to_string(self_pid));
@@ -354,48 +356,118 @@ int cs_run_server(std::string const& workdir, std::string const& session,
                cleanup.fifo.string(),
                stay_alive ? "（常驻，Ctrl-C 退出）" : "（本轮结束 + 500ms 后退出）");
 
-  int rc = 0;
-  if (!own_query.empty())
-    rc = cs_dispatch(workflow, workdir, session, sets, stream, own_query, /*reply_fd=*/-1,
-                     /*local=*/true, self_pid);
+  // 队列：读线程收请求 → 回 queued{position}/error；主线程串行执行（服务端一次只跑一轮）。
+  struct Pending {
+    Json req;
+    int reply_fd = -1;
+    bool local = false;
+  };
+  std::mutex mu;
+  std::deque<Pending> queue;
+  std::atomic<bool> stop_reader{false};
+  int const cap = max_queue > 0 ? max_queue : 32;
+  {
+    std::lock_guard<std::mutex> lk2(mu);
+    if (!own_query.empty())
+      queue.push_back(Pending{Json{{"query", own_query},
+                                   {"stream", stream},
+                                   {"workflow", workflow},
+                                   {"sets", Json(sets)}},
+                              -1, true});
+  }
+  std::thread reader([&] {
+    FifoLineReader r;
+    if (!r.open(cleanup.fifo, /*keep_write_end=*/true)) return;
+    while (!stop_reader) {
+      std::string line;
+      if (!r.read_line(line, 200)) continue;
+      Json const req = Json::parse(line, nullptr, false);
+      if (req.is_discarded() || !req.is_object() || req.value("query", "").empty()) continue;
+      std::string const reply = req.value("reply", "");
+      int rfd = -1;
+      if (!reply.empty()) {
+        rfd = ::open(reply.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+        if (rfd < 0) continue;  // 客户端已经走了
+      }
+      std::size_t pos = 0;
+      bool full = false;
+      {
+        std::lock_guard<std::mutex> lk2(mu);
+        if (queue.size() >= static_cast<std::size_t>(cap)) {
+          full = true;
+        } else {
+          pos = queue.size() + 1;
+          queue.push_back(Pending{req, rfd, false});
+        }
+      }
+      if (full) {
+        if (rfd >= 0) {
+          (void)write_fifo_line(rfd, Json{{"type", "error"}, {"msg", "queue full"}}.dump());
+          ::close(rfd);
+        }
+        continue;
+      }
+      if (rfd >= 0)
+        (void)write_fifo_line(rfd, Json{{"type", "queued"}, {"position", pos}}.dump());
+    }
+  });
 
-  FifoLineReader reader;
-  if (!reader.open(cleanup.fifo, /*keep_write_end=*/true)) return rc;
   using clock = std::chrono::steady_clock;
-  auto deadline = clock::now() + (stay_alive ? (idle_timeout_s > 0
-                                                    ? std::chrono::seconds(idle_timeout_s)
-                                                    : std::chrono::hours(24 * 365))
-                                             : std::chrono::milliseconds(500));
+  auto const idle_span = stay_alive
+                             ? (idle_timeout_s > 0 ? std::chrono::seconds(idle_timeout_s)
+                                                   : std::chrono::hours(24 * 365))
+                             : std::chrono::milliseconds(500);
+  auto deadline = clock::now() + idle_span;
+  int rc = 0;
   while (!g_cancel_requested) {
-    std::string line;
-    if (!reader.read_line(line, 200)) {
-      if (!stay_alive && clock::now() >= deadline) break;
+    Pending p;
+    bool have = false;
+    {
+      std::lock_guard<std::mutex> lk2(mu);
+      if (!queue.empty()) {
+        p = std::move(queue.front());
+        queue.pop_front();
+        have = true;
+      }
+    }
+    if (!have) {
+      if (clock::now() >= deadline) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
       continue;
     }
-    Json const req = Json::parse(line, nullptr, false);
-    if (req.is_discarded() || !req.is_object()) continue;
-    std::string const q = req.value("query", "");
+    std::string const q = p.req.value("query", "");
     if (q.empty()) continue;
-    bool const req_stream = req.value("stream", false);
+    bool const req_stream = p.req.value("stream", stream);
+    std::string wf = p.req.value("workflow", workflow);
+    if (wf.empty()) wf = workflow;
     std::map<std::string, std::string> merged = sets;
-    if (req.contains("sets") && req["sets"].is_object())
-      for (auto const& [k, v] : req["sets"].items())
+    if (p.req.contains("sets") && p.req["sets"].is_object())
+      for (auto const& [k, v] : p.req["sets"].items())
         if (v.is_string()) merged[k] = v.get<std::string>();
-    std::string const reply = req.value("reply", "");
-    int rfd = -1;
-    if (!reply.empty()) rfd = ::open(reply.c_str(), O_WRONLY | O_CLOEXEC);
-    cs_dispatch(workflow, workdir, session, merged, req_stream, q, rfd, /*local=*/false,
-                self_pid);
-    if (rfd >= 0) ::close(rfd);
-    deadline = clock::now() + (stay_alive ? (idle_timeout_s > 0
-                                                 ? std::chrono::seconds(idle_timeout_s)
-                                                 : std::chrono::hours(24 * 365))
-                                          : std::chrono::milliseconds(500));
+    int const code = cs_dispatch(wf, workdir, session, merged, req_stream, q, p.reply_fd,
+                                 p.local, self_pid);
+    if (p.reply_fd >= 0) ::close(p.reply_fd);
+    if (p.local) rc = code;
+    deadline = clock::now() + idle_span;
+  }
+  stop_reader = true;
+  if (reader.joinable()) reader.join();
+  {
+    std::lock_guard<std::mutex> lk2(mu);
+    for (auto& p : queue) {
+      if (p.reply_fd >= 0) {
+        (void)write_fifo_line(p.reply_fd,
+                        Json{{"type", "error"}, {"msg", "server stopping"}}.dump());
+        ::close(p.reply_fd);
+      }
+    }
+    queue.clear();
   }
   return rc;
 }
 
 int cs_run_client(std::string const& workdir, std::string const& session,
+                  std::string const& workflow,
                   std::map<std::string, std::string> const& sets, bool stream, bool post,
                   std::string const& query) {
   auto const info = read_server_info(workdir, session);
@@ -408,7 +480,7 @@ int cs_run_client(std::string const& workdir, std::string const& session,
   std::unique_ptr<FifoLineReader> reader;
   if (!post) {
     reply = session_reply_fifo_path(workdir, session, self_pid, 0);
-    ensure_session_fifo(reply);
+    (void)ensure_session_fifo(reply);
     reader = std::make_unique<FifoLineReader>();
     if (!reader->open(reply, /*keep_write_end=*/false)) {
       std::println("无法打开回包 FIFO：{}", reply.string());
@@ -423,6 +495,7 @@ int cs_run_client(std::string const& workdir, std::string const& session,
   }
   Json const req{{"id", std::to_string(self_pid) + "-0"},
                  {"query", query},
+                 {"workflow", workflow},
                  {"reply", post ? std::string{} : reply.string()},
                  {"stream", stream},
                  {"sets", Json(sets)}};
@@ -448,7 +521,16 @@ int cs_run_client(std::string const& workdir, std::string const& session,
     Json const m = Json::parse(line, nullptr, false);
     if (m.is_discarded() || !m.is_object()) continue;
     std::string const type = m.value("type", "");
-    if (type == "out") {
+    if (type == "queued") {
+      if (!stream) {
+        std::println("排队第 {} 位…", m.value("position", 0));
+        std::cout.flush();
+      }
+    } else if (type == "error") {
+      std::println("服务端错误：{}", m.value("msg", "unknown"));
+      rc = 1;
+      break;
+    } else if (type == "out") {
       std::cout << m.value("line", "") << '\n';
       std::cout.flush();
     } else if (type == "end") {
@@ -471,6 +553,7 @@ int main(int argc, char** argv) {
   bool lock_session = false, as_server = false, as_client = false, post_only = false;
   bool no_session_lock = false;   // 内部：子进程不取锁（父服务端持有）
   int server_idle_timeout = 0;    // --as-server 空闲退出秒数（0 = 常驻）
+  int server_max_queue = 32;      // 服务端请求队列上限（超出回 error）
   bool stream_events = false;  // --stream：把引擎事件（node_start/node_end）逐条打 JSON 行到 stdout
   std::size_t max_parallel = 1;  // wfr-㊾ 批③：Send 并行波宽度（编译期选项）
   std::map<std::string, std::string> sets;
@@ -486,12 +569,14 @@ int main(int argc, char** argv) {
         "  wfr debug <name-or-path> [--session N|--all|--graph-only] [--out F] [--open]\n"
         "        --graph-only：只按 workflow 出页面（不内嵌任何会话），\n"
         "        打开后把 .wfr/sessions/*.log.jsonl 拖进左栏、或在左栏填日志 URL，即可看日志。\n"
+        "  wfr stop [--workdir DIR] [--session NAME]\n"
+        "        停止该会话的服务端或当前进行中的查询（SIGTERM → 节点边界优雅退出）。\n"
         "  wfr cancel [--workdir DIR] [--session NAME] [--no-wait]\n"
         "--on-busy（problems/07 §8 P2）：reject（默认，直接拒绝）/ wait（排队等待）/\n"
         "        interject（取消当前轮→等它停→接管会话跑新查询；等价 --wait + cancel）。\n"
         "会话 C/S（P2b）：--lock-session 首个进程成为服务端（持会话锁 + FIFO），\n"
         "        后来者自动/显式 --as-client 投递 query；--post 只投递不等待；\n"
-        "        --as-server 常驻（--server-idle-timeout N 空闲退出）。\n"
+        "        --as-server 常驻（--server-idle-timeout N 空闲退出；--server-max-queue N 队列上限）。\n"
         "        请求取消当前轮：写 <session>.cancel，运行中的 wfr 在**节点边界**停止\n"
         "        （已完成节点保留在会话日志）；默认等待锁释放（≤30s）。\n"
         "  wfr -h | --help\n"
@@ -559,6 +644,46 @@ int main(int argc, char** argv) {
       }
       std::println("取消标记已写入，但 30s 内未观察到锁释放（可能正在长节点/模型调用中）。");
     }
+    return 0;
+  }
+
+  // ================= 子命令：stop（停止会话服务端/当前持有者） =================
+  if (cmd == "stop") {
+    std::string wd = ".", sess = "default";
+    for (int j = 2; j < argc; ++j) {
+      std::string const a = argv[j];
+      if (a == "--workdir" && j + 1 < argc) wd = argv[++j];
+      else if (a == "--session" && j + 1 < argc) sess = argv[++j];
+      else {
+        std::println("stop：未知参数 '{}'", a);
+        return 2;
+      }
+    }
+    long pid = 0;
+    if (auto const info = read_server_info(wd, sess); info.has_value() &&
+                                                     session_server_alive(wd, sess))
+      pid = info->pid;
+    else if (auto const lk = read_session_lock(wd, sess); lk.has_value())
+      pid = lk->pid;
+    if (pid <= 0) {
+      std::println("会话 '{}' 当前没有服务端/进行中的查询。", sess);
+      return 0;
+    }
+    if (::kill(static_cast<pid_t>(pid), SIGTERM) != 0) {
+      std::println("发送 SIGTERM 失败（pid={}）：{}", pid, std::strerror(errno));
+      return 2;
+    }
+    std::println("已请求停止会话 '{}'（pid={}）；等待退出…", sess, pid);
+    for (int i = 0; i < 100; ++i) {  // ≤10s
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      bool const server_gone = !read_server_info(wd, sess).has_value();
+      bool const lock_gone = !read_session_lock(wd, sess).has_value();
+      if (server_gone && lock_gone) {
+        std::println("已停止。");
+        return 0;
+      }
+    }
+    std::println("10s 内未完全退出（可能卡在长节点/模型调用中）。");
     return 0;
   }
 
@@ -703,6 +828,10 @@ int main(int argc, char** argv) {
       try { server_idle_timeout = std::stoi(argv[++i]); }
       catch (std::exception const&) { std::println("--server-idle-timeout 需要整数秒"); return 2; }
     }
+    else if (a == "--server-max-queue" && i + 1 < argc) {
+      try { server_max_queue = std::stoi(argv[++i]); }
+      catch (std::exception const&) { std::println("--server-max-queue 需要整数"); return 2; }
+    }
     else if (a == "--on-busy" && i + 1 < argc) on_busy = argv[++i];
     else if (a.starts_with("--on-busy=")) on_busy = a.substr(std::string("--on-busy=").size());
     else if (a == "--allow-import") allow_import = true;
@@ -835,7 +964,7 @@ int main(int argc, char** argv) {
         std::println("--as-client 需要一条 query");
         return 2;
       }
-      return cs_run_client(workdir, session, sets, stream_events, post_only, input);
+      return cs_run_client(workdir, session, name_or_path, sets, stream_events, post_only, input);
     }
     if (session_server_alive(workdir, session)) {
       if (as_server) {
@@ -846,10 +975,10 @@ int main(int argc, char** argv) {
         std::println("会话服务端已在运行：请给出 query（自动作为客户端投递）");
         return 2;
       }
-      return cs_run_client(workdir, session, sets, stream_events, post_only, input);
+      return cs_run_client(workdir, session, name_or_path, sets, stream_events, post_only, input);
     }
     return cs_run_server(workdir, session, name_or_path, sets, stream_events, as_server,
-                         server_idle_timeout, input);
+                         server_idle_timeout, server_max_queue, input);
   }
   if (as_server || as_client || post_only) {
     std::println("--as-server / --as-client / --post 需要配合 --lock-session");

@@ -15,6 +15,8 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include "cppchain/message/message.hpp"
+#include "cppchain/message/serializer.hpp"
 #include "cppchain/tool/spawn_runner.hpp"
 #include "cppchain/workflow/session_channel.hpp"
 #include "cppchain/workflow/session_lock.hpp"
@@ -49,6 +51,45 @@ void write_quick_workflow(std::filesystem::path const& ws) {
   std::filesystem::create_directories(dir);
   std::ofstream(dir / "wf_quick.json")
       << R"({"id":"wf_quick","nodes":[{"id":"e","kind":"echo","text":"hello from child","next":"_turn_end"}]})";
+}
+
+std::filesystem::path slow_lib() {
+  return wfr_bin().parent_path().parent_path() / "tests" / "libslow_tools.so";
+}
+
+void write_slow_workflow(std::filesystem::path const& ws) {
+  auto const dir = ws / ".wfr" / "workflows";
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir / "wf_slow.json") << R"({"id":"wf_slow","nodes":[
+    {"id":"treg","kind":"tool_registry","tools":[{"from":"slow_tools","type":"so","load":["slow_sleep"]}],"next":"recall"},
+    {"id":"recall","kind":"load_history","path":"@config.workspace","session":"@config.session","next":"act"},
+    {"id":"act","kind":"run_tools","next":"after"},
+    {"id":"after","kind":"echo","text":"done","next":"_turn_end"}]})";
+}
+
+void seed_tool_call(std::filesystem::path const& ws, std::string const& session) {
+  namespace msg = cppchain::message;
+  msg::Message ai = msg::ai_message("");
+  ai.tool_calls.push_back(msg::ToolCall{"c1", "slow_sleep", nlohmann::json{{"ms", 3000}}});
+  SessionLog log(session_path(ws.string(), session));
+  log.engine_enter("r-seed", "seed", "model");
+  log.engine_exit("r-seed", "seed", "model", true, "ok", 0,
+                  nlohmann::json{{"messages", nlohmann::json::array({nlohmann::json(ai)})}});
+}
+
+int count_node_enters(std::filesystem::path const& ws, std::string const& session,
+                      std::string const& node) {
+  std::ifstream in(session_path(ws.string(), session));
+  int n = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    auto const j = nlohmann::json::parse(line, nullptr, false);
+    if (j.is_discarded()) continue;
+    if (j.value("source", "") == "engine" && j.value("phase", "") == "enter" &&
+        j.value("node", "") == node)
+      ++n;
+  }
+  return n;
 }
 
 int count_echo_enters(std::filesystem::path const& ws, std::string const& session) {
@@ -154,10 +195,71 @@ TEST(WfSessionChannel, server_client_roundtrip_and_post) {
   }
   EXPECT_EQ(enters, 3);
 
-  // SIGTERM 收尾：清 FIFO/登记/锁
-  ::kill(static_cast<pid_t>(info->pid), SIGTERM);
+  // wfr stop 收尾：清 FIFO/登记/锁
+  auto const st = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  EXPECT_EQ(st.exit_code, 0) << st.output;
+  EXPECT_NE(st.output.find("已停止"), std::string::npos) << st.output;
   server.join();
   EXPECT_FALSE(std::filesystem::exists(session_fifo_path(tmp.dir, "s")));
   EXPECT_FALSE(std::filesystem::exists(session_server_path(tmp.dir, "s")));
   EXPECT_FALSE(std::filesystem::exists(session_lock_path(tmp.dir, "s")));
+}
+
+// P2c：请求级 workflow + 队列位置回执（慢请求占住服务端，后来的快请求看到"排队第 N 位"）。
+TEST(WfSessionChannel, queue_position_and_per_request_workflow) {
+  if (!std::filesystem::exists(wfr_bin()) || !std::filesystem::exists(slow_lib()))
+    GTEST_SKIP() << "wfr / libslow_tools.so 未构建";
+  TempDir tmp;
+  write_quick_workflow(tmp.dir);
+  write_slow_workflow(tmp.dir);
+  seed_tool_call(tmp.dir, "s");
+
+  cppchain::tool::ExecResult server_res;
+  std::thread server([&] {
+    server_res = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+         "--lock-session", "--as-server"},
+        std::nullopt, {}, std::chrono::seconds(40), 1u << 20);
+  });
+  std::optional<SessionServerInfo> info;
+  for (int i = 0; i < 100 && !info; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    info = read_server_info(tmp.dir, "s");
+  }
+  ASSERT_TRUE(info.has_value());
+
+  // 慢请求（客户端指定 wf_slow）：3s
+  cppchain::tool::ExecResult slow;
+  std::thread slow_client([&] {
+    slow = cppchain::tool::detail::run_argv(
+        {wfr_bin().string(), "wf_slow", "--workdir", tmp.dir.string(), "--session", "s",
+         "--as-client", "slow"},
+        std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  });
+  bool act_started = false;
+  for (int i = 0; i < 100 && !act_started; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    act_started = count_node_enters(tmp.dir, "s", "act") > 0;
+  }
+  ASSERT_TRUE(act_started) << "慢请求未开始执行";
+
+  // 快请求在慢请求进行中到达 → 应收到 queued{position}
+  auto const quick = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "wf_quick", "--workdir", tmp.dir.string(), "--session", "s",
+       "--as-client", "quick"},
+      std::nullopt, {}, std::chrono::seconds(30), 1u << 20);
+  EXPECT_EQ(quick.exit_code, 0) << quick.output;
+  EXPECT_NE(quick.output.find("排队第"), std::string::npos) << quick.output;
+  EXPECT_NE(quick.output.find("hello from child"), std::string::npos) << quick.output;
+
+  slow_client.join();
+  EXPECT_EQ(slow.exit_code, 0) << slow.output;
+
+  auto const st = cppchain::tool::detail::run_argv(
+      {wfr_bin().string(), "stop", "--workdir", tmp.dir.string(), "--session", "s"},
+      std::nullopt, {}, std::chrono::seconds(15), 1u << 20);
+  EXPECT_EQ(st.exit_code, 0) << st.output;
+  server.join();
 }
