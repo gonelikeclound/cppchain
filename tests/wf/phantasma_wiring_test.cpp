@@ -213,6 +213,20 @@ tool::ToolSpec web_search_spec() {
   return sp;
 }
 
+// 假 MCP 网搜工具（problems/42/43：provider 装配后工具名 = <server>_<tool>，桩同名即可测路由）
+tool::ToolSpec mcp_search_spec() {
+  tool::ToolSpec sp;
+  sp.name = "mcp_ws_search";
+  sp.description = "假 MCP 网搜（测试桩）";
+  sp.parameters = nlohmann::json::object();
+  sp.read_only = true;
+  sp.handler = [](nlohmann::json const&, tool::ToolContext&)
+      -> std::expected<nlohmann::json, tool::ToolError> {
+    return nlohmann::json{{"result", "假 MCP 搜：小米 15 于 2025 年 10 月发布。"}};
+  };
+  return sp;
+}
+
 // 循环：recall(load_history，把 input 事件读回 state) → loop{ think(model, tools=[web_search])
 //   → route → act(run_tools) → _continue } —— 与真实 wfr 的 lot 形态一致。
 Json force_loop_ir() {
@@ -235,6 +249,29 @@ Json force_loop_ir() {
                                   {"next", "_turn_end"}, {"body", std::move(body)}}})}};
 }
 
+// 单遍强制链：recall → think(tools) → route → act → _turn_end。
+// 作用：只有一轮 think → results.think 不被后续迭代覆盖，强制轮的证据
+//（forced / search_tool / query）在最终 state 里可见（loop 形态会盖掉第一轮帧）。
+Json force_chain_ir() {
+  return Json{{"id", "wf_pa_force_chain"},
+              {"nodes", Json::array(
+                            {Json{{"id", "recall"},
+                                  {"kind", "load_history"},
+                                  {"path", "@config.workspace"},
+                                  {"session", "@config.session"},
+                                  {"next", "think"}},
+                             Json{{"id", "think"}, {"kind", "model"}, {"model", "m"},
+                                  {"tools", "search_ts"}, {"next", "route"}},
+                             Json{{"id", "route"}, {"kind", "route"},
+                                  {"on", "last_ai_outcome"},
+                                  {"cases", Json{{"tool_calls", "act"},
+                                                 {"text", "_turn_end"},
+                                                 {"invalid_tool_calls", "_fail"}}},
+                                  {"default", "_turn_end"}},
+                             Json{{"id", "act"}, {"kind", "run_tools"},
+                                  {"next", "_turn_end"}}})}};
+}
+
 struct LoopFixture {
   tool::ToolRegistry builtin;
   ScriptModel model;
@@ -254,12 +291,20 @@ struct LoopFixture {
   }
 
   // ap = @config.anti_phantasma 的值；human 非空时经 input 事件 + recall 读回 state。
-  std::expected<Json, WorkflowError> run(Json const& ap, std::string const& human) {
+  std::expected<Json, WorkflowError> run(Json const& ap, std::string const& human,
+                                         Json const& extra = Json::object()) {
+    return run_ir(force_loop_ir(), ap, human, extra);
+  }
+  // 与 run 同构，但可指定 IR（单遍强制链 `force_chain_ir` 用：一轮 think → 证据不被 loop 覆盖）。
+  std::expected<Json, WorkflowError> run_ir(Json const& ir, Json const& ap,
+                                            std::string const& human,
+                                            Json const& extra = Json::object()) {
     TempDir tmp;
     std::string const ws = (tmp.d / "ws").string();
     std::string const ss = "s1";
-    Json const cfg = Json{{"workspace", ws}, {"session", ss}, {"anti_phantasma", ap}};
-    auto parsed = WorkflowIR::parse(force_loop_ir());
+    Json cfg = Json{{"workspace", ws}, {"session", ss}, {"anti_phantasma", ap}};
+    for (auto it = extra.begin(); it != extra.end(); ++it) cfg[it.key()] = it.value();
+    auto parsed = WorkflowIR::parse(ir);
     if (!parsed)
       return std::unexpected(WorkflowError{WorkflowError::Kind::Invalid, parsed.error()});
     ValidatorOptions vopts;
@@ -296,6 +341,33 @@ int web_search_calls(Json const& st) {
       if (tc.value("name", "") == "web_search") ++n;
   }
   return n;
+}
+
+// messages 里 AI 指定名字工具调用出现几次（MCP 搜索工具的计数）。
+int tool_call_count(Json const& st, std::string const& name) {
+  auto const it = st.find("messages");
+  if (it == st.end() || !it->is_array()) return 0;
+  int n = 0;
+  for (Json const& m : *it) {
+    if (m.value("type", "") != "ai") continue;
+    if (!m.contains("tool_calls") || !m["tool_calls"].is_array()) continue;
+    for (Json const& tc : m["tool_calls"])
+      if (tc.value("name", "") == name) ++n;
+  }
+  return n;
+}
+
+// 指定名字的工具调用 args（最近一条匹配；无 → 空对象）。查询改写断言用。
+Json tool_call_args(Json const& st, std::string const& name) {
+  auto const it = st.find("messages");
+  if (it == st.end() || !it->is_array()) return Json::object();
+  for (Json const& m : *it) {
+    if (m.value("type", "") != "ai") continue;
+    if (!m.contains("tool_calls") || !m["tool_calls"].is_array()) continue;
+    for (Json const& tc : m["tool_calls"])
+      if (tc.value("name", "") == name) return tc.value("args", Json::object());
+  }
+  return Json::object();
 }
 
 }  // namespace slice5
@@ -348,4 +420,70 @@ TEST(WfPhantasma, uncertainty_vetoes_valid_signal) {
   Json const pa = (*st)["results"]["m0"]["phantasma"];
   EXPECT_EQ(pa["verdict"].get<std::string>(), "absent");
   EXPECT_EQ(pa["reason"].get<std::string>(), "uncertainty_gate");
+}
+
+// ============================================================
+// P1 route 化（problems/62 §8）：搜索工具可配置（可挂 MCP 网搜）+ 查询改写 + 审计明细
+// ============================================================
+
+// P1：工具集只有 MCP 搜索工具、配置 search_tools=["web_search","mcp_ws_search"] →
+// 合成调用落到 mcp_ws_search（第一个在列的），不再死认 web_search（§6.7 局限①）。
+// 注：loop 里 results.think 每轮同 key 覆盖 → 最终帧是「未强制的那轮」，合成调用的证据
+// 只能从 messages（调用轨迹）与 plan_log（审计行，下一用例）断言。
+TEST(WfPhantasma, forced_lookup_prefers_configured_mcp_search_tool) {
+  slice5::LoopFixture f;
+  f.builtin.add(slice5::mcp_search_spec());
+  f.components.toolsets["search_ts"] = {"mcp_ws_search"};  // 工具集只有 MCP 搜索
+  f.model.replies.push_back(ai_message("小米 15 是 2024 年发布的。"));
+  f.model.replies.push_back(
+      ai_message("<anti-phantasma-off reason=\"web-search\"/>\n查证后：2025 年发布。"));
+  Json const ap = Json{{"enabled", true},
+                       {"domains", Json::array({"小米"})},
+                       {"search_tools", Json::array({"web_search", "mcp_ws_search"})}};
+  auto st = f.run(ap, "小米 15 发布时间？");
+  ASSERT_TRUE(st) << st.error().message;
+  EXPECT_EQ(slice5::tool_call_count(*st, "mcp_ws_search"), 1);  // 落到 MCP 搜索，且只查一轮
+  EXPECT_EQ(slice5::tool_call_count(*st, "web_search"), 0);
+  EXPECT_EQ(slice5::tool_call_args(*st, "mcp_ws_search")["query"].get<std::string>(),
+            "小米 15 发布时间？");                                // 无改写 → 原样
+  EXPECT_EQ(last_ai_text(*st), "查证后：2025 年发布。");
+  EXPECT_EQ((*st)["results"]["think"]["phantasma"]["verdict"].get<std::string>(), "accepted");
+}
+
+// P1：查询改写（§6.7 局限②）+ 强制轮证据明细——rewrite_template 的 {q} 替换原提问，
+// 合成调用与证据都落到改写后的查询（回答"拿什么去查"）。
+// 用**单遍强制链**（只一轮 think）：loop 形态里 results.think 每轮同键覆盖，强制轮的证据
+// 会被下一轮盖掉；链形态最终 state 就是强制轮本体，forced / search_tool / query 全可见。
+// （plan_log 审计行的追加触发需 plan/verify 编排先建顶层 plan_log —— 本 fixture 用 cfg
+//   注入只会落进 state.config，故此处断言证据而非 plan_log 行；行内字段与证据同变量。）
+TEST(WfPhantasma, forced_lookup_rewrites_query_with_auditable_evidence) {
+  slice5::LoopFixture f;
+  f.model.replies.push_back(ai_message("小米 15 是 2024 年发布的。"));
+  Json const ap = Json{{"enabled", true},
+                       {"domains", Json::array({"小米"})},
+                       {"rewrite_template", "{q}的官方最新参数"}};
+  auto st = f.run_ir(slice5::force_chain_ir(), ap, "小米 15 发布时间？");
+  ASSERT_TRUE(st) << st.error().message;
+  EXPECT_EQ(slice5::web_search_calls(*st), 1);
+  // 改写后的查询进了合成调用：
+  EXPECT_EQ(slice5::tool_call_args(*st, "web_search")["query"].get<std::string>(),
+            "小米 15 发布时间？的官方最新参数");
+  // 强制轮证据（唯一一轮 think，即强制轮）：forced + search_tool + query 落 results。
+  Json const ev = (*st)["results"]["think"]["phantasma"];
+  EXPECT_EQ(ev["forced"].get<bool>(), true);
+  EXPECT_EQ(ev["search_tool"].get<std::string>(), "web_search");
+  EXPECT_EQ(ev["query"].get<std::string>(), "小米 15 发布时间？的官方最新参数");
+}
+
+// P1 兼容：不配 search_tools / rewrite_template → 行为零回归（默认 web_search、查询原样）。
+TEST(WfPhantasma, forced_lookup_defaults_unchanged) {
+  slice5::LoopFixture f;
+  f.model.replies.push_back(ai_message("小米 15 是 2024 年发布的。"));
+  f.model.replies.push_back(ai_message("查证后：2025 年发布。"));
+  Json const ap = Json{{"enabled", true}, {"domains", Json::array({"小米"})}};
+  auto st = f.run(ap, "小米 15 发布时间？");
+  ASSERT_TRUE(st) << st.error().message;
+  EXPECT_EQ(slice5::web_search_calls(*st), 1);                   // 仍是 web_search
+  EXPECT_EQ(slice5::tool_call_args(*st, "web_search")["query"].get<std::string>(),
+            "小米 15 发布时间？");                                // 仍是原提问
 }

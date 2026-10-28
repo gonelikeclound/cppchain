@@ -1005,47 +1005,98 @@ void c_model(NodeIR const& n, NodeType::CompileContext& ctx) {
       bool const want_force = pa_cfg.value("force_lookup", true) && in_scope_here && need_lookup &&
                               have_first && r->tool_calls.empty();
       bool forced = false;
+      std::string search_tool;  // 实际合成用的搜索工具（审计留痕）
+      std::string force_query;  // 合成查询（改写后；审计留痕）
       if (want_force) {
-        bool const web_search_on = [&] {
-          if (auto act = scan_active_tools(state); act != std::nullopt && !act->empty()) {
-            for (std::string const& nm : act->order)
-              if (nm == "web_search") return true;
-            return false;
-          }
-          for (std::string const& nm : toolset_names)
-            if (nm == "web_search") return true;
-          return false;
-        }();
+        // P1 route 化（problems/62 §8 / §6.7 局限①）：候选搜索工具**可配置**——可挂 MCP 网搜
+        //（42/43），@config.anti_phantasma.search_tools 按声明序 + 从活动工具集 / 工具集里
+        // 挑第一个在列的；默认 ["web_search"] → 零回归。c_model 是所有 model 节点的唯一实现，
+        // 该决策天然被多模型节点复用。
+        std::vector<std::string> search_names;
+        {
+          Json const cfg_names = pa_cfg.value("search_tools", Json::array({"web_search"}));
+          if (cfg_names.is_array())
+            for (Json const& nm : cfg_names)
+              if (nm.is_string() && !nm.get<std::string>().empty())
+                search_names.push_back(nm.get<std::string>());
+          if (search_names.empty()) search_names.push_back("web_search");
+        }
+        std::optional<std::string> pick;
+        if (auto act = scan_active_tools(state); act != std::nullopt && !act->empty()) {
+          for (std::string const& want : search_names)
+            if (act->set.count(want) != 0) {
+              pick = want;
+              break;
+            }
+        } else {
+          for (std::string const& want : search_names)
+            if (std::find(toolset_names.begin(), toolset_names.end(), want) !=
+                toolset_names.end()) {
+              pick = want;
+              break;
+            }
+        }
         bool const already_searched = [&] {
+          if (!pick) return false;
           for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit) {
             if (rit->type != message::Role::Ai) continue;
             for (auto const& tc : rit->tool_calls)
-              if (tc.name == "web_search") return true;
-            return false;
+              if (tc.name == *pick) return true;
+            return false;  // 只推断最近一条 AI（单轮上限，§6.7：不加新 state 键）
           }
           return false;
         }();
-        if (web_search_on && !already_searched) {
+        if (pick && !already_searched) {
           std::string const last_human = [&] {
             for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit)
               if (rit->type == message::Role::Human) return rit->text();
             return std::string{};
           }();
-          message::ToolCall tc{"pa_force", "web_search",
-                               Json{{"query", last_human.empty() ? std::string("核实") : last_human}}};
+          // 「查询改写」（§6.7 局限②）：@config.anti_phantasma.rewrite_template 带 {q} 占位，
+          // 缺省原样（经济：单模型节点不用为改写多花一轮）。
+          std::string tall;
+          std::string const rew = pa_cfg.value("rewrite_template", std::string{});
+          if (rew.empty() || rew.find("{q}") == std::string::npos) {
+            tall = last_human.empty() ? std::string("核实") : last_human;
+          } else {
+            tall.reserve(rew.size() + last_human.size());
+            std::size_t p = 0;
+            while (true) {
+              std::size_t const k = rew.find("{q}", p);
+              if (k == std::string::npos) {
+                tall += rew.substr(p);
+                break;
+              }
+              tall += rew.substr(p, k - p);
+              tall += last_human;
+              p = k + 3;
+            }
+          }
+          search_tool = *pick;
+          force_query = std::move(tall);
+          message::ToolCall tc{"pa_force", *pick, Json{{"query", force_query}}};
           r->tool_calls.clear();
           r->tool_calls.push_back(std::move(tc));
           r->content.clear();  // 无文本、仅工具调用：route 走 tool_calls → act(run_tools)
           forced = true;
           pa_evidence["forced"] = true;
+          pa_evidence["search_tool"] = search_tool;
+          pa_evidence["query"] = force_query;
         }
       }
       // P0 落账：state 已有 plan_log（plan/verify 编排）→ 追加 kind=phantasma 行；
       // 非 plan 工作流（chat 等）没有该键 → 不制造。
       if (auto const it = state.find("plan_log"); it != state.end() && it->is_array()) {
         Json log = *it;
-        log.push_back(message::phantasma_plan_log_entry(first_ev, node_id, nc.step,
-                                                        pa_opt.in_scope, forced));
+        Json ple = message::phantasma_plan_log_entry(first_ev, node_id, nc.step,
+                                                      pa_opt.in_scope, forced);
+        if (forced) {
+          // P1 route 化（审计补充）：合成调用用了哪个搜索工具、改写成什么查询——回答
+          // "谁、凭什么、拿什么去查"。
+          ple["search_tool"] = search_tool;
+          ple["query"] = force_query;
+        }
+        log.push_back(std::move(ple));
         pa_plan_log = std::move(log);
       }
       if (sink_p) sink_p->log_node(nc.node_name, "debug", "phantasma_signal", pa_evidence);
@@ -4787,9 +4838,11 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
         (components != nullptr && !embed_name.empty()) ? components->embedding(embed_name) : nullptr;
 
     std::map<long, double> kw;
+    std::set<std::string> hit_tokens;  // 命中 keys 的 query token（词面覆盖率用）
     for (std::string const& t : longdoc_tokenize(query))
       for (auto it = keys_map.begin(); it != keys_map.end(); ++it)
         if (longdoc_key_match(t, it.key()) && it.value().is_array()) {
+          hit_tokens.insert(t);
           double const idf =
               std::log(static_cast<double>(units.size() + 1) /
                        (static_cast<double>(it.value().size()) + 1.0));
@@ -4810,8 +4863,23 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
     for (auto const& [u, s] : kw) kw_max = std::max(kw_max, s);
     std::map<long, double> score;
     for (auto const& [u, s] : kw) score[u] = kw_max > 0.0 ? s / kw_max : 0.0;
+    // 自适应向量权重（problems/59 §六遗留）：词面覆盖率 = 命中 keys 的 query 去重 token 占比，
+    // 决定关键词信任度——全覆盖 → 纯关键词（字面已足够）；零命中 → 纯向量（本就如此）；
+    // 中间按 (1-覆盖率) 让向量权重从 base（=@config.longdoc_vector_weight）回落，多义词/表述
+    // 漂移时语义臂多说话。覆盖率为 0 且语句非空时保持 base（与旧行为一致）。
+    double kw_cov = 0.0;
+    if (!vec.empty()) {
+      std::vector<std::string> const qt = longdoc_tokenize(query);
+      std::set<std::string> qset(qt.begin(), qt.end());
+      std::size_t hit_n = 0;
+      for (std::string const& t : qset)
+        if (hit_tokens.count(t)) ++hit_n;
+      kw_cov = qset.empty() ? 0.0
+                            : static_cast<double>(hit_n) / static_cast<double>(qset.size());
+    }
+    double const vec_w = !vec.empty() ? vector_weight * (1.0 - kw_cov) : 0.0;
     for (auto const& [u, v] : vec)
-      score[u] = vector_weight * v + (1.0 - vector_weight) * (kw.contains(u) ? score[u] : 0.0);
+      score[u] = vec_w * v + (1.0 - vec_w) * (kw.contains(u) ? score[u] : 0.0);
 
     // top-k（按分降序，同分按单元序）
     std::vector<long> ranked;
@@ -4825,39 +4893,117 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
       // 用户问题 + 检索片段一并进 system_context（model 自动带上；无需 load_history 也能答）
       sys.push_back(message::system_message(
           "【用户问题】" + query + "\n【检索片段（按需加载；回答请引用 [单元id]，不要臆造未给的内容）】"));
+
+      // 命中子集 merge（@config.longdoc_merge_hits，默认关→零回归）：同一文件里 offset
+      // 相邻/重叠的命中块合并成**一个连续读区间**——「全局整合」类问题不用拼多块孤立窗口，
+      // 顺带消掉固定窗 overlap 造成的上下文重复；关闭时每块独立读（旧行为）。
+      bool const merge_hits = longdoc_int_param("@config.longdoc_merge_hits", state, 0) > 0;
+      long const merge_gap = std::max<long>(0, longdoc_int_param("@config.longdoc_merge_gap", state, 0));
+
+      // 读原文 [off, off+len) 区间（len<0 → 整文件，旧索引兼容）。
+      auto read_range = [&root](std::string const& path, long long off, long long len)
+          -> std::string {
+        std::string text;
+        if (root.empty() || path.empty()) return text;
+        std::ifstream in(std::filesystem::path(root) / path, std::ios::binary);
+        if (!in) return text;
+        if (len < 0) {
+          text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        } else if (len > 0) {
+          in.seekg(static_cast<std::streamoff>(off));
+          text.resize(static_cast<std::size_t>(len));
+          in.read(text.data(), static_cast<std::streamsize>(len));
+          text.resize(static_cast<std::size_t>(in.gcount()));  // 45: 短读按实际字节
+        }
+        return text;
+      };
+
+      struct Span {
+        std::string path;
+        long long off = 0;
+        long long len = -1;
+        std::vector<long> members;  // 构成块的 unit 下标（offset 升序）
+        double best = 0.0;          // 成员最高分
+      };
+      std::vector<Span> picks;
       for (long i = 0; i < take; ++i) {
         long const u = ranked[static_cast<std::size_t>(i)];
         if (u < 0 || u >= static_cast<long>(units.size())) continue;
         Json const& unit = units[static_cast<std::size_t>(u)];
-        std::string const id = unit.value("id", "unit_" + std::to_string(u));
-        std::string text;
-        if (!root.empty() && unit.contains("path") && unit["path"].is_string()) {
-          // 按块读取：offset..offset+bytes（旧索引无 offset → 默认 0 = 整文件，兼容）。
-          std::ifstream in(std::filesystem::path(root) / unit["path"].get<std::string>(),
-                           std::ios::binary);
-          if (in) {
-            long long const off = unit.value("offset", 0LL);
-            long long const len = unit.value("bytes", -1LL);
-            if (len < 0) {
-              text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-            } else if (len > 0) {
-              in.seekg(static_cast<std::streamoff>(off));
-              text.resize(static_cast<std::size_t>(len));
-              in.read(text.data(), static_cast<std::streamsize>(len));
+        Span s;
+        s.path = unit.value("path", std::string{});
+        s.off = unit.value("offset", 0LL);
+        s.len = unit.value("bytes", -1LL);
+        s.members.push_back(u);
+        s.best = score.at(u);
+        picks.push_back(std::move(s));
+      }
+
+      std::vector<Span> spans;
+      if (!merge_hits) {
+        spans = std::move(picks);
+      } else {
+        // 按文件分组 → 组内按 offset 升序 → 相邻（gap<=merge_gap）吞并成连续区间。
+        std::map<std::string, std::vector<std::size_t>> by_file;
+        for (std::size_t i = 0; i < picks.size(); ++i)
+          by_file[picks[i].path].push_back(i);
+        for (auto const& [path, idxs] : by_file) {
+          std::vector<std::size_t> sorted = idxs;
+          std::sort(sorted.begin(), sorted.end(), [&picks](std::size_t a, std::size_t b) {
+            return picks[a].off < picks[b].off;
+          });
+          for (std::size_t j : sorted) {
+            Span& cur = picks[j];
+            if (spans.empty() || spans.back().path != path ||
+                cur.off > spans.back().off + (spans.back().len < 0 ? 0 : spans.back().len) +
+                              merge_gap) {
+              spans.push_back(std::move(cur));
+              continue;
             }
+            Span& merged = spans.back();
+            long long const end =
+                cur.off + (cur.len < 0 ? 0 : cur.len);
+            if (end > merged.off + merged.len) merged.len = end - merged.off;
+            merged.members.insert(merged.members.end(), cur.members.begin(),
+                                  cur.members.end());
+            merged.best = std::max(merged.best, cur.best);
           }
         }
+      }
+
+      for (Span const& s : spans) {
+        Json const& unit = units[static_cast<std::size_t>(s.members.front())];
+        std::string const aid = unit.value("id", "unit_" +
+                                                      std::to_string(s.members.front()));
+        std::string const text = read_range(s.path, s.off, s.len);
         std::string const sliced = utf8_cut(text, static_cast<std::size_t>(slice));
-        hits.push_back(Json{{"id", id},
-                            {"title", unit.value("title", id)},
-                            {"blurb", unit.value("blurb", "")},
-                            {"keys", unit.value("keys", Json::array())},
-                            {"offset", unit.value("offset", 0LL)},
-                            {"bytes", static_cast<long long>(text.size())},
-                            {"score", score.at(u)},
-                            {"text", sliced}});
-        sys.push_back(message::system_message(
-            "【" + id + "】" + unit.value("blurb", "") + "\n" + sliced));
+        Json hit = Json{{"id", aid},
+                        {"title", unit.value("title", aid)},
+                        {"blurb", unit.value("blurb", "")},
+                        {"keys", unit.value("keys", Json::array())},
+                        {"offset", s.off},
+                        {"bytes", static_cast<long long>(text.size())},
+                        {"score", s.best},
+                        {"text", sliced}};
+        if (s.members.size() > 1ul) {
+          Json mids = Json::array();
+          for (long mu : s.members)
+            mids.push_back(units[static_cast<std::size_t>(mu)].value("id", std::string{}));
+          hit["chunks"] = std::move(mids);
+        }
+        hits.push_back(std::move(hit));
+        if (s.members.size() > 1ul) {
+          std::string ids;
+          for (long mu : s.members) {
+            if (!ids.empty()) ids += "｜";
+            ids += units[static_cast<std::size_t>(mu)].value("id", std::string{});
+          }
+          sys.push_back(message::system_message(
+              "【" + ids + "】（命中块合并深读）\n" + sliced));
+        } else {
+          sys.push_back(message::system_message(
+              "【" + aid + "】" + unit.value("blurb", "") + "\n" + sliced));
+        }
       }
     }
     Json update;
@@ -4867,6 +5013,11 @@ void c_longdoc_retrieve(NodeIR const& n, NodeType::CompileContext& ctx) {
                        {"topk", take},
                        {"vector", !vec.empty()},
                        {"hits", std::move(hits)}};
+    if (!vec.empty()) {
+      // 自适应权重落盘可观测（评审/审计可以主张：这次用的是 纯关键词 / 纯向量 / 混合）。
+      result["vector_weight_eff"] = vec_w;
+      result["kw_coverage"] = kw_cov;
+    }
     if (take == 0) result["note"] = "索引无命中（query 未匹配任何键）——建议换词或检查索引 keys";
     update[kResultsKey] = Json{{node_id, std::move(result)}};
     if (sink_p)

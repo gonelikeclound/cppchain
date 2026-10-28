@@ -15,7 +15,7 @@
 | 编号 | 问题 | 状态 |
 |------|------|------|
 | [01](01-大批量工具查找.md) | 大批量工具查找（Tool Retrieval） | 🟢 解法①②已验证（关键词+IDF / 向量对照 2/8→8/8） |
-| [02](02-超长工具返回.md) | 超长工具返回（Long Tool Response） | 🟢 数据+最小实现（M9 artifact 落盘；2026-10-27 追加全景：七法三轴 + longdoc 联动 + 评测/落地计划；**S1 分页 / S2 file_grep / S3 结果句柄化 / S4 结构提取 / S5 采样 / S6 运行时路由 + 统一评测台已落地**） |
+| [02](02-超长工具返回.md) | 超长工具返回（Long Tool Response） | 🟢 数据+最小实现（M9 artifact 落盘；2026-10-27 追加全景：七法三轴 + longdoc 联动 + 评测/落地计划；**S1 分页 / S2 file_grep / S3 结果句柄化 / S4 结构提取 / S5 采样 / S6 运行时路由 + 统一评测台已落地**；2026-10-28 **S6 真机 12 题 §7.6.4**：route 11/11 · hybrid 12/12 · base 11/12，§7.6.3 BM25/向量接入 file_context） |
 | [03](03-工具副作用.md) | 工具副作用（Tool Side Effects） | 🟢 最小实现（M9 补审批记忆化） |
 | [04](04-上下文压缩.md) | 上下文压缩 | 🟢 数据+最小实现（M9 补 token 阈值触发） |
 | [05](05-五大问题现状盘点.md) | 五大问题现状盘点（M7 收口） | ✅ 盘点完成 |
@@ -108,4 +108,4 @@
 | 59 | [59-longdoc向量臂验收.md](59-longdoc向量臂验收.md) | **落地**（longdoc 向量臂）：ComponentRegistry 增 embeddings 槽；ingest 用 `@config.longdoc_embed` 指名组件 → blurb 批量嵌入存 units[].emb；retrieve hybrid 打分（`longdoc_vector_weight` 混合余弦+IDF 归一，无关键词命中→纯向量，无 embedding→纯关键词兼容）；泛问"女儿"无 keys 命中靠向量命中 a.txt；3 新测试；923 全绿 |
 | 60 | [60-longdoc骨架模型档真机质量验证.md](60-longdoc骨架模型档真机质量验证.md) | **验证**（longdoc 骨架模型档真机）：DeepSeek-flash 当骨架器，蜀山前 6 块 6/6 出实质 blurb（故事摘要）+ 丰富专名 keys（周淳/李宁/李英琼/毛太/醉道人/白云大师全中）；「妙一」不在前 6 块故缺；证实"向量臂依赖 blurb 质量"前提真机成立；成本=每块一次轻量调用 |
 | 61 | [61-longdoc人物关系故事线索落地.md](61-longdoc人物关系故事线索落地.md) | **落地**（longdoc 全局综合）：ingest 模型档提示词一次调用追加 relations/thread → 索引 v4 units 带 relations/thread + 预聚合 rel_net（a-b 排序键去重+引用块，展示保留原序）+ threads；新节点 longdoc_relation（问题+关系网+线索→system_context→model 作答）+ 模板 longdoc_relask；真机实证 39 条关系网、「李宁—周淳→故交」「双线主线汇向赴成都杀毛太」；3 新测试；926 全绿 |
-| 62 | [62-事实幻觉的范围化处理与防幻觉信号灯验收.md](62-事实幻觉的范围化处理与防幻觉信号灯验收.md) | **验收记录（2026-10-27）**：防幻觉信号灯五切片落地——message 63 / workflow 421 全绿、默认关零影响；`phantasma_demo` 三场景离线验收（范围内强制查证 / 范围外快答 / 有效信号免查，`run-demo.sh` 一键）；`phantasma_in_scope` 范围域、`phantasma_reason_passes` 防伪表、c_model 合成 web_search 强制取数；联动 [44](44-副作用·防重放·防环·结果可信·可回溯·可恢复.md)·篇七 防幻觉主线；遗留见 §8；**§9 P0 机械化**：plan_log `kind=phantasma` + `time_window_months` + `uncertainty_gate` | 🟢 已验收 + P0 机械化 |
+| 62 | [62-事实幻觉的范围化处理与防幻觉信号灯验收.md](62-事实幻觉的范围化处理与防幻觉信号灯验收.md) | **验收记录（2026-10-27）**：防幻觉信号灯五切片落地——message 63 / workflow 421 全绿、默认关零影响；`phantasma_demo` 三场景离线验收（范围内强制查证 / 范围外快答 / 有效信号免查，`run-demo.sh` 一键）；`phantasma_in_scope` 范围域、`phantasma_reason_passes` 防伪表、c_model 合成 web_search 强制取数；联动 [44](44-副作用·防重放·防环·结果可信·可回溯·可恢复.md)·篇七 防幻觉主线；遗留见 §8；**§9 P0 机械化**：plan_log `kind=phantasma` + `time_window_months` + `uncertainty_gate`；**§9.4 P1（2026-10-28）**：reason 扩表（hex/注释包裹硬直）+ 误杀率量化 20/20 + 强制取数 route 化（`search_tools` 挂 MCP 网搜 / `rewrite_template` 改写 / 审计明细） | 🟢 已验收 + P0 机械化 + P1 全落（串行 1069 绿） |

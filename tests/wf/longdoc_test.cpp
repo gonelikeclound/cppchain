@@ -518,6 +518,51 @@ TEST(WfLongdoc, fixed_window_boundaries_utf8_safe) {
         << "分块起点落在多字节字符中间（续字节），offset=" << off;
   }
 }
+
+// 命中子集 merge（problems/58/59 §六遗留，@config.longdoc_merge_hits）：
+// 同一文件里 offset 相邻/重叠的命中块合并成**连续区间一次深读**——跨块边界的"全局整合"类
+// 问题有连续上下文；顺带消掉固定窗 overlap 造成的上下文重复。默认关 → 每块独立读（零回归）。
+TEST(WfLongdoc, retrieve_merge_adjacent_chunks_into_span) {
+  ChunkCorpus c("merge");
+  std::string big;
+  for (int i = 0; i < 10; ++i)
+    big += "wordA" + std::to_string(i) + " wordB" + std::to_string(i) + " common word\n";
+  c.write("big.txt", big);
+  Json base = Json{{"longdoc_root", c.dir.string()},
+                   {"longdoc_index", c.index_path().string()},
+                   {"longdoc_unit_of", "fixed"},
+                   {"longdoc_chunk_chars", 120},
+                   {"longdoc_chunk_overlap", 20},
+                   {"query", "wordA7 wordA9"},  // wordA7 在 [100,220) 块、wordA9 在 [200,260) 块
+                   {"longdoc_topk", 2},
+                   {"longdoc_slice_chars", 2000}};
+  auto r = fire(ingest_ir(), base, CompileOptions{});
+  ASSERT_TRUE(r.state) << r.error;
+
+  // 关 merged（默认）：两个命中块各自独立读（旧行为）。
+  auto off = fire(retrieve_ir(), base, CompileOptions{});
+  ASSERT_TRUE(off.state) << off.error;
+  Json const& h_off = (*off.state)["results"]["find"]["hits"];
+  ASSERT_EQ(h_off.size(), 2u);
+  EXPECT_FALSE(h_off[0].contains("chunks"));
+  EXPECT_NE(h_off[1]["offset"].get<long long>(), h_off[0]["offset"].get<long long>());
+  EXPECT_EQ(h_off[0]["text"].get<std::string>().find("wordA9"), std::string::npos);
+  EXPECT_EQ(h_off[1]["text"].get<std::string>().find("wordA7"), std::string::npos);
+
+  // 开 merged：两块相邻（[100,220) ∪ [200,260)）→ 合成 [100,260) 一个 span。
+  Json cfg = base;
+  cfg["longdoc_merge_hits"] = 1;
+  auto on = fire(retrieve_ir(), cfg, CompileOptions{});
+  ASSERT_TRUE(on.state) << on.error;
+  Json const& res_on = (*on.state)["results"]["find"];
+  Json const& h_on = res_on["hits"];
+  ASSERT_EQ(h_on.size(), 1u);                             // 两块合成一块
+  EXPECT_EQ(h_on[0]["chunks"].size(), 2u);                // 两个成员块 id 都在
+  EXPECT_EQ(h_on[0]["offset"].get<long long>(), 100LL);   // span 起点 = 首块起点
+  std::string const txt = h_on[0]["text"].get<std::string>();
+  EXPECT_NE(txt.find("wordA7"), std::string::npos);       // 首块内容
+  EXPECT_NE(txt.find("wordA9"), std::string::npos);       // 尾块内容（跨块边界也深读到了）
+}
 }  // namespace
 
 // ================= 向量臂（arch 28 下一刀）：blurb 语义检索 =================
@@ -610,6 +655,54 @@ TEST(WfLongdoc, retrieve_vector_disabled_without_embedder) {
   Json const& res = (*q.state)["results"]["find"];
   EXPECT_EQ(res["vector"], false);
   EXPECT_EQ(res["hits"].size(), 0u);
+}
+
+// 自适应向量权重（problems/59 §六遗留）：词面覆盖率决定关键词信任度——全覆盖 →
+// 纯关键词（vector_weight_eff=0）；部分覆盖 → 权重按 (1-覆盖率) 回落；零命中 → 保持
+// base（纯向量）。三档用同一查询的语义变化驱动，eff/coverage 落结果可观测。
+TEST(WfLongdoc, retrieve_adaptive_vector_weight_by_coverage) {
+  LongdocFixture fx;
+  BagEmbeddings bag;
+  ComponentRegistry comps;
+  comps.embeddings["bag"] = &bag;
+  CompileOptions copts;
+  copts.components = &comps;
+  auto st = fire(ingest_ir(),
+                 Json{{"longdoc_root", fx.corpus.string()},
+                      {"longdoc_index", fx.index_path().string()},
+                      {"longdoc_embed", "bag"}},
+                 copts);
+  ASSERT_TRUE(st.state) << st.error;
+
+  // 全覆盖：唯一 ASCII token 命中 c.txt 的键 → 纯关键词（eff=0）。
+  auto q1 = fire(retrieve_ir(), Json{{"longdoc_index", fx.index_path().string()},
+                                     {"query", "alpha"}, {"longdoc_topk", 3},
+                                     {"longdoc_slice_chars", 2000}},
+                 copts);
+  ASSERT_TRUE(q1.state) << q1.error;
+  Json const& res1 = (*q1.state)["results"]["find"];
+  EXPECT_NEAR(res1["kw_coverage"].get<double>(), 1.0, 1e-9);
+  EXPECT_NEAR(res1["vector_weight_eff"].get<double>(), 0.0, 1e-9);  // 0.5×(1-1)
+
+  // 部分覆盖：2 token 中 1 命中 → cov=0.5，eff = 0.5×0.5 = 0.25（向关键词偏一点）。
+  auto q2 = fire(retrieve_ir(), Json{{"longdoc_index", fx.index_path().string()},
+                                     {"query", "alpha zzzzz"}, {"longdoc_topk", 3},
+                                     {"longdoc_slice_chars", 2000}},
+                 copts);
+  ASSERT_TRUE(q2.state) << q2.error;
+  Json const& res2 = (*q2.state)["results"]["find"];
+  EXPECT_NEAR(res2["kw_coverage"].get<double>(), 0.5, 1e-9);
+  EXPECT_NEAR(res2["vector_weight_eff"].get<double>(), 0.25, 1e-9);
+
+  // 零命中：泛问"女儿"keys 无命中 → cov=0，eff 保持 base=0.5（纯向量，语义救生索）。
+  auto q3 = fire(retrieve_ir(), Json{{"longdoc_index", fx.index_path().string()},
+                                     {"query", "女儿"}, {"longdoc_topk", 3},
+                                     {"longdoc_slice_chars", 2000}},
+                 copts);
+  ASSERT_TRUE(q3.state) << q3.error;
+  Json const& res3 = (*q3.state)["results"]["find"];
+  EXPECT_NEAR(res3["kw_coverage"].get<double>(), 0.0, 1e-9);
+  EXPECT_NEAR(res3["vector_weight_eff"].get<double>(), 0.5, 1e-9);
 }
 
 // ================= 人物关系 / 故事线索（longdoc_relation）=================

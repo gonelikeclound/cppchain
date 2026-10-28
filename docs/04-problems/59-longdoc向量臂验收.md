@@ -56,6 +56,16 @@ arch 28 检索 = query 分词 → keys 倒排 IDF。keys 是**专名/主题**（
 
 ## 六、遗留 / 下一刀
 
-- **命中子集升级 merge**（需要全局整合时把命中单元合并深读）—— 押后。
-- 骨架提取模型档真机质量（blurb/keys 准不准；向量臂的语义质量也依赖 blurb）—— 真机试。
-- 检索排序 BM25 / 向量权重自适应 —— 押后（当前固定 vector_weight）。
+- **命中子集升级 merge**（需要全局整合时把命中单元合并深读）—— **已落地（2026-10-28，
+  见 problems/62 §9.4 同批）**：`@config.longdoc_merge_hits`（**默认关 → 零回归**）+
+  `longdoc_merge_gap`（字节容差，默认 0=仅重叠/紧邻）。开时：同一文件里 offset 相邻/重叠的
+  命中块合并成**一个连续读区间**一次深读——"全局整合"类问题有连续上下文，顺带消掉固定窗
+  overlap 造成的上下文重复；关 → 每块独立读（旧行为，920 的既有断言原样保留）。合并块
+  `offset/bytes` 为区间、`score`=成员最高分、`chunks` 列成员 id；`system_context` 块头
+  `【id1｜id2】（命中块合并深读）`。测试 `retrieve_merge_adjacent_chunks_into_span`（100/200
+  字节相邻块 → 合成 [100,260) 单 span；对比 merge 关=2 块各自独立读）。
+- **检索排序 BM25 / 向量权重自适应** —— **已落地（2026-10-28）**：词面覆盖率（命中 keys 的
+  query 去重 token 占比 `kw_coverage`）驱动——全覆盖 → 纯关键词、零命中 → 纯向量、中间按
+  `(1-覆盖率)` 让向量权重从 `base = @config.longdoc_vector_weight` 回落；`vector_weight_eff` /
+  `kw_coverage` 落 `results` 可观测。测试 `retrieve_adaptive_vector_weight_by_coverage`
+  （覆盖 1.0/0.5/0.0 → eff 0/0.25/0.5 三档）。

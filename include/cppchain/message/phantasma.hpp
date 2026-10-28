@@ -80,6 +80,14 @@ inline std::size_t match_marker(std::string_view s, std::size_t pos, std::string
   std::size_t i = 0;
   while (i < text.size()) {
     if (text[i] == '<') {
+      // §6.3 残余「注释包裹」：`<!-- …-->` 里的标记是"引用页面的注释文本"，不是模型指令——
+      // 页面藏 `<anti-phantasma-off …/>`、模型复述该注释时**不得当信号**（宁查）。整条注释
+      // 视为惰性文本跳过（既不识别也为不剥离，见 strip 同款分支）。
+      if (text.compare(i, 4, "<!--") == 0) {
+        std::size_t const close = text.find("-->", i + 4);
+        i = close == std::string_view::npos ? text.size() : close + 3;
+        continue;
+      }
       std::string rea;
       std::size_t const n = detail::match_marker(text, i, &rea);
       if (n > 0) {
@@ -110,6 +118,14 @@ inline std::size_t match_marker(std::string_view s, std::size_t pos, std::string
   std::size_t i = 0;
   while (i < text.size()) {
     if (text[i] == '<') {
+      // 「注释包裹」同款硬直：注释内的标记形态整段惰性保留（不剥、不算信号）。
+      if (text.compare(i, 4, "<!--") == 0) {
+        std::size_t const close = text.find("-->", i + 4);
+        std::size_t const end = close == std::string_view::npos ? text.size() : close + 3;
+        res.append(text.substr(i, end - i));
+        i = end;
+        continue;
+      }
       std::string rea;
       std::size_t const n = detail::match_marker(text, i, &rea);
       if (n > 0) {
@@ -172,6 +188,23 @@ struct PhantasmaHookOptions {
     low.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
   for (std::string_view const k : kBadKw)
     if (low.find(k) != std::string_view::npos) return false;
+  // §6.3 残余「hex 编码」：坏词/URL 词的 ASCII-hex 形态也必须拒（如 hack→6861636b）。
+  // 只查**已知坏词的 hex**（合法理由不会整段写这些长十六进制串 → 低误杀率）；任意其它
+  // hex（端口/状态码如 0x9F3A）不受影响（对照测试锁定）。
+  static constexpr std::string_view kBadHex[] = {
+      "616e74692d7068616e7461736d61",  // anti-phantasma
+      "69676e6f7265",                  // ignore
+      "627970617373",                  // bypass
+      "6f76657272696465",              // override
+      "64697361626c65",                // disable
+      "6861636b",                      // hack
+      "736b6970",                      // skip
+      "7472757374",                    // trust
+      "68747470",                      // http
+      "777777",                        // www
+  };
+  for (std::string_view const h : kBadHex)
+    if (low.find(h) != std::string_view::npos) return false;
   return true;
 }
 
