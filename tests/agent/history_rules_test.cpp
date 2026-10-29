@@ -459,3 +459,219 @@ TEST(HistoryRules, clip_ai_text_after_tokens_ignores_stale_usage_of_rewritten_me
   auto const out = apply_plan(msgs, plan);
   EXPECT_NE(out.back().text().find("内容已裁剪"), std::string::npos) << out.back().text();
 }
+
+// ============================================================
+// 2026-10-28 补充：跨领域覆盖 + 机制空白（规则引擎复核）
+// ============================================================
+
+// ③ 按类别删：财务域（get_stock / pay 属 finance，get_weather 属 weather）——
+// 验证"删 finance 类轮、天气轮幸存"在业务域上成立，且删除后协议仍合法。
+TEST(HistoryRules, drop_category_works_across_finance_and_weather_domains) {
+  HistoryRuleParams p;
+  p.tool_category = {{"get_stock", "finance"}, {"pay", "finance"}, {"get_weather", "weather"}};
+  std::vector<Message> const msgs{
+      human("看看这只股票，顺便把账单结了"),
+      ai_calling({{"c1", "get_stock"}}), tool("AAPL $212.3", "c1"),
+      ai_calling({{"c2", "pay"}}), tool("已支付", "c2"),
+      ai_calling({{"c3", "get_weather"}}), tool("晴 20~25°C", "c3")};
+  auto const plan = run(msgs, rules_of({"drop_category:finance"}), p);
+  EXPECT_TRUE(drops(plan, 1));
+  EXPECT_TRUE(drops(plan, 2));
+  EXPECT_TRUE(drops(plan, 3));
+  EXPECT_TRUE(drops(plan, 4));
+  EXPECT_FALSE(drops(plan, 5));         // 天气轮幸存
+  EXPECT_FALSE(drops(plan, 6));
+  EXPECT_EQ(plan.stats.dropped_category_groups, 2u);
+  auto const out = apply_plan(msgs, plan);
+  ASSERT_EQ(out.size(), 3u);            // human + 天气轮两组
+  ASSERT_EQ(out[1].tool_calls.size(), 1u);
+  EXPECT_EQ(out[1].tool_calls[0].name, "get_weather");   // 幸存的是天气轮
+  EXPECT_FALSE(message::validate_sequence(out).has_value());
+}
+
+// ③ 按类别删：代码/运维域（git_status / file_read 属 code）——
+// 组内**全部工具同属 code** → 整组删；混入 weather → 整组保留（混类纪律跨域生效）。
+TEST(HistoryRules, drop_category_code_domain_git_and_file_read) {
+  HistoryRuleParams p;
+  p.tool_category = {{"git_status", "code"}, {"file_read", "code"}, {"get_weather", "weather"}};
+  std::vector<Message> const msgs{
+      human("看下工作区改动，再读一下 config"),
+      ai_calling({{"c1", "git_status"}, {"c2", "file_read"}}), tool("M src\nA dst", "c1"),
+      tool("timeout: 30\nretry: 2", "c2"),
+      ai_calling({{"c3", "get_weather"}}), tool("晴", "c3"), human("再查一个 git 分支")};
+  std::vector<Message> const more{
+      ai_calling({{"c4", "git_status"}, {"c5", "get_weather"}}), tool("* main", "c4"),
+      tool("晴 22°C", "c5")};
+  std::vector<Message> all = msgs;
+  all.insert(all.end(), more.begin(), more.end());
+
+  auto const plan = run(all, rules_of({"drop_category:code"}), p);
+  EXPECT_TRUE(drops(plan, 1));
+  EXPECT_TRUE(drops(plan, 2));
+  EXPECT_TRUE(drops(plan, 3));
+  EXPECT_FALSE(drops(plan, 4));        // 纯 code 组已算，[4] 是 weather 轮头
+  EXPECT_EQ(plan.stats.dropped_category_groups, 1u);  // 只有 [1,2,3] 那组全 code → 删
+  auto const out = apply_plan(all, plan);
+  EXPECT_FALSE(message::validate_sequence(out).has_value());
+}
+
+// ② 删错误工具轮：客服/工单域 —— 全错的一轮整组删、正常的一轮保留、终态回答不被误伤。
+TEST(HistoryRules, drop_error_tools_in_crm_ticket_domain) {
+  std::vector<Message> const msgs{
+      human("客户投诉订单没发货，查一下工单"),
+      ai_calling({{"c1", "fetch_ticket"}}), tool("boom", "c1", "error"),
+      ai_calling({{"c2", "ticket_status"}}), tool("IN_PROGRESS", "c2"),
+      ai("我先看下了：工单号 T-1024 处理中。")};
+  auto const plan = run(msgs, rules_of({"drop_error_tools"}));
+  EXPECT_TRUE(drops(plan, 1));
+  EXPECT_TRUE(drops(plan, 2));
+  EXPECT_FALSE(drops(plan, 3));
+  EXPECT_FALSE(drops(plan, 4));
+  EXPECT_FALSE(drops(plan, 5));
+  auto const out = apply_plan(msgs, plan);
+  ASSERT_EQ(out.size(), 4u);
+  EXPECT_EQ(out.back().text(), "我先看下了：工单号 T-1024 处理中。");
+  EXPECT_FALSE(message::validate_sequence(out).has_value());
+}
+
+// ⑤ 裁工具结果：结构化 JSON（嵌套 key + 中文长值）也是领域内容形态——
+// 截断带注释、<= 预算不动、多字节安全。
+TEST(HistoryRules, clip_tool_results_on_long_structured_json_result) {
+  HistoryRuleParams p;
+  p.tool_budget = 20;
+  std::string const json =
+      R"({"code":0,"data":{"items":[{"id":1,"name":"订单A","金额":"壹仟贰佰元整","remark":"客户地址：上海市浦东新区世纪大道，电话 138 0000 0000，发票后续补寄"},{"id":2,"name":"订单B","金额":"陆佰元整","remark":"配送中，预计明天上午送达，联系人王师傅"}],"page":1},"msg":"ok"})";
+  std::vector<Message> const msgs{human("查订单详情"), ai_calling({{"c1", "order_query"}}),
+                                  tool(json, "c1")};
+  auto const plan = run(msgs, rules_of({"clip_tool_results"}), p);
+  ASSERT_EQ(plan.rewrite.size(), 1u);
+  auto const out = apply_plan(msgs, plan);
+  EXPECT_NE(out[2].text().find("…[内容已裁剪"), std::string::npos) << out[2].text();
+  std::string cleaned = out[2].text();
+  message::sanitize_utf8(cleaned);
+  EXPECT_EQ(cleaned.size(), out[2].text().size()) << "JSON 截断切坏了多字节字符";
+  EXPECT_LT(out[2].text().size(), json.size());
+}
+
+// 多语言（中英混排）历史 × 组删 × 剥思考的组合：规则跨语言仍然只动"该动的壳"，
+// 幸存消息的原样保真（中英文本不丢、不裁错人）。
+TEST(HistoryRules, mixed_language_history_survivors_keep_both_scripts) {
+  HistoryRuleParams p;
+  p.tool_category = {{"web_search", "retrieval"}};
+  Message search = ai_calling({{"c1", "web_search"}}, "我来查一下：天气 + 苹果股价。");
+  add_reasoning(search, "先搜天气，再搜 AAPL 的英文新闻。");
+  std::vector<Message> msgs{
+      human("帮我查一下明天的天气, and also the AAPL stock price?"),
+      search,
+      tool("Weather: Shanghai tomorrow sunny 20~25°C\nAAPL $212.34", "c1"),
+      ai_calling({{"c2", "get_weather"}}), tool("后天 上海 多云 22°C", "c2")};
+  Message final = ai("记住了：后天上海多云 22°C。The day after tomorrow 24°C.");
+  add_reasoning(final, "收尾提醒：明天没雨，可放心。");
+  msgs.push_back(final);
+
+  auto const plan =
+      run(msgs, rules_of({"drop_reasoning", "drop_category:retrieval"}), p);
+  EXPECT_TRUE(drops(plan, 1));
+  EXPECT_TRUE(drops(plan, 2));                    // 检索轮整组删
+  EXPECT_EQ(plan.stats.dropped_category_groups, 1u);
+  // ① 对"被整组删的 search"不算（dropped 优先跳过）；对幸存终态回答计数 1。
+  EXPECT_EQ(plan.stats.stripped_reasoning, 1u);
+  auto const out = apply_plan(msgs, plan);
+  ASSERT_EQ(out.size(), 4u);           // 检索轮整组删后剩 human + 天气轮 + 终态回答
+  for (auto const& m : out)
+    for (auto const& b : m.content)
+      EXPECT_FALSE(std::holds_alternative<ReasoningBlock>(b));
+  EXPECT_NE(out[3].text().find("后天上海多云 22°C"), std::string::npos);
+  EXPECT_NE(out[3].text().find("day after tomorrow"), std::string::npos);
+  EXPECT_FALSE(message::validate_sequence(out).has_value());
+}
+
+// lean 预设（第 4 个 preset，文档未讲）：剥思考 + 裁工具结果 + 裁终态长答 ——
+// 一轮里工具与回答都被裁、协议不破。
+TEST(HistoryRules, lean_preset_clips_tool_results_and_terminal_answers) {
+  HistoryRuleParams p;
+  p.tool_budget = 20;
+  p.ai_budget = 20;
+  std::string const long_text(400, 'x');          // ≈100 tokens
+  std::vector<Message> const msgs{human("q"), ai_calling({{"c1", "a"}}),
+                                  tool(long_text, "c1"), ai(long_text)};
+  std::vector<std::string> const rules = resolve_history_rules("lean", {});
+  auto const plan = run(msgs, rules, p);
+  EXPECT_EQ(plan.stats.rewritten_tools, 1u);
+  EXPECT_EQ(plan.stats.rewritten_ai, 1u);
+  auto const out = apply_plan(msgs, plan);
+  EXPECT_NE(out[2].text().find("内容已裁剪"), std::string::npos);
+  EXPECT_NE(out[3].text().find("内容已裁剪"), std::string::npos);
+  EXPECT_FALSE(message::validate_sequence(out).has_value());
+}
+
+// clip_scope=ai_text 在运行级也绝不碰工具结果（resolve 级的门控在规则表已测，这里测计划本身）。
+TEST(HistoryRules, clip_scope_ai_text_never_rewrites_tool_messages) {
+  HistoryRuleParams p;
+  p.tool_budget = 3;
+  p.ai_budget = 3;
+  std::string const long_text(400, 'z');
+  std::vector<Message> const msgs{human("q"), ai_calling({{"c1", "a"}}),
+                                  tool(long_text, "c1"), ai(long_text)};
+  std::vector<std::string> const rules = resolve_history_rules("clip", {}, "ai_text");
+  EXPECT_EQ(rules, (std::vector<std::string>{"clip_ai_text"}));
+  auto const plan = run(msgs, rules, p);
+  EXPECT_EQ(plan.stats.rewritten_tools, 0u);
+  EXPECT_EQ(plan.stats.rewritten_ai, 1u);
+  auto const out = apply_plan(msgs, plan);
+  EXPECT_EQ(out[2].text(), long_text);            // 工具结果原样
+  EXPECT_NE(out[3].text().find("内容已裁剪"), std::string::npos);
+}
+
+// 实现复核（2026-10-28）：**drop_reasoning × clip_ai_text 同一条终态 AI 的合成**。
+// aggressive 预设同时带这两条，而真机最常见的"带思考的终态长答"正好同时命中——
+// 初版只生效一条（取决于消费方语义）→ 已修为**顺序合成**：剥思考与裁长答同时成立。
+TEST(HistoryRules, aggressive_composes_drop_reasoning_with_clip_ai_text) {
+  HistoryRuleParams p;
+  p.ai_budget = 40;                                // 让 400 字符（≈100 token）超预算
+  Message a = ai("结论写在这。\n" + std::string(400, 'z'));
+  add_reasoning(a, "这是给长回答配的思考，必须随 ① 剥掉。");
+  std::vector<Message> const msgs{human("q"), a};
+
+  std::vector<std::string> const rules = resolve_history_rules("aggressive", {});
+  auto const plan = run(msgs, rules, p);
+
+  // 同一下标只产出一条 rewrite（⑥ 覆盖 ① 的占位，reducer/本地模拟一致）。
+  std::size_t idx_ai = 1;
+  std::size_t entry_count = 0;
+  for (auto const& [i, m] : plan.rewrite)
+    if (i == idx_ai) ++entry_count;
+  EXPECT_EQ(entry_count, 1u) << "同一终态回答只该有一条 rewrite（剥思考 + 裁剪合成）";
+
+  EXPECT_EQ(plan.stats.stripped_reasoning, 1u);
+  EXPECT_EQ(plan.stats.rewritten_ai, 1u);
+
+  auto const out = apply_plan(msgs, plan);
+  // ① + ⑥ 都生效：正文被裁、思考也不在。
+  EXPECT_NE(out[1].text().find("内容已裁剪"), std::string::npos) << out[1].text();
+  for (auto const& b : out[1].content)
+    EXPECT_FALSE(std::holds_alternative<ReasoningBlock>(b)) << "带思考的终态长答必须思考+正文一起处理";
+  EXPECT_LT(out[1].text().size(), a.text().size());
+  EXPECT_LT(plan.stats.after_tokens, plan.stats.before_tokens);
+  EXPECT_FALSE(message::validate_sequence(out).has_value());
+}
+
+// 实现复核修订（2026-10-29）：孤儿清理升级为**无条件安全网**——任何**非空**规则集都兜底
+// （不再只绑定 drop_tool_results 规则）；规则集为空 → 无规则恒等（孤儿也不删）。
+TEST(HistoryRules, orphan_safety_net_applies_with_any_nonempty_rule_set) {
+  std::vector<Message> const msgs{human("q"), ai_calling({{"c1", "a"}}), tool("ok", "c1"),
+                                  tool("孤儿", "c9")};   // 没有对应调用
+  // 带删除算子规则 → 孤儿被清。
+  auto const with = run(msgs, rules_of({"drop_tool_results"}));
+  EXPECT_EQ(with.stats.dropped_orphan_tools, 1u);
+  // **升级后**：哪怕只有剥思考（minimal 预设等价）也照样清孤儿——安全网不挑业务规则。
+  auto const reason_only = run(msgs, rules_of({"drop_reasoning"}));
+  EXPECT_EQ(reason_only.stats.dropped_orphan_tools, 1u);
+  auto const out = apply_plan(msgs, reason_only);
+  ASSERT_EQ(out.size(), 3u);
+  EXPECT_EQ(out[2].text(), "ok");                        // 孤儿没了、正常的还在
+  // 规则集为空 → 无规则恒等（孤儿也不动）。
+  auto const none = run(msgs, {});
+  EXPECT_EQ(none.stats.dropped_orphan_tools, 0u);
+  EXPECT_EQ(none.stats.dropped_msgs, 0u);
+}

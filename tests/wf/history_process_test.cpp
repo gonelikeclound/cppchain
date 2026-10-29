@@ -115,6 +115,33 @@ Json ir_fold_then_refine(Json sum_overrides = Json::object()) {
                                           {"next", "_turn_end"}}})}};
 }
 
+// recall → sum → refine → think（sr：先摘要后精简）或 recall → refine → sum → think（rs）。
+// 2026-10-29 新增：把 18 号设计里"顺序才是变量"的结论做成**离线对照**——同一份历史、同一套
+// sum/refine 配置，唯一变量是节点顺序。sum 用 when=messages 阈值 6（9 条 > 6 折；剩 5 条 ≤ 6 跳过），
+// refine = aggressive + categories[retrieval]（删检索类取数轮）。
+Json ir_sum_refine_order(bool sum_first) {
+  Json recall = Json{{"id", "recall"}, {"kind", "load_history"},
+                     {"path", "@config.workspace"}, {"session", "@config.session"}};
+  Json sum = Json{{"id", "sum"}, {"kind", "summarize"}, {"model", "m"},
+                  {"when", "messages"}, {"max_msgs", "6"}, {"keep_last", "4"}};
+  Json refine = Json{{"id", "refine"}, {"kind", "refine_history"}, {"preset", "aggressive"},
+                     {"categories", Json::array({"retrieval"})}, {"clip_scope", "both"}};
+  Json think = Json{{"id", "think"}, {"kind", "model"}, {"model", "m"},
+                    {"next", "_turn_end"}};
+  if (sum_first) {                          // sr
+    recall["next"] = "sum";
+    sum["next"] = "refine";
+    refine["next"] = "think";
+    return Json{{"id", "wf_sr"},
+                {"nodes", Json::array({recall, sum, refine, think})}};
+  }
+  recall["next"] = "refine";                // rs
+  refine["next"] = "sum";
+  sum["next"] = "think";
+  return Json{{"id", "wf_rs"},
+              {"nodes", Json::array({recall, refine, sum, think})}};
+}
+
 struct Fixture {
   FakeToolSinks sinks;
   tool::ToolRegistry registry = make_fake_tools(sinks);
@@ -659,4 +686,93 @@ TEST(WfHistoryProcess, stats_are_honest_when_the_summary_costs_more_than_it_save
   EXPECT_GT(s["summary_tokens"].get<int>(), 0);
   EXPECT_GE(s["after_tokens"].get<int>(), s["before_tokens"].get<int>())
       << "摘要比折掉的长时应如实上报（不粉饰）";
+}
+
+// ============ sr / rs：先摘要后精简 vs 先精简后摘要的【离线】对照（2026-10-29 补） ============
+//
+// 18 号（组合对照）的结论——"顺序决定成败"——此前只在**真机**验证过；这两条把它**结构面**
+// 抠成离线确定的断言：同一份 9 条历史、同一套 sum/refine 配置，唯一变量 = 节点顺序
+// （sum 阈值 6、keep_last=4；refine = aggressive + drop retrieval 类轮）。
+//   语料 = seed_history(2 轮 fetch_web)：9 条，两轮都是 retrieval 类取数轮。
+//   注：回答内容质量面仍依赖真机 LLM（见 16/18），这里只断言"凭据先进摘要再删壳"的机制面。
+
+namespace {
+// 给 Fixture 注册一把 retrieval 类取数工具（history 里的 fetch_web 轮才删得动）。
+void add_fetch_web(Fixture& f) {
+  f.registry.add(tool::make_tool("fetch_web", "联网取数", Json::object(),
+                                 [](Json const&, tool::ToolContext&) {
+                                   return std::expected<Json, tool::ToolError>{
+                                       Json{{"doc", "很长的网页正文"}}};
+                                 })
+                     .with_category("retrieval"));
+}
+}  // namespace
+
+// sr：sum 先折（内容+来源先进摘要）→ refine 再删残留检索轮。最终视图 = 摘要（含来源）+ 保尾，
+// 检索轮连 AI 调用带 Tool 结果一起消失，上下文还远小于原始历史。
+TEST(WfHistoryProcess, sr_sum_then_refine_folds_facts_then_trims_retrieval_rounds) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 2, "fetch_web");          // 9 条，两轮 retrieval 取数
+
+  Fixture f;
+  add_fetch_web(f);
+  f.model.replies.push_back(message::ai_message(
+      "摘要：已联网核实「北京 799 元有货」（来源：mi.com 商品页，2026-10-29）。"));
+  f.model.replies.push_back(message::ai_message("好的"));
+  auto const r = run_once(f, ir_sum_refine_order(/*sum_first=*/true), tmp.str());
+
+  ASSERT_TRUE(r.contains("results"));
+  auto const& s = r["results"]["sum"];
+  EXPECT_EQ(s["action"], "folded") << "sr：先摘要——内容先进摘要";
+  auto const& rf = r["results"]["refine"];
+  EXPECT_EQ(rf["action"], "transformed") << "残留的检索轮留给了 refine 删（删壳）";
+  EXPECT_GE(rf["dropped_groups"].get<int>(), 1);
+
+  auto const view = replay_session_messages(path);
+  ASSERT_FALSE(view.empty());
+  EXPECT_TRUE(message::is_summary_message(view.front()));
+  EXPECT_NE(view.front().text().find("来源：mi.com"), std::string::npos)
+      << "事实与来源已在摘要里（凭据先固化，之后才删壳）";
+  for (auto const& m : view) {
+    EXPECT_FALSE(m.type == Role::Tool) << "删除后不该残留 Tool 消息";
+    EXPECT_TRUE(m.tool_calls.empty() && m.invalid_tool_calls.empty()) << "不该残留工具调用";
+  }
+  EXPECT_EQ(f.model.invoked, 2u) << "sr：摘要一次 + 回答一次";
+  EXPECT_FALSE(message::validate_sequence(view).has_value());
+}
+
+// rs：refine 先删检索轮 → 只剩 5 条 ≤ 阈值 → sum 无事可做（0 次摘要调用）；
+// 最终连一份摘要都没有——"凭据"既被删了、又没地方搬：先删 再想誊抄 的顺序代价。
+TEST(WfHistoryProcess, rs_refine_then_sum_trims_rounds_first_leaving_summary_nothing_to_fold) {
+  TempDir tmp;
+  std::string const path = session_path(tmp.str(), "cli");
+  seed_history(path, 2, "fetch_web");
+
+  Fixture f;
+  add_fetch_web(f);
+  f.model.replies.push_back(message::ai_message("好的"));
+  auto const r = run_once(f, ir_sum_refine_order(/*sum_first=*/false), tmp.str());
+
+  ASSERT_TRUE(r.contains("results"));
+  auto const& rf = r["results"]["refine"];
+  EXPECT_EQ(rf["action"], "transformed");
+  EXPECT_GE(rf["dropped_groups"].get<int>(), 2) << "两轮检索都先被删（连凭据一起）";
+  auto const& s = r["results"]["sum"];
+  EXPECT_EQ(s["action"], "skipped") << "剩余 ≤ 阈值 → 摘要无事可做";
+  EXPECT_EQ(s["reason"], "below_threshold");
+  EXPECT_EQ(f.model.invoked, 1u) << "rs：0 次摘要调用 ＋ 回答一次";
+
+  auto const view = replay_session_messages(path);
+  ASSERT_FALSE(view.empty());
+  EXPECT_FALSE(message::is_summary_message(view.front())) << "没有摘要 → 来源/凭据无处落脚";
+  std::string joined;
+  for (auto const& m : view) joined += m.text() + "\n";
+  EXPECT_EQ(joined.find("来源"), std::string::npos)
+      << "先删了凭据轮、摘要又没跑 → 连'来源'这类凭据表述都没有";
+  for (auto const& m : view) {
+    EXPECT_FALSE(m.type == Role::Tool);
+    EXPECT_TRUE(m.tool_calls.empty() && m.invalid_tool_calls.empty());
+  }
+  EXPECT_FALSE(message::validate_sequence(view).has_value());
 }

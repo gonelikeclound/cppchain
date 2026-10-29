@@ -341,8 +341,12 @@ HistoryRulePlan plan_history_rules(std::vector<Message> const& msgs,
     }
   }
 
-  // ④ 孤儿 Tool（安全网：上游数据坏了也别把孤儿送给端点）
-  if (has("drop_tool_results")) {
+  // ④ 孤儿 Tool（安全网：上游数据坏了也别把孤儿送给端点）。
+  // **2026-10-29 修订**：从"仅 drop_tool_results 规则在场时启用"升级为"任何**非空**规则集都
+  // 无条件兜底"——安全网不该依赖业务规则是否挑中了某个删除算子，minimal/clip 这类轻量预设
+  // 也一样不许把孤儿送给端点。规则集真的为空 → 无规则恒等（什么都不删，保持 no_rules 语义）。
+  // 注：`drop_tool_results` 名称仍是合法规则（词表/预设兼容），其原功能已被本安全网吸收。
+  if (!rules.empty()) {
     for (std::size_t i = 0; i < msgs.size(); ++i) {
       if (dropped[i] || msgs[i].type != Role::Tool || !msgs[i].tool_call_id) continue;
       bool found = false;
@@ -408,13 +412,23 @@ HistoryRulePlan plan_history_rules(std::vector<Message> const& msgs,
       if (text.empty() || orig_tokens <= params.ai_budget) continue;
       Message m = msgs[i];
       std::vector<message::ContentBlock> kept;
+      // ReasoningBlock 归 ①；**当 drop_reasoning 同时开着**（aggressive / lean）时，
+      // 在 ⑥ 里一并剥掉——两条规则对同一 Ai 的重写**合成成一条**（见下：覆盖 ① 的占位，
+      // 并删掉 placeholder）。否则 reducer 的 rewrite 按下标 map、**后写覆盖先写**，带思考的
+      // 终态长答会"裁了但思考还在"（⑥ 赢）；而 stats 的本地模拟是 find-if-first（① 赢、
+      // 没裁）——统计与运行期效果分裂。
       for (auto const& b : m.content)
-        if (!std::holds_alternative<TextBlock>(b)) kept.push_back(b);  // ReasoningBlock 归 ①
+        if (!std::holds_alternative<TextBlock>(b)) {
+          if (has("drop_reasoning") && std::holds_alternative<ReasoningBlock>(b)) continue;
+          kept.push_back(b);
+        }
       std::size_t const keep = prefix_within_tokens(text, params.ai_budget);
       kept.push_back(TextBlock{
           text.substr(0, keep) + clip_annotation(orig_tokens, text.size(), source_hint),
           std::nullopt});
       m.content = std::move(kept);
+      // 同一下标若已被 ① 占位 → 整掉旧占位，只留⑥的组合结果（reducer 与 stats 一看一致）。
+      std::erase_if(plan.rewrite, [i](auto const& p) { return p.first == i; });
       plan.rewrite.emplace_back(i, std::move(m));
       ++st.rewritten_ai;
     }
