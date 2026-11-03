@@ -80,8 +80,8 @@ if [[ "$started" == 0 ]]; then echo "服务器未就绪" >&2; exit 1; fi
 echo ""
 echo "==== A · 静态 HTTP ===="
 html=$(curl -s "$BASE/sa/")
-if [[ "$html" == *"SA 编排台"* && "$html" == *"任务列表"* && "$html" == *"运行 demo"* && "$html" == *"DAG"* ]]; then
-  ok "页面 /sa/ 渲染骨架齐（SA 编排台 / 任务列表 / 运行 demo / DAG）"
+if [[ "$html" == *"SA 编排台"* && "$html" == *"任务列表"* && "$html" == *"运行 demo"* && "$html" == *"DAG"* && "$html" == *"源码"* ]]; then
+  ok "页面 /sa/ 渲染骨架齐（SA 编排台 / 任务列表 / 运行 demo / DAG / 源码标签页）"
 else
   bad "页面 /sa/ 骨架缺失"
 fi
@@ -155,6 +155,26 @@ assert j.get("ok") is False and "v2" in j.get("error", ""), j
 PY
 then ok "scenario=t1 → v1 契约明确拒答（含 v2 提示）"
 else bad "t1 拒答异常：$resp3"; fi
+
+respS=$(curl -s "$BASE/cgi-bin/sa_cgi?action=src&file=main")
+case "$respS" in
+  *"SystemAgent"*) ok "action=src&file=main → 返回源码（含锚点 SystemAgent）" ;;
+  *) bad "src 端点异常（resp=${respS:0:80}）" ;;
+esac
+t_before=$(python3 -c "import json;print(json.load(open('$SA_DIR/run_meta.json'))['total'])")
+curl -s -o /dev/null "$BASE/cgi-bin/sa_cgi?action=src&file=samock"
+t_after=$(python3 -c "import json;print(json.load(open('$SA_DIR/run_meta.json'))['total'])")
+if [[ "$t_before" == "$t_after" ]]; then
+  ok "action=src 零副作用（run_meta total 不变）"
+else
+  bad "src 端点污染 run_meta（$t_before → $t_after）"
+fi
+respE=$(curl -s "$BASE/cgi-bin/sa_cgi?action=src&file=boom")
+if [[ "$respE" == error:* ]]; then
+  ok "src 名单外 file=boom 被拒（允许名单封闭）"
+else
+  bad "src 越权未被拒：$respE"
+fi
 
 echo ""
 echo "==== C · 浏览器 DOM（headless Chrome）===="

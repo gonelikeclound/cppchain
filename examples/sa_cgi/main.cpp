@@ -1,8 +1,10 @@
-// sa_cgi —— SA 运行 CGI（problems/64 · S5）：从浏览器触发 SA demo 运行。
+// sa_cgi —— SA 运行 CGI + 源码查看（problems/64 · S5/S6b）：从浏览器触发 SA demo 运行 + 读取名单源码。
 //
-// 协议：GET /cgi-bin/sa_cgi?scenario=all  → application/json
-//   v1 仅支持 scenario=all（整包确定性重放 t1/t2 两任务，覆盖 tasklog）；
-//   t1/t2 单场景触发 = v2（需把 S2/S4 导演段抽成可单独调用）。
+// 协议：GET /cgi-bin/sa_cgi
+//   ?scenario=all  → application/json 运行回执
+//     v1 仅支持 scenario=all（整包确定性重放 t1/t2 两任务，覆盖 tasklog）；
+//     t1/t2 单场景触发 = v2（需把 S2/S4 导演段抽成可单独调用）。
+//   ?action=src&file=<key> → text/plain 源码（封闭允许名单，见 src_main()；只读零副作用）。
 //
 // 职责链：解析 QUERY_STRING → 定位 sa_demo 二进制（/proc/self/exe 真实路径同目录，
 //   或 SA_DEMO_BIN env 覆盖）→ chdir 到仓库根 → popen 子进程（stdout/stderr 重定向
@@ -18,6 +20,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <map>
 #include <print>
 #include <string>
 #include <vector>
@@ -63,9 +67,47 @@ std::string query_param(char const* name) {
   return {};
 }
 
+// 源码查看端点（页面「源码」标签页）：?action=src&file=<key>
+// 只允许**封闭允许名单**内的文件：file 只能命中名单键，路径无任何用户拼接
+// （局域网可达服务，禁止把任意仓库文件暴露给网络；也禁止路径穿越）。
+// 零副作用：不 spawn、不写 run_meta —— 页面/测试可安全反复调用。
+int src_main() {
+  std::string const file = query_param("file");
+  // 名单键 → 仓库相对路径（相对仓库根）。
+  std::map<std::string, std::string> const kAllowlist = {
+      {"main", "examples/sa_demo/main.cpp"},        // 导演/编排（DAG 关系的定义处）
+      {"samock", "tests/plugin_demo/samock.cpp"},   // 假世界 · 假电话 FSM · 剧本
+      {"guard", "examples/sa_demo/sa_guard.hpp"},   // M0 纯函数验证器
+      {"cgi", "examples/sa_cgi/main.cpp"},          // 本端点源码
+      {"page", "web/sa/index.html"},                // 本页源码
+      {"e2e", "run-sa-e2e.sh"},                      // E2E 脚本
+  };
+  auto it = kAllowlist.find(file);
+  std::string const head = "Content-Type: text/plain; charset=utf-8\r\n\r\n";
+  if (it == kAllowlist.end()) {
+    std::print("{}", head);
+    std::println("error: 未知 file=\"{}\"（允许名单外，拒绝）", file);
+    return 0;
+  }
+  // bindir = <root>/build/dev/examples → 父级 ×3 = 仓库根
+  fs::path const p = cgi_bin_dir().parent_path().parent_path().parent_path() / it->second;
+  std::ifstream in(p, std::ios::binary);
+  if (!in) {
+    std::print("{}", head);
+    std::println("error: 打不开 {}（文件缺失？）", it->second);
+    return 0;
+  }
+  std::string const body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::print("{}", head + body);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
+  // 源码查看（只读、零副作用）优先短路，避免任何环境/文件副作用。
+  if (query_param("action") == "src") return src_main();
+
   std::string const scenario = query_param("scenario");
   Json out;
   out["schema"] = "sa-run-cgi/v1";

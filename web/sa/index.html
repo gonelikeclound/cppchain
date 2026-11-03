@@ -127,6 +127,26 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 .pills{ display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
 .pill{ font-size:11px; color:var(--dim); border:1px solid var(--border); border-radius:99px; padding:1px 9px; }
 .pill b{ color:var(--text); }
+
+/* 右上面板标签页（节点图 / 源码） */
+.tabs{ display:flex; gap:4px; margin-top:8px; }
+.tab{ background:transparent; border:1px solid transparent; color:var(--dim); border-radius:6px;
+       padding:3px 12px; font-size:12px; cursor:pointer; }
+.tab:hover{ color:var(--text); }
+.tab.active{ color:var(--text); background:var(--panel2); border-color:var(--border); font-weight:600; }
+
+/* 源码标签页 */
+#src-pane{ display:none; flex:1; min-height:0; flex-direction:column; }
+#dag-pane.src-on #dag-scroll{ display:none; }
+#dag-pane.src-on #dag-inspector{ display:none; }
+#dag-pane.src-on #src-pane{ display:flex; }
+#src-toolbar{ flex:none; padding:8px 16px; display:flex; align-items:center; gap:10px;
+              border-top:1px dashed var(--border); flex-wrap:wrap; }
+#src-select{ background:var(--panel2); color:var(--text); border:1px solid var(--border);
+             border-radius:6px; padding:3px 8px; font-size:12px; }
+#src-view{ flex:1; min-height:0; overflow:auto; margin:0; padding:10px 16px;
+           font:12.5px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+           white-space:pre; color:var(--text); tab-size:4; }
 #dag-svg{ display:block; width:100%; height:auto; min-height:140px; }
 
 /* DAG 画布 */
@@ -226,6 +246,10 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
           <span class="tstatus" id="dag-status">—</span>
           <div class="pills" id="dag-pills"></div>
         </div>
+        <div class="tabs">
+          <button class="tab active" id="tab-dag" type="button">节点图</button>
+          <button class="tab" id="tab-src" type="button">源码</button>
+        </div>
       </div>
       <div id="dag-scroll">
         <svg id="dag-svg" role="img" aria-label="任务执行 DAG 节点图"></svg>
@@ -234,6 +258,15 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
         <span class="who" id="insp-who"></span>
         <span id="insp-detail"></span>
         <button class="ghost clear" id="insp-clear" type="button" style="display:none">清除筛选</button>
+      </div>
+      <div id="src-pane">
+        <div id="src-toolbar">
+          <select id="src-select" aria-label="选择源码文件"></select>
+          <span class="cnt">只读源码 · sa_cgi action=src（封闭允许名单）</span>
+          <span style="flex:1"></span>
+          <span class="cnt" id="src-hint"></span>
+        </div>
+        <pre id="src-view" role="region" aria-label="源码"></pre>
       </div>
     </section>
     <div class="hdiv" id="hdivider" role="separator" aria-orientation="horizontal"></div>
@@ -644,6 +677,53 @@ async function runCgi(){
   }
 }
 el('run-btn').addEventListener('click', runCgi);
+
+/* ======================== S6b · 源码标签页（右上面板 · 节点图/源码） ========================
+   「demo 的关系没看懂 → 直接看源码对照」：经 sa_cgi ?action=src&file=<key> 读封闭允许名单文件。
+   DAG 的边（分诊/改口/上报/写世界）分别来自 main.cpp 的导演段与 samock 的假电话剧本。 */
+const SRC_FILES = [
+  ['main',   'sa_demo/main.cpp（导演·编排，DAG 边由此定义）'],
+  ['samock', 'samock.cpp（假世界 · 假电话 FSM · 剧本）'],
+  ['guard',  'sa_guard.hpp（M0 验证器）'],
+  ['cgi',    'sa_cgi/main.cpp（运行端点）'],
+  ['e2e',    'run-sa-e2e.sh（端到端测试）'],
+  ['page',   'index.html（本页源码）'],
+];
+function fillSrcSelect(){
+  const sel = el('src-select');
+  sel.innerHTML = '';
+  for(const [key, label] of SRC_FILES){
+    const o = document.createElement('option');
+    o.value = key; o.textContent = label;
+    sel.appendChild(o);
+  }
+}
+async function loadSrc(){
+  const view = el('src-view');
+  const key = el('src-select').value;
+  view.textContent = '…加载中';
+  el('src-hint').textContent = '';
+  try{
+    const r = await fetch('/cgi-bin/sa_cgi?action=src&file=' + encodeURIComponent(key), {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const t = await r.text();
+    if(t.startsWith('error')) throw new Error(t.slice(0, 140));
+    view.textContent = t;
+    el('src-hint').textContent = t.length + ' 字节';
+  }catch(e){
+    view.textContent = '源码不可用：' + e.message + '\n（源码标签页依赖 WebUI/CGI 服务，./run-webui.sh 起服即可）';
+  }
+}
+function showTopTab(onSrc){
+  el('dag-pane').classList.toggle('src-on', onSrc);
+  el('tab-dag').classList.toggle('active', !onSrc);
+  el('tab-src').classList.toggle('active', onSrc);
+  if(onSrc) loadSrc();
+}
+el('tab-dag').addEventListener('click', ()=>showTopTab(false));
+el('tab-src').addEventListener('click', ()=>showTopTab(true));
+el('src-select').addEventListener('change', loadSrc);
+fillSrcSelect();
 
 /* ======================== E2E 测试钩子（run-sa-e2e.sh 的 C 阶段：headless Chrome） ========================
    ?e2e=show → 等首屏渲染完，body[data-e2e-render]="ok|bad" + data-e2e-render-detail

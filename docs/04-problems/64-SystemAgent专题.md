@@ -36,6 +36,23 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 9 轮（2026-11-03 · S6b 右上「源码」标签页）
+
+- **用户反馈**：「demo 的关系没看懂」→ 给右上面板加**标签页：`节点图 / 源码`**，源码页直读仓库源文件对照
+  —— DAG 的每条边（分诊/改口/上报/写世界）都能在 `main.cpp` 导演段与 `samock.cpp` 假电话剧本里找到出处。
+- **`sa_cgi` 新增只读端点 `?action=src&file=<key>`**（text/plain）：**封闭允许名单**六键
+  main/samock/guard/cgi/e2e/page（用户输入只命中名单键、路径零拼接 → 局域网可达服务也不暴露越权读取）；
+  **零副作用**（不 spawn、不动 run_meta）；run 路径向后兼容（`action` 缺省即 run）。
+- **页面**：右上面板头变标签页（节点图 / 源码）；源码页 = 文件下拉 + `<pre>` 只读视图；
+  非 WebUI 环境优雅降级提示。
+- **实测**：`src&file=main` 200 含锚点 · `find=boom` 名单外拒 · **E2E 扩至 14/14**（新增 src 三检：
+  内容锚点 / 零副作用（run_meta 不变）/ 名单外拒绝；A 阶段骨架标记加「源码」）。
+- **实证排查两件（结论=无 bug）**：① `run_meta` 快照/还原逻辑实测 work（99→0 正确还原）；
+  ② headless Chrome `e2e=run` 经隔离 `SA_DATA_DIR` 实测**只触发 1 次** run（非连发）。
+- **run_meta 去噪**：历轮 E2E/手动触发在 `web/sa/run_meta.json`（gitignored 宿主观测）累积出不可追溯的
+  18:xx 噪音簇，已重置为干净基线（total=0，页面「第 N 次」从 1 重新计数；原拟保留的 S5 早期 3 条亦
+  被清理条件误伤一并清掉，如实备注——无业务价值损失）。
+
 ### 第 8 轮（2026-11-03 · S6 WebUI E2E 测试）
 
 - **S6 全过（11/11）**：`run-sa-e2e.sh` —— SA 编排台 WebUI 端到端，驱动**真实服务**
@@ -299,6 +316,7 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S4** | **SA 专用 UI 页**（`web/sa/index.html`）：左任务列表 / 右详情 50% 可拖动（上 DAG 节点图下消息列表）；数据契约 `sa-tasklog/v1`；t1 C7 简版 + t2 消息直路两任务 | ✅ **2026-11-03 全过**（17ms） |
 | **S5** | **浏览器触发运行**：`sa_cgi` CGI 端点（`/cgi-bin/sa_cgi?scenario=all` —— spawn sa_demo + run_meta 维护，v1 仅 all）+ 页面「▶ 运行 demo」按钮 | ✅ **2026-11-03 全过**（11ms 回执，http --cgi 全通路） |
 | **S6** | **WebUI E2E**：`run-sa-e2e.sh` 三阶段 —— A 静态 HTTP（页面骨架+sample 契约）/ B CGI 运行整路（回执·磁盘三产物·run.log verdict·确定性数值·二次递增·v1 拒答）/ C headless Chrome（渲染 + 真实点击「运行 demo」→「运行完成」）；11/11 | ✅ **2026-11-03 全过** |
+| **S6b** | **右上面板「源码」标签页**：`sa_cgi?action=src` 允许名单端点（6 文件 · 只读零副作用）+ 页面标签切换（节点图/源码）；**E2E 扩至 14/14** | ✅ **2026-11-03 全过** |
 | S7+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；
