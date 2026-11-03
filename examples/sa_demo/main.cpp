@@ -30,6 +30,7 @@
 
 #include "sa_guard.hpp"  // S3（M0）：SA 语义层校验纯函数
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -41,6 +42,7 @@
 #include <print>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -133,6 +135,96 @@ Json run_tool(ToolRegistry const& reg, std::string const& name, Json args,
 // 一键取世界快照（断言入口）。
 Json world(ToolRegistry const& reg, std::vector<std::string>& fail) {
   return run_tool(reg, "samock_world_state", Json::object(), fail);
+}
+
+// ---- S6c · 运行中实时进度（JSONL）----
+// 目的：mock 执行本身毫秒级结束，页面只能看到最终结果；这里让 sa_demo **边跑边写**
+// 结构化事件并可按 --pace-ms 放慢，页面轮询后能看见节点点亮/消息逐条出现。
+// 事件（每行一条，逐行 flush，append-only）：
+//   {"t":"run","state":"start","pace_ms":N} / {"t":"run","state":"done"}
+//   {"t":"task","state":"start","id":"t1","title":"…"} / {"t":"task","state":"done","id":"t1"}
+//   {"t":"dag","task":"t1","dag":{nodes,edges}}
+//   {"t":"node","task":"t1","id":"n_call","state":"active|done"}
+//   {"t":"msg","task":"t1","msg":{at_sec,kind,from,node,text[,tool]}}
+// 纪律：进度是**观测面**，任务日志（tasklog）仍是唯一真相；事件内容与 tasklog 消息同口径。
+class Progress {
+ public:
+  Progress(std::string const& path, long pace_ms) : pace_ms_(pace_ms) {
+    if (!path.empty()) {
+      os_.open(path, std::ios::trunc);
+      if (!os_) std::println("[!] 进度文件打开失败：{}（继续跑，页面无实时进度）", path);
+    }
+  }
+  bool enabled() const { return os_.is_open(); }
+  void emit(Json const& e) {
+    if (!os_.is_open()) return;
+    os_ << e.dump() << '\n';
+    os_.flush();
+  }
+  void node(std::string const& task, std::string const& id, std::string const& state) {
+    emit(Json{{"t", "node"}, {"task", task}, {"id", id}, {"state", state}});
+  }
+  void msg(Json m) {
+    emit(Json{{"t", "msg"}, {"task", task_}, {"msg", std::move(m)}});
+    pace();
+  }
+  void pace() {
+    if (pace_ms_ > 0) std::this_thread::sleep_for(std::chrono::milliseconds(pace_ms_));
+  }
+  void set_task(std::string t) { task_ = std::move(t); }
+  std::string const& task() const { return task_; }
+  void set_clock(std::int64_t c) { clock_ = c; }
+  std::int64_t clock() const { return clock_; }
+
+ private:
+  std::ofstream os_;
+  long pace_ms_ = 0;
+  std::string task_ = "t1";
+  std::int64_t clock_ = 0;
+};
+
+// 工具调用的"人话"行：与 tasklog 的 t1 工具行同一口径（页面实时与最终一致）。
+std::string tool_msg_text(std::string const& name, Json const& args, Json const& out) {
+  if (name == "samock_make_call") {
+    std::string s = "make_call{" + args.value("call_id", std::string()) + ", " +
+                    args.value("number", std::string()) + ", attempt:" +
+                    std::to_string(args.value("attempt", 0)) + "}";
+    if (args.value("attempt", 0) > 1) s += " （retry_policy 重拨）";
+    return s;
+  }
+  if (name == "samock_clock_forward")
+    return "clock_forward{" + std::to_string(args.value("seconds", 0)) + "}";
+  if (name == "samock_send_message")
+    return "send_message{" + args.value("msg_id", std::string()) + ", " +
+           args.value("to", std::string()) + ", " + args.value("text", std::string()) + "}";
+  if (name == "samock_milestones") {
+    std::string s = "milestones{since:" + std::to_string(args.value("since", 0)) + "} → [";
+    bool first = true, answered = false;
+    for (Json const& m : out.value("milestones", Json::array())) {
+      if (!first) s += ", ";
+      first = false;
+      s += m.value("kind", "?") + ":" + std::to_string(m.value("attempt", 0));
+      if (m.value("kind", "") == "answered") answered = true;
+    }
+    s += "]";
+    if (answered) s += " —— 已接通";
+    return s;
+  }
+  return name;
+}
+
+// 哪些工具调用进实时进度：电话域/消息域白名单；里程碑读只在含非 ended 事件时展示
+// （ended 由导演显式 milestone 行承担，避免与最终 tasklog 重复）。
+bool live_tool_visible(std::string const& name, Json const& out) {
+  if (name == "samock_make_call" || name == "samock_clock_forward" ||
+      name == "samock_send_message")
+    return true;
+  if (name == "samock_milestones") {
+    for (Json const& m : out.value("milestones", Json::array()))
+      if (m.value("kind", "") != "ended") return true;
+    return false;
+  }
+  return false;
 }
 
 // 一个脚本桩的"人类输入"（每次咨询=独立上下文）。
@@ -315,17 +407,34 @@ bool has_tool_error(agent::Agent const& a, std::string const& tool) {
 
 int main(int argc, char** argv) {
   // 参数：--tasklog=<path>（默认 web/sa/sa_tasklog.json；sa_cgi 传绝对路径）
+  //       --progress=<path>（实时进度 JSONL；空 = 不写，直跑/测试默认）
+  //       --pace-ms=<N>（每条进度消息后 sleep N ms；0 = 全速，页面运行默认 300）
   std::string tl_path = "web/sa/sa_tasklog.json";
+  std::string prog_path;
+  long pace_ms = 0;
   for (int i = 1; i < argc; ++i) {
     std::string const a = argv[i];
-    std::string const pfx = "--tasklog=";
-    if (a.starts_with(pfx)) {
-      tl_path = a.substr(pfx.size());
+    if (a.starts_with("--tasklog=")) {
+      tl_path = a.substr(std::string("--tasklog=").size());
+    } else if (a.starts_with("--progress=")) {
+      prog_path = a.substr(std::string("--progress=").size());
+    } else if (a.starts_with("--pace-ms=")) {
+      std::string const v = a.substr(std::string("--pace-ms=").size());
+      try {
+        pace_ms = std::stol(v);
+      } catch (...) {
+        std::println("[✗] --pace-ms 需为非负整数：{}", v);
+        return 2;
+      }
+      if (pace_ms < 0) pace_ms = 0;
+      if (pace_ms > 5000) pace_ms = 5000;
     } else if (a == "--help" || a == "-h") {
-      std::println("用法：sa_demo [--tasklog=<tasklog 路径>]");
+      std::println(
+          "用法：sa_demo [--tasklog=<路径>] [--progress=<JSONL 路径>] [--pace-ms=<0..5000>]");
       return 0;
     }
   }
+  Progress prog(prog_path, pace_ms);
 
   std::println("SystemAgent 骨架 demo（problems/64 · S1–S4 · 全离线）\n");
   std::println("SA ≠ 单个 agent：核心 agent（编排·只读观测） + 电话域 agent + 消息域 agent；");
@@ -394,12 +503,29 @@ int main(int argc, char** argv) {
   std::vector<sa::Step> trace;  // S3：编排轨迹（域 agent 每把工具调用全录，供验证器过检）
   // 录迹包装：不改工具语义，只在域注册表里包一层 recorder，
   // 让每个域 agent 的工具调用落进 trace（M0 集成用的运行时事实）。
-  auto bind_agent_tool = [&trace](std::string const& agent, ToolSpec spec) {
+  auto bind_agent_tool = [&trace, &prog](std::string const& agent, ToolSpec spec) {
     std::string const name = spec.name;
     ToolSpec::Handler base = spec.handler;
-    spec.handler = [&trace, agent, name, base](Json const& args, tool::ToolContext& ctx) {
+    spec.handler = [&trace, &prog, agent, name, base](Json const& args,
+                                                      tool::ToolContext& ctx) {
       trace.push_back(sa::Step{agent, name, args});
-      return base(args, ctx);
+      auto out = base(args, ctx);
+      // S6c 实时进度：域 agent 的工具调用 → 页面节点点亮 + 工具消息（核心只读观测不展示）
+      if (prog.enabled() && out.has_value() && agent != "core" &&
+          live_tool_visible(name, *out)) {
+        std::string const node = agent == "phone" ? "n_call" : "n_msg";
+        std::string const from = agent == "phone" ? "电话域" : "消息域";
+        prog.node(prog.task(), node, "active");
+        prog.msg(Json{{"at_sec", prog.clock()},
+                      {"kind", "tool"},
+                      {"from", from},
+                      {"node", node},
+                      {"tool", name},
+                      {"text", tool_msg_text(name, args, *out)}});
+        // 时钟事件本身记在推进前（与 tasklog 口径一致），后续消息才看到新时刻。
+        if (name == "samock_clock_forward") prog.set_clock((*out).value("now_sec", 0));
+      }
+      return out;
     };
     return spec;
   };
@@ -449,11 +575,59 @@ int main(int argc, char** argv) {
   auto rec = [&](bool b, std::string what) { s2.c(b, std::move(what)); };
   std::vector<std::string> e2;  // 导演层 run_tool 失败收集
 
+  // —— t1 DAG 定义（先给页面画图；S4 任务日志复用同一份，防漂移）——
+  Json const t1_dag = Json{
+      {"nodes", Json::array({
+            Json{{"id", "n_user"}, {"label", "用户"}, {"role", "user"}, {"layer", 0}, {"row", 0}},
+            Json{{"id", "n_core1"}, {"label", "核心"}, {"role", "core"}, {"layer", 1}, {"row", 1},
+                 {"detail", "分诊：→电话域（核心第 1 次咨询）"}},
+            Json{{"id", "n_call"}, {"label", "电话域"}, {"role", "phone"}, {"layer", 2}, {"row", 1},
+                 {"detail", "FSM 域内：attempt1 拒接@10s → 按 retry_policy 重拨 attempt2 → 接通；"
+                             "拒接/振铃/接通均不打扰核心（04 §5 职责切分）"}},
+            Json{{"id", "n_core2"}, {"label", "核心"}, {"role", "core"}, {"layer", 3}, {"row", 1},
+                 {"detail", "改道编排（核心第 2 次咨询）：收到 ended{user_redirected} → 改派消息域"}},
+            Json{{"id", "n_msg"}, {"label", "消息域"}, {"role", "msg"}, {"layer", 4}, {"row", 1},
+                 {"detail", "send_message{m5, 妈妈} → delivered=true"}},
+            Json{{"id", "n_world"}, {"label", "世界"}, {"role", "world"}, {"layer", 5}, {"row", 1},
+                 {"detail", "c1 state=ended · reason=user_redirected · disposition=redirect_to_messaging · "
+                             "消息=[妈妈, delivered] · 钟=27s"}},
+        })},
+      {"edges", Json::array({
+            Json{{"from", "n_user"}, {"to", "n_core1"}, {"label", "query"}, {"kind", "query"}},
+            Json{{"from", "n_core1"}, {"to", "n_call"}, {"label", "→电话域"}, {"kind", "dispatch"}},
+            Json{{"from", "n_user"}, {"to", "n_call"}, {"label", "改口(barge_in)"}, {"kind", "control"}},
+            Json{{"from", "n_call"}, {"to", "n_core2"}, {"label", "ended 上报"}, {"kind", "report"}},
+            Json{{"from", "n_core2"}, {"to", "n_msg"}, {"label", "→消息域"}, {"kind", "dispatch"}},
+            Json{{"from", "n_msg"}, {"to", "n_world"}, {"label", "写世界"}, {"kind", "world"}},
+        })}};
+
+  // —— S6c 实时进度：t1 开跑（图先到，随后 node/msg 逐步推）——
+  auto live_msg = [&prog](std::string const& node, std::string const& kind,
+                          std::string const& from, std::string const& text) {
+    prog.msg(Json{{"at_sec", prog.clock()},
+                  {"kind", kind},
+                  {"from", from},
+                  {"node", node},
+                  {"text", text}});
+  };
+  prog.set_task("t1");
+  prog.set_clock(0);
+  prog.emit(Json{{"t", "run"}, {"state", "start"}, {"pace_ms", pace_ms}});
+  prog.emit(Json{{"t", "task"}, {"state", "start"}, {"id", "t1"},
+                 {"title", "给妈妈打电话问她晚上来不来吃饭"}});
+  prog.emit(Json{{"t", "dag"}, {"task", "t1"}, {"dag", t1_dag}});
+  prog.node("t1", "n_user", "active");
+  live_msg("n_user", "user", "用户", "给妈妈打电话问她晚上来不来吃饭。");
+  prog.node("t1", "n_user", "done");
+
   // (1) 核心咨询①：初始分诊 → 电话域
   model_core.replies = {message::ai_message("→电话域：给妈妈打电话问她晚上来不来吃饭。")};
   auto core1 = core_agent.invoke(one_human("给妈妈打电话问她晚上来不来吃饭。"));
   rec(core1.has_value() && core1->text().find("电话域") != std::string::npos,
       "核心咨询①（初始分诊）→ 路由到电话域");
+  prog.node("t1", "n_core1", "active");
+  live_msg("n_core1", "dispatch", "核心", "→电话域：给妈妈打电话问她晚上来不来吃饭。");
+  prog.node("t1", "n_core1", "done");
 
   // (2) 电话域咨询①：拒接 → 按 retry_policy 重拨 attempt2 → 接通（域内闭环，核心不醒）
   model_phone.replies = {
@@ -468,12 +642,17 @@ int main(int argc, char** argv) {
   auto phone1 = phone_agent.invoke(
       one_human("域内任务：给妈妈打电话问她晚上来不来吃饭。拒接就按你的重拨策略处理，不要打扰核心。"));
   rec(phone1.has_value(), "电话域咨询①：拒接 → 重拨 attempt2 → 接通（retry_policy 在域内，不打扰核心）");
+  live_msg("n_call", "ai", "电话域", "attempt1 拒接 → 按重拨策略重试 attempt2 → 已接通。");
 
   // (3) 用户改口 → 控制平面 barge_in（导演代用户直灌，不经核心）
   Json barge = run_tool(samock, "samock_barge_in",
                         Json{{"call_id", "c1"}, {"intent", "redirect_to_messaging"}}, e2);
   rec(!barge.empty() && barge.value("status", "") == "redirected",
       "用户改口「算了，发个微信就行」→ barge_in 直灌控制平面（仅通话中有效）");
+  live_msg("n_call", "control", "用户",
+           "barge_in{intent: redirect_to_messaging} —— 直灌控制平面（不经核心，仅通话中有效）");
+  live_msg("n_call", "milestone", "电话域",
+           "call.ended{attempt:2, reason:user_redirected, disposition:redirect_to_messaging}");
 
   // (4) 电话域咨询②：观察 ended{user_redirected} → 上报核心改道
   model_phone.replies = {
@@ -484,6 +663,8 @@ int main(int argc, char** argv) {
       phone_agent.invoke(one_human("通话有了新进展，查一下里程碑并汇报。"));
   rec(phone2.has_value() && phone2->text().find("微信") != std::string::npos,
       "电话域咨询②：读到 ended{user_redirected} → 上报核心改道");
+  live_msg("n_call", "ai", "电话域", "妈妈改口让发微信，通话已改道结束。请核心编排收尾。");
+  prog.node("t1", "n_call", "done");
 
   // (5) 核心咨询②：改道编排 → 消息域
   model_core.replies = {message::ai_message("→消息域：妈妈改口，让发微信。")};
@@ -491,6 +672,9 @@ int main(int argc, char** argv) {
       core_agent.invoke(one_human("电话域上报：妈妈改口要发微信，不再电话问。请你编排收尾。"));
   rec(core2.has_value() && core2->text().find("消息") != std::string::npos,
       "核心咨询②（改道编排）→ 路由到消息域");
+  prog.node("t1", "n_core2", "active");
+  live_msg("n_core2", "dispatch", "核心", "→消息域：妈妈改口，让发微信。");
+  prog.node("t1", "n_core2", "done");
 
   // (6) 消息域咨询：发消息 → 送达回执
   model_msg.replies = {
@@ -501,6 +685,8 @@ int main(int argc, char** argv) {
   auto msg1 = msg_agent.invoke(one_human("域内任务：给妈妈发微信问晚上来不来吃饭。"));
   rec(msg1.has_value() && msg1->text().find("送达") != std::string::npos,
       "消息域咨询：send_message → 送达回执");
+  live_msg("n_msg", "ai", "消息域", "已发送到妈妈并确认送达。");
+  prog.node("t1", "n_msg", "done");
 
   // —— 世界终态断言（查世界、不查返回值）——
   e2.clear();
@@ -518,6 +704,10 @@ int main(int argc, char** argv) {
   } else {
     rec(false, "世界读取失败：" + e2.front());
   }
+  prog.node("t1", "n_world", "active");
+  live_msg("n_world", "assert", "世界",
+           "世界断言：c1 state=ended · ended_reason=user_redirected · messages=[妈妈, delivered=true] · 钟=27s");
+  prog.node("t1", "n_world", "done");
 
   // —— 里程碑全序断言（C7 唯一感官：7 条事件，零音频/零逐句转写）——
   e2.clear();
@@ -557,6 +747,7 @@ int main(int argc, char** argv) {
           "负路径（振铃时打断应被拒）留给后续故障注入 F 系列，本 demo 只走有效路径。");
 
   for (std::string const& line : s2.lines) std::println("{}", line);
+  prog.emit(Json{{"t", "task"}, {"state", "done"}, {"id", "t1"}});
 
   // ================= S3 · M0 化：SA 语义层校验纯函数 + 坏编排对抗集 ================
   std::println("\n———— S3 · M0 化：SA 语义层校验纯函数 + 坏编排对抗集 ————");
@@ -721,30 +912,7 @@ int main(int argc, char** argv) {
            {"milestones", t1_ms.value("seq", -1)},
            {"clock_end_sec", t1_world.value("now_sec", -1)},
            {"verdict", "Completed · ended(user_redirected) · 消息=妈妈 delivered"}};
-  t1["dag"] = Json{
-      {"nodes", Json::array({
-            Json{{"id", "n_user"}, {"label", "用户"}, {"role", "user"}, {"layer", 0}, {"row", 0}},
-            Json{{"id", "n_core1"}, {"label", "核心"}, {"role", "core"}, {"layer", 1}, {"row", 1},
-                 {"detail", "分诊：→电话域（核心第 1 次咨询）"}},
-            Json{{"id", "n_call"}, {"label", "电话域"}, {"role", "phone"}, {"layer", 2}, {"row", 1},
-                 {"detail", "FSM 域内：attempt1 拒接@10s → 按 retry_policy 重拨 attempt2 → 接通；"
-                             "拒接/振铃/接通均不打扰核心（04 §5 职责切分）"}},
-            Json{{"id", "n_core2"}, {"label", "核心"}, {"role", "core"}, {"layer", 3}, {"row", 1},
-                 {"detail", "改道编排（核心第 2 次咨询）：收到 ended{user_redirected} → 改派消息域"}},
-            Json{{"id", "n_msg"}, {"label", "消息域"}, {"role", "msg"}, {"layer", 4}, {"row", 1},
-                 {"detail", "send_message{m5, 妈妈} → delivered=true"}},
-            Json{{"id", "n_world"}, {"label", "世界"}, {"role", "world"}, {"layer", 5}, {"row", 1},
-                 {"detail", "c1 state=ended · reason=user_redirected · disposition=redirect_to_messaging · "
-                             "消息=[妈妈, delivered] · 钟=27s"}},
-        })},
-      {"edges", Json::array({
-            Json{{"from", "n_user"}, {"to", "n_core1"}, {"label", "query"}, {"kind", "query"}},
-            Json{{"from", "n_core1"}, {"to", "n_call"}, {"label", "→电话域"}, {"kind", "dispatch"}},
-            Json{{"from", "n_user"}, {"to", "n_call"}, {"label", "改口(barge_in)"}, {"kind", "control"}},
-            Json{{"from", "n_call"}, {"to", "n_core2"}, {"label", "ended 上报"}, {"kind", "report"}},
-            Json{{"from", "n_core2"}, {"to", "n_msg"}, {"label", "→消息域"}, {"kind", "dispatch"}},
-            Json{{"from", "n_msg"}, {"to", "n_world"}, {"label", "写世界"}, {"kind", "world"}},
-        })}};
+  t1["dag"] = t1_dag;   // 与实时进度共用同一份定义（S2 开头已构造）
   t1["messages"] = Json::array(
       {Json{{"at_sec", 0}, {"kind", "user"}, {"from", "用户"}, {"node", "n_user"},
             {"text", "给妈妈打电话问她晚上来不来吃饭。"}},
@@ -795,16 +963,46 @@ int main(int argc, char** argv) {
   // —— t2 · 消息直路（单域快路 = 分诊的退化结论）：重置世界（多任务隔离）后跑 ——
   Json t2_reset = run_tool(samock, "samock_world_reset", Json::object(), e4);
   r4(t2_reset.value("reset", false), "t2：世界重置（任务间隔离；L1 语义）");
+
+  Json const t2_dag = Json{
+      {"nodes", Json::array({
+            Json{{"id", "n_user"}, {"label", "用户"}, {"role", "user"}, {"layer", 0}, {"row", 0}},
+            Json{{"id", "n_core"}, {"label", "核心"}, {"role", "core"}, {"layer", 1}, {"row", 1},
+                 {"detail", "分诊：直接 →消息域（单域快路 = 分诊的退化结论，05 §2）"}},
+            Json{{"id", "n_msg"}, {"label", "消息域"}, {"role", "msg"}, {"layer", 2}, {"row", 1},
+                 {"detail", "send_message{m6, 妈妈} → delivered=true（其他域零介入）"}},
+            Json{{"id", "n_world"}, {"label", "世界"}, {"role", "world"}, {"layer", 3}, {"row", 1},
+                 {"detail", "messages=[妈妈, delivered=true] · calls 空 · 钟=0s"}},
+        })},
+      {"edges", Json::array({
+            Json{{"from", "n_user"}, {"to", "n_core"}, {"label", "query"}, {"kind", "query"}},
+            Json{{"from", "n_core"}, {"to", "n_msg"}, {"label", "→消息域"}, {"kind", "dispatch"}},
+            Json{{"from", "n_msg"}, {"to", "n_world"}, {"label", "写世界"}, {"kind", "world"}},
+        })}};
+  prog.set_task("t2");
+  prog.set_clock(0);
+  prog.emit(Json{{"t", "task"}, {"state", "start"}, {"id", "t2"},
+                 {"title", "给妈妈发微信问她晚上来不来吃饭"}});
+  prog.emit(Json{{"t", "dag"}, {"task", "t2"}, {"dag", t2_dag}});
+  prog.node("t2", "n_user", "active");
+  live_msg("n_user", "user", "用户", "给妈妈发微信问她晚上来不来吃饭。");
+  prog.node("t2", "n_user", "done");
+
   model_core.replies = {message::ai_message("→消息域：给妈妈发微信问她晚上来不来吃饭。")};
   auto tc2 = core_agent.invoke(one_human("给妈妈发微信问她晚上来不来吃饭。"));
   r4(tc2.has_value() && tc2->text().find("消息") != std::string::npos,
      "t2·核心咨询：直接 →消息域（1 次咨询 = 单域快路）");
+  prog.node("t2", "n_core", "active");
+  live_msg("n_core", "dispatch", "核心", "→消息域：给妈妈发微信问她晚上来不来吃饭。");
+  prog.node("t2", "n_core", "done");
   model_msg.replies = {
       ai_call("samock_send_message", Json{{"msg_id", "m6"}, {"to", "妈妈"}, {"text", "你晚上来不来吃饭？"}}),
       message::ai_message("已发送到妈妈并确认送达。"),
   };
   auto tm2 = msg_agent.invoke(one_human("域内任务：给妈妈发微信问她晚上来不来吃饭。"));
   r4(tm2.has_value() && tm2->text().find("送达") != std::string::npos, "t2·消息域：send_message → 送达回执");
+  live_msg("n_msg", "ai", "消息域", "已发送到妈妈并确认送达。");
+  prog.node("t2", "n_msg", "done");
   e4.clear();
   Json t2_world = world(samock, e4);
   bool const t2_world_ok =
@@ -813,6 +1011,11 @@ int main(int argc, char** argv) {
       t2_world["messages"][0].value("delivered", false) == true && t2_world["calls"].empty() &&
       t2_world.value("now_sec", -1) == 0;
   r4(t2_world_ok, "t2·世界断言：1 条消息=妈妈 delivered · 无通话 · 钟回 0");
+  prog.node("t2", "n_world", "active");
+  live_msg("n_world", "assert", "世界",
+           "世界断言：messages=[妈妈, delivered=true] · calls 空 · 钟=0s");
+  prog.node("t2", "n_world", "done");
+  prog.emit(Json{{"t", "task"}, {"state", "done"}, {"id", "t2"}});
 
   Json t2;
   t2["id"] = "t2";
@@ -828,21 +1031,7 @@ int main(int argc, char** argv) {
            {"milestones", 0},         // 无通话 → 无里程碑
            {"clock_end_sec", t2_world.value("now_sec", -1)},
            {"verdict", "Completed · 消息=妈妈 delivered · 单域快路（核心 1 咨询）"}};
-  t2["dag"] = Json{
-      {"nodes", Json::array({
-            Json{{"id", "n_user"}, {"label", "用户"}, {"role", "user"}, {"layer", 0}, {"row", 0}},
-            Json{{"id", "n_core"}, {"label", "核心"}, {"role", "core"}, {"layer", 1}, {"row", 1},
-                 {"detail", "分诊：直接 →消息域（单域快路 = 分诊的退化结论，05 §2）"}},
-            Json{{"id", "n_msg"}, {"label", "消息域"}, {"role", "msg"}, {"layer", 2}, {"row", 1},
-                 {"detail", "send_message{m6, 妈妈} → delivered=true（其他域零介入）"}},
-            Json{{"id", "n_world"}, {"label", "世界"}, {"role", "world"}, {"layer", 3}, {"row", 1},
-                 {"detail", "messages=[妈妈, delivered=true] · calls 空 · 钟=0s"}},
-        })},
-      {"edges", Json::array({
-            Json{{"from", "n_user"}, {"to", "n_core"}, {"label", "query"}, {"kind", "query"}},
-            Json{{"from", "n_core"}, {"to", "n_msg"}, {"label", "→消息域"}, {"kind", "dispatch"}},
-            Json{{"from", "n_msg"}, {"to", "n_world"}, {"label", "写世界"}, {"kind", "world"}},
-        })}};
+  t2["dag"] = t2_dag;   // 与实时进度共用同一份定义（t2 开跑前已构造）
   t2["messages"] = Json::array(
       {Json{{"at_sec", 0}, {"kind", "user"}, {"from", "用户"}, {"node", "n_user"},
             {"text", "给妈妈发微信问她晚上来不来吃饭。"}},
@@ -870,6 +1059,7 @@ int main(int argc, char** argv) {
     os << tl.dump(2) << "\n";
     r4(true, "已写 " + tl_path + " —— ./run-webui.sh 起服后开 http://localhost:8000/sa/ 查看");
   }
+  prog.emit(Json{{"t", "run"}, {"state", "done"}});
   s4.note("左=任务列表（query + SA 回传 + 用户补充组成完整任务）· 右=详情（上 DAG 节点图 / 下消息列表，50% 可拖动）。");
 
   for (std::string const& line : s4.lines) std::println("{}", line);

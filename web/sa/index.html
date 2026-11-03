@@ -163,9 +163,12 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 .node:hover .nbox{ stroke-width:2.5; }
 .node.selected .nbox{ stroke-width:3; }
 .node.selected{ filter:drop-shadow(0 0 4px var(--accent)); }
+.node.running .nbox{ stroke-width:2.5; filter:drop-shadow(0 0 5px currentColor); }
 .ndot[data-state="done"]{ fill:var(--ok); }
-.ndot[data-state="active"]{ fill:var(--warn); }
+.ndot[data-state="active"]{ fill:var(--warn); animation:nodepulse 1s ease-in-out infinite; }
+.ndot[data-state="pending"]{ fill:var(--border); }
 .ndot[data-state="failed"]{ fill:var(--bad); }
+@keyframes nodepulse{ 0%,100%{ opacity:1 } 50%{ opacity:.35 } }
 .nlabel{ font-size:13px; font-weight:600; fill:var(--text); }
 .nrole{ font-size:9px; fill:var(--dim); letter-spacing:.05em; }
 
@@ -317,7 +320,7 @@ const el = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-let DATA=null, TASKS=[], CUR=null, FILTER=null;
+let DATA=null, TASKS=[], CUR=null, FILTER=null, LIVE=null;
 
 /* ======================== 左侧任务列表 ======================== */
 function nodeLabel(id){
@@ -455,7 +458,7 @@ function renderDag(dag){
     const role = ROLE[n.role] || {color:'var(--dim)', label:n.role||''};
     const st = n.state || 'done';
     html += `
-    <g class="node" data-id="${esc(n.id)}" tabindex="0" role="button" aria-label="查看 ${esc(n.label||'')}">
+    <g class="node${st==='active'?' running':''}" data-id="${esc(n.id)}" tabindex="0" role="button" aria-label="查看 ${esc(n.label||'')}">
       <rect class="nbox" rx="10" width="${W0}" height="${H0}" x="${xs[n.id]}" y="${ys[n.id]-H0/2}"
             style="color:${role.color}"></rect>
       <circle class="ndot" data-state="${esc(st)}" cx="${xs[n.id]+W0-13}" cy="${ys[n.id]-H0/2+13}" r="5"></circle>
@@ -523,6 +526,90 @@ function renderMsgs(){
     list.appendChild(row);
   }
   list.scrollTop = list.scrollHeight;
+}
+
+/* ======================== S6c · 运行中实时进度（轮询 sa_progress.jsonl） ========================
+   sa_cgi 先清空进度文件，sa_demo 边跑边 append 一行一事件（run/task/dag/node/msg）；
+   页面在 runCgi 等待回执期间轮询该文件，节点逐个点亮、消息逐条出现。
+   进度是观测面：回执到达后仍以 tasklog 为唯一真相重新装载。 */
+let LIVE_TIMER = null;
+function stopLive(){
+  if(LIVE_TIMER){ clearInterval(LIVE_TIMER); LIVE_TIMER = null; }
+}
+function liveShow(t){
+  CUR = t; FILTER = null;
+  setActiveTask(t.id);
+  el('dag-title').textContent = t.title || t.id;
+  const st = el('dag-status');
+  st.textContent = t.status || 'Running';
+  st.className = 'tstatus ' + (t.status || 'Running').toLowerCase();
+  el('dag-pills').innerHTML =
+      '<span class="pill">实时执行 · 节奏 ' + (LIVE ? LIVE.pace + ' ms/步' : '…') + '</span>';
+}
+function applyLiveEvent(ev, live){
+  if(!ev || !ev.t) return;
+  if(ev.t === 'run'){
+    if(ev.state === 'start') live.pace = ev.pace_ms || 0;
+    return;
+  }
+  if(ev.t === 'task'){
+    if(ev.state === 'start'){
+      if(!live.followId) live.followId = ev.id;        // 只跟随本次运行的第一个任务（t1 电话例）
+      if(ev.id !== live.followId) return;              // 后续任务后台执行，不抢当前视图
+      live.nodes = {};
+      live.task = {id:ev.id, title:ev.title || ev.id, status:'Running',
+                   dag:{nodes:[], edges:[]}, messages:[], facts:{}};
+      liveShow(live.task);
+      renderMsgs();
+    } else if(ev.state === 'done' && live.task && ev.id === live.task.id){
+      live.task.status = 'Completed';
+      el('dag-status').textContent = 'Completed';
+      el('dag-status').className = 'tstatus completed';
+      document.body.dataset.e2eLive = 'ok';
+    }
+    return;
+  }
+  if(!live.task) return;
+  if(ev.task && ev.task !== live.task.id) return;
+  if(ev.t === 'dag'){
+    live.task.dag = ev.dag || {nodes:[], edges:[]};
+    for(const n of live.task.dag.nodes || []) n.state = live.nodes[n.id] || 'pending';
+    renderDag(live.task.dag);
+    renderDagSource();
+  } else if(ev.t === 'node'){
+    live.nodes[ev.id] = ev.state;
+    const n = (live.task.dag.nodes || []).find(x => x.id === ev.id);
+    if(n) n.state = ev.state;
+    renderDag(live.task.dag);
+  } else if(ev.t === 'msg'){
+    live.task.messages.push(ev.msg);
+    if(CUR === live.task) renderMsgs();
+  }
+}
+function startLive(){
+  stopLive();
+  const live = {followId:null, task:null, nodes:{}, parsed:0, lastLen:0, pace:0};
+  const tick = async ()=>{
+    try{
+      const r = await fetch('sa_progress.jsonl?_=' + Date.now(), {cache:'no-store'});
+      if(!r.ok) return;
+      const txt = await r.text();
+      if(txt.length < live.lastLen){                    // 文件被截断（新一次运行的开始）
+        live.parsed = 0; live.task = null; live.followId = null; live.nodes = {};
+      }
+      live.lastLen = txt.length;
+      const end = txt.lastIndexOf('\n');
+      if(end < 0) return;
+      const lines = txt.slice(0, end).split('\n').filter(Boolean);
+      for(let i = live.parsed; i < lines.length; i++){
+        try{ applyLiveEvent(JSON.parse(lines[i]), live); }catch(_){}
+      }
+      live.parsed = lines.length;
+    }catch(_){ /* 进度文件尚未出现：下一拍再试 */ }
+  };
+  LIVE = live;
+  LIVE_TIMER = setInterval(tick, 200);
+  tick();
 }
 
 /* ======================== 数据装载 ======================== */
@@ -649,24 +736,32 @@ async function loadMeta(){
     }
   }catch(_){ /* meta 缺失不打扰 */ }
 }
+function runPace(){   // 页面节奏：默认 300ms/步；?pace=NNN 可覆盖（E2E 用 80 提速）
+  const p = new URLSearchParams(location.search).get('pace');
+  return (p && /^\d{1,4}$/.test(p)) ? String(Math.min(5000, +p)) : '300';
+}
 async function runCgi(){
   const st = el('run-status');
   const btn = el('run-btn');
+  const pace = runPace();
   st.className = 'side-status busy';
-  st.textContent = '▶ 运行中…（sa_cgi 触发 sa_demo 全离线重放）';
+  st.textContent = '▶ 运行中…（逐节点慢放 ' + pace + ' ms/步，sa_cgi 触发 sa_demo 全离线重放）';
   btn.disabled = true;
+  startLive();   // 先开轮询：sa_cgi 会先清空进度文件，随后事件逐条到达
   try{
-    const r = await fetch('/cgi-bin/sa_cgi?scenario=all', {cache:'no-store'});
+    const r = await fetch('/cgi-bin/sa_cgi?scenario=all&pace=' + pace, {cache:'no-store'});
     if(!r.ok) throw new Error('CGI HTTP ' + r.status);
     const j = await r.json();
     if(!j.ok) throw new Error(j.error || '运行失败');
+    stopLive();
     st.className = 'side-status ok';
     st.textContent = '✓ 运行完成 · ' + j.elapsed_ms + ' ms · 第 ' + j.run_total + ' 次 · ' + fmtAgo(j.last_run_at);
     document.body.dataset.e2eRun = 'pass';   // E2E 钩子：直接落结果，避免轮询竞态
     document.body.dataset.e2eRunDetail = st.textContent;
-    await loadData(true);   // 重拉 tasklog（保留当前选中任务）
+    await loadData(true);   // 重拉 tasklog（唯一真相，保留当前选中任务）
     await loadMeta();
   }catch(e){
+    stopLive();
     st.className = 'side-status err';
     st.textContent = '✗ 运行失败：' + e.message + '（CGI 需 ./run-webui.sh 起服）';
     document.body.dataset.e2eRun = 'fail';   // E2E 钩子

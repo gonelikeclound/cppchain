@@ -1,8 +1,10 @@
 // sa_cgi —— SA 运行 CGI（problems/64 · S5）：从浏览器触发 SA demo 运行。
 //
-// 协议：GET /cgi-bin/sa_cgi?scenario=all  → application/json 运行回执
+// 协议：GET /cgi-bin/sa_cgi?scenario=all[&pace=300]  → application/json 运行回执
 //   v1 仅支持 scenario=all（整包确定性重放 t1/t2 两任务，覆盖 tasklog）；
 //   t1/t2 单场景触发 = v2（需把 S2/S4 导演段抽成可单独调用）。
+//   pace = 每条实时进度消息后的 wall-clock 停顿（ms，0..5000）；页面轮询
+//   web/sa/sa_progress.jsonl 即可看到节点点亮/消息逐条出现的执行过程。
 //   注：页面「源码」标签展示的是**当前任务 DAG 的定义**（页面内 sa-tasklog 数据，纯前端），
 //   不经本端点；本端点只负责"触发运行 + 回执 + run_meta"。
 //
@@ -116,9 +118,26 @@ int main() {
 
   fs::path const tl = data_dir / "sa_tasklog.json";
   fs::path const log = data_dir / "run.log";
+  fs::path const prog = data_dir / "sa_progress.jsonl";
+
+  // S6c：pace 参数（毫秒，按每条进度消息放慢；缺省 0 = 全速，仅页面运行传非 0）。
+  // 只接受纯数字，避免把用户输入拼进 shell 命令。
+  long pace_ms = 0;
+  {
+    std::string const p = query_param("pace");
+    bool digits = !p.empty() && p.size() <= 5;
+    for (char c : p)
+      if (c < '0' || c > '9') digits = false;
+    if (digits) pace_ms = std::stol(p);
+    if (pace_ms > 5000) pace_ms = 5000;
+  }
+  // 先清空进度文件：页面可能在 spawn 前就开始轮询，避免读到上一次运行的残留事件。
+  { std::ofstream clear(prog, std::ios::trunc); }
 
   auto const t0 = std::chrono::steady_clock::now();
-  std::string const cmd = sa_demo.string() + " --tasklog=" + tl.string() + " > " + log.string() +
+  std::string const cmd = sa_demo.string() + " --tasklog=" + tl.string() +
+                           " --progress=" + prog.string() +
+                           " --pace-ms=" + std::to_string(pace_ms) + " > " + log.string() +
                            " 2>&1";
   bool spawned = false;
   int rc = 1;
@@ -189,6 +208,8 @@ int main() {
   out["task_ids"] = Json::array();
   for (std::string const& tid : task_ids) out["task_ids"].push_back(tid);
   out["tasklog"] = tl.string();
+  out["pace_ms"] = pace_ms;
+  out["progress"] = prog.string();
 
   return respond();
 }

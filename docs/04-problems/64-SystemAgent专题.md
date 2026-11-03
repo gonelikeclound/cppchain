@@ -36,6 +36,27 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 11 轮（2026-11-03 · S6c：运行可视化——后端真慢跑 + 页面实时进度）
+
+- **用户反馈**：「电话 mock 的例子太快了，看不到执行过程，mock 时候慢一点」。
+  选定方案 = **后端真慢跑 + 实时进度**（非前端回放动画）。
+- **sa_demo**：新增 `--progress=<JSONL>` 与 `--pace-ms=<0..5000>`：
+  - 边跑边 append 结构化事件（逐行 flush）：`run start/done` · `task start/done` ·
+    `dag`（节点×边先给页面）· `node`（active/done）· `msg`（与 tasklog 消息同口径）；
+  - 每条 `msg` 后 sleep `pace-ms`（默认 0 = 全速，直跑/库测试不受影响）；
+  - 事件内容与最终 tasklog **逐字对齐**（工具行由 args/输出统一成文；`clock_forward` 记在推进前）；
+  - t1 DAG/t2 DAG 提到导演段前定义，实时进度与 S4 tasklog **共用同一份**（防漂移）。
+- **sa_cgi**：`?scenario=all&pace=300` —— pace 只接受纯数字（≤5000，防 shell 注入），
+  先 truncate `sa_progress.jsonl` 再 spawn（避免页面读到上一次残留）；回执新增 `pace_ms`/`progress`。
+- **页面**：运行期间轮询 `sa_progress.jsonl`（200ms），节点 active 脉冲/已跑 done/未跑 pending，
+  消息逐条追加，状态条显示「实时执行 · N ms/步」；只跟随本次运行的首个任务（t1 电话例）；
+  回执到达后停止轮询并以 tasklog 重新装载（进度只是观测面，tasklog 仍是唯一真相）。
+- **验收**：E2E 扩至 **12/12**——B 阶段 `pace=80` 并断言进度事件齐全（run/task/dag/node/msg、
+  t1 `n_call` active、make_call/assert 消息）；C 阶段 `e2e=run&pace=80` 全通；
+  生成 tasklog 与 `sample-tasklog.json` **逐字节等价**（diff 为空）。
+- 体验：点「▶ 运行 demo」后能看见 用户 → 核心分诊 → 电话域拨号/拒接/重拨/接通 → 改口 →
+  核心改道 → 消息域送达 → 世界断言 的完整过程（默认 300ms/步，约 6 秒）。
+
 ### 第 10 轮（2026-11-03 · S6b 修正：图源码 = DAG 定义，非仓库 C++ 源码）
 
 - **用户纠正**：「源码」标签要的是 **SA 生成的 DAG 图的源码**（该图节点×边的定义本身），
@@ -330,6 +351,7 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S5** | **浏览器触发运行**：`sa_cgi` CGI 端点（`/cgi-bin/sa_cgi?scenario=all` —— spawn sa_demo + run_meta 维护，v1 仅 all）+ 页面「▶ 运行 demo」按钮 | ✅ **2026-11-03 全过**（11ms 回执，http --cgi 全通路） |
 | **S6** | **WebUI E2E**：`run-sa-e2e.sh` 三阶段 —— A 静态 HTTP（页面骨架+sample 契约）/ B CGI 运行整路（回执·磁盘三产物·run.log verdict·确定性数值·二次递增·v1 拒答）/ C headless Chrome（渲染 + 真实点击「运行 demo」→「运行完成」）；11/11 | ✅ **2026-11-03 全过** |
 | **S6b** | **右上面板「源码」标签页（图源码）**：显示**当前任务 DAG 的定义**（节点×边清单 ⇄ 原始 JSON，纯前端）；**Round 10 修正**——撤去误做的「读仓库 C++ 文件」与 `sa_cgi?action=src` 端点；E2E 11/11（C 阶段断言图源码渲染） | ✅ **2026-11-03 全过** |
+| **S6c** | **运行可视化（真慢跑 + 实时进度）**：`sa_demo --progress/--pace-ms` 边跑边写 JSONL（run/task/dag/node/msg），`sa_cgi?pace=` 控制节奏；页面轮询后节点逐个点亮、消息逐条出现；E2E **12/12**（B 阶段进度事件断言）；tasklog 与 sample 逐字节等价 | ✅ **2026-11-03 全过** |
 | S7+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；

@@ -48,7 +48,7 @@ fi
 SNAP="$SA_DIR/.e2e_snapshot"
 SRV_PID=""; CHROME_TMP=""
 cleanup(){
-  for f in sa_tasklog.json run_meta.json run.log; do
+  for f in sa_tasklog.json run_meta.json run.log sa_progress.jsonl; do
     rm -f "$SA_DIR/$f"
     if [[ -f "$SNAP/$f" ]]; then mv "$SNAP/$f" "$SA_DIR/$f"; fi
   done
@@ -61,7 +61,7 @@ cleanup(){
 }
 trap cleanup EXIT
 mkdir -p "$SNAP"
-for f in sa_tasklog.json run_meta.json run.log; do
+for f in sa_tasklog.json run_meta.json run.log sa_progress.jsonl; do
   [[ -f "$SA_DIR/$f" ]] && cp -p "$SA_DIR/$f" "$SNAP/$f"
 done
 
@@ -99,12 +99,13 @@ else bad "sample-tasklog.json 契约异常"; fi
 
 echo ""
 echo "==== B · CGI 运行整路 ===="
-resp=$(curl -s "$BASE/cgi-bin/sa_cgi?scenario=all")
+resp=$(curl -s "$BASE/cgi-bin/sa_cgi?scenario=all&pace=80")
 if python3 - "$resp" <<'PY'
 import json, sys
 j = json.loads(sys.argv[1])
 assert j.get("ok") is True, j
 assert isinstance(j.get("elapsed_ms"), int) and j["elapsed_ms"] >= 0
+assert j.get("pace_ms") == 80, j.get("pace_ms")
 ids = j.get("task_ids", [])
 assert "t1" in ids and "t2" in ids, ids
 PY
@@ -126,6 +127,22 @@ else bad "运行产物缺失"; fi
 
 chk "run.log 含「S1 + S2 + S3 + S4 全部通过」（执行真发生）" \
     grep -q "S1 + S2 + S3 + S4 全部通过" "$SA_DIR/run.log"
+
+if python3 - "$SA_DIR" <<'PY'
+import json, sys
+evs = [json.loads(l) for l in open(sys.argv[1] + "/sa_progress.jsonl") if l.strip()]
+assert evs[0]["t"] == "run" and evs[0]["state"] == "start", evs[0]
+assert evs[-1]["t"] == "run" and evs[-1]["state"] == "done", evs[-1]
+assert {"task", "dag", "node", "msg"} <= {e["t"] for e in evs}, {e["t"] for e in evs}
+msgs = [e["msg"] for e in evs if e["t"] == "msg" and e.get("task") == "t1"]
+assert any(m.get("node") == "n_call" for m in msgs), msgs[:2]
+assert any(m.get("tool") == "samock_make_call" for m in msgs), msgs[:2]
+assert any(m.get("kind") == "assert" for m in msgs), msgs[-2:]
+nodes = [e for e in evs if e["t"] == "node" and e.get("task") == "t1"]
+assert any(e["id"] == "n_call" and e["state"] == "active" for e in nodes), nodes[:2]
+PY
+then ok "S6c 实时进度：run/task/dag/node/msg 事件齐全（t1 电话例逐节点）"
+else bad "S6c 进度文件缺失或事件不完整"; fi
 
 if python3 - "$SA_DIR" <<'PY'
 import json, sys
@@ -172,7 +189,7 @@ else
   else
     bad "e2e=show 渲染钩子失败（data-e2e-render 非 ok）"
   fi
-  run_dom=$(dump_dom "$BASE/sa/?e2e=run")
+  run_dom=$(dump_dom "$BASE/sa/?e2e=run&pace=80")
   if [[ "$run_dom" == *'data-e2e-run="pass"'* ]]; then
     ok "headless Chrome · e2e=run：真实点击「运行 demo」→ CGI →「运行完成」全通（钩子 pass）"
   else

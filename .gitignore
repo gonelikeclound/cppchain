@@ -15,6 +15,8 @@ web/sa/sa_tasklog.json
 # sa_cgi 宿主观测（墙钟/次数）与运行日志（运行态非源码）
 web/sa/run_meta.json
 web/sa/run.log
+# S6c 实时进度（sa_demo 边跑边写，页面轮询；运行态非源码）
+web/sa/sa_progress.jsonl
 # run-webui.sh 启动时创建的 symlink（指向 build 产物，运行态不入库）
 web/cgi-bin/
 web/wfr_bin
