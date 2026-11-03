@@ -44,6 +44,27 @@
   先例：tests/plugin_demo 源 + `add_library(SHARED)` + env 目录加载）。
 - 已产出：§六 落地方案骨架（demo / samock / 领域 agent 初集 / 落点映射），待逐条确认后开工。
 
+### 第 3 轮（2026-11-03 · S1 demo 落地）
+
+- 用户拍板 4 点：领域初集 = **A 电话域 + 消息域**；demo 要 **mock 电话**；摆放
+  `examples/sa_demo/` + `tests/plugin_demo/samock.cpp`；虚拟钟 v1 用**工具推进**即可。
+- **S1 落地并验证（11ms 全过）**：
+  - `tests/plugin_demo/samock.cpp` → `libsamock.so`：世界模型（calls/messages/side_effects 只追加台账）+
+    三诚实度（honest/lying/partial）+ 虚拟钟（工具推进、确定性从 0 起步）+ v0 能力（make_call/send_message）
+    + world_state（断言唯一入口，永远说真话）+ world_reset（跨用例隔离）；纯 C descriptor、不链 cppchain。
+  - `examples/sa_demo/main.cpp` 全离线（脚本桩模型，S1 不发起对话）：
+    ① samock 装载走现有 **`tool::load_dynamic_tools`**（wfr 动态工具库同一加载器，fail-closed）；
+    ② 世界空跑六场景（A 空基线 / B honest·真做+幂等 / C lying·说谎被抓 / D partial·半写 /
+      E 虚拟钟 / F 重置），**断言只查世界不查返回值**；③ SA 组装配（核心 + 电话域 + 消息域三实例）+
+      I1 检查（核心 agent 工具集全只读）。
+  - `./run-demo.sh sa_demo` **验收结论：S1 全部通过**。
+- **实现口径（与 §5.2 提案的两点差异，按实况落档）**：`add_library(samock SHARED ../tests/plugin_demo/samock.cpp)`
+  建在 **examples/CMakeLists.txt**（与 `mcp_weather_list` 同先例：demo dlopen 的 so 随 examples 构建目录出，
+  与 demo 二进制同目录）；装载不手写 dlopen，用现成 `tool::load_dynamic_tools`；samock 定位顺序 =
+  env `CPPCHAIN_SAMOCK_DIR` → 编译期 `SA_SAMOCK_DIR`（examples 构建目录）。
+- 下一步：**S2** —— 假电话 FSM（Dialing→Ringing→Connected→Ended|Failed）+ barge_in 进 samock，
+  C7 简版组织闭环（核心→电话域→消息域，打电话→改口→转消息），先离线脚本桩、再决定真机。在线验证再收口。
+
 ### 第 1 轮（2026-11-03）
 
 - 用户指认研究源：`docs/01-discuss/system-agent/`（01–07 + `_research/01–05`）+
@@ -113,32 +134,33 @@ examples/sa_demo/                    # SA 专属 demo 目录（一个可执行�
   README.md                          # 索引行 + 运行方式
   main.cpp                           # 组装核心 agent + 领域 agents + samock 装载
   scenarios/                         # 场景数据（C7 简版 / 对抗坏 patch…），先内联后抽数据
-  # 登记到 examples/CMakeLists.txt 的 EXAMPLE_TARGETS（类别看依赖，至少 TOOL+GRAPH）
+  # 登记到 examples/CMakeLists.txt 的 EXAMPLE_TARGETS（sa_demo → SA_EXAMPLE_TARGETS，链 cppchain_agent+tool）
 
 tests/plugin_demo/samock.cpp         # 所有 SA 专属 mock 代码 → libsamock.so
-tests/CMakeLists.txt                 # add_library(samock SHARED plugin_demo/samock.cpp)
-                                     # 沿用 sidefx_notify 先例：纯 C descriptor（tool_plugin.hpp）、
-                                     # 不链 cppchain、target_include_directories(include)、
-                                     # add_dependencies(<demo> samock)、CPPCHAIN_SAMOCK_DIR 传目录
+examples/CMakeLists.txt              # add_library(samock SHARED ../tests/plugin_demo/samock.cpp)
+                                     # 先例同 mcp_weather_list（demo dlopen 的 so 随 examples 构建出、
+                                     #   与 demo 同目录）；纯 C descriptor（tool_plugin.hpp）、不链 cppchain；
+                                     # add_dependencies(sa_demo samock)；
+                                     # compile-def SA_SAMOCK_DIR = examples 构建目录
 ```
 
-- demo 运行：`./run-demo.sh sa_demo`（demo 里经 dlopen 找 `libsamock.so`，目录来自
-  `CPPCHAIN_SAMOCK_DIR`，兼容 `WFR_TOOL_LIB_DIRS`）。
+- demo 运行：`./run-demo.sh sa_demo`（装载走现有 **`tool::load_dynamic_tools`**，即 wfr 动态工具库同一加载器；
+  samock 定位顺序 = env `CPPCHAIN_SAMOCK_DIR` → 编译期 `SA_SAMOCK_DIR`）。
 - **隔离纪律**（07 R5）：CI/常规测试路径**不得触碰真模型**；demo 里 LLM 可走 .env 真机
   （延续 chat_live/phantasma 惯例）或走离线对博弈（scripted/adversarial），二者物理分开。
 
 ### 5.3 samock.so 第一版装什么（全对 mg 拟件，N 编号沿用研究稿）
 
-| 件 | 研究稿 | samock v1 落地 |
-|---|---|---|
-| 世界模型 | N2 | 内存 `World`（fs/apps/calls/messages/battery/network/sideEffects 只追加台账）+
-  三种诚实度（honest / lying / partial）开关；只读工具 `world_state` / `world_assert`（查世界不查返回值） |
-| 假电话 FSM | N3 | `make_call` 有状态能力：phone-script 驱动（Dialing→…→Ended\|Failed）、
-  `barge_in` / `ignore_sigterm`（C10 卡死）/ `partial` 链路断 |
-| 事件源 | — | `event_storm`（C6 洪峰注入）+ 源侧聚合（G-l 简化版） |
-| 虚拟时钟 | N1 | v1 用**工具推进**的模拟钟（沿用 sidefx_notify 的 `mock_clock_forward` 先例）；
-  全套 quiescence 调度器留待 M2 需要时再上 |
-| 场景 DSL | N4 | v1 场景内联在 demo（C++ 数据），抽 YAML 作为 M1 升级项 |
+| 件 | 研究稿 | samock v1 落地 | 状态 |
+|---|---|---|---|
+| 世界模型 | N2 | 内存 `World`（calls/messages/side_effects 只追加台账 + seq 单调序号）+ 三诚实度
+  （honest/lying/partial）；`world_state` 序列化整个世界（**断言唯一入口，永远说真话**）；重置含钟/诚实度 | ✅ **S1 已装**（`samock_world_state`/`samock_world_reset`；断言逻辑在 demo 侧 C++，见 07「查世界不查返回值」） |
+| 假电话 FSM | N3 | `make_call` v0 仅建 dialing 通话；S2 升级 phone-script FSM（Dialing→…→Ended\|Failed）+
+  `barge_in` / `ignore_sigterm`（C10 卡死）/ partial 链路断；消息侧 v0 已入（partial=在途 delivered=false） | 🔶 v0 已装（`samock_make_call`/`samock_send_message`），**完整 FSM = S2** |
+| 事件源 | — | `event_storm`（C6 洪峰注入）+ 源侧聚合（G-l 简化版） | ⏳ 待 S2+ |
+| 虚拟时钟 | N1 | **工具推进**的模拟钟（`samock_clock_forward`，确定性从 0 起步、累加式）；全套 quiescence
+  调度器留待 M2 需要时再上 | ✅ **S1 已装** |
+| 场景 DSL | N4 | S1 场景内联在 demo（C++ 数据直灌工具），抽 YAML 作为 M1 升级项 | 🔶 S1 内联（六场景脚本），YAML 化待后续 |
 
 > 领域 agent 不是 mock，是真实 demo 代码（在 `examples/sa_demo/` 内）；**mock 的一切都进 samock.so**。
 
@@ -156,20 +178,17 @@ tests/CMakeLists.txt                 # add_library(samock SHARED plugin_demo/sam
 ——事件漏斗（观测归约）、L1 任务表 + L2 瞬时装配、咨询 gate（LLM 只出现声明的接缝）、
 4 级升级 + Reaper 善后、patch 记账与验证映射到 workflow IR 校验。
 
-### 5.5 里程碑建议与待你确认的点
+### 5.5 里程碑进度
 
-| 里程碑 | 内容 |
-|---|---|
-| **S1** | `examples/sa_demo` 骨架：核心 agent + 2 个领域 agent + samock 装载空转（libsamock.so 找到、世界空跑） |
-| **S2** | samock 世界 + 假电话 FSM 落地 → demo 跑通 **C7 简版**（打电话→改口→转消息，离线或真机） |
-| **S3** | M0 化：SA 语义层校验纯函数（V1–V8 子集）+ 坏 patch/坏模型对抗集（07 §5.2） |
-| S4+ | 漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8） |
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| **S1** | `examples/sa_demo` 骨架：核心 agent + 电话域/消息域 agents + samock 装载 + 世界空跑六场景 + 组装配/I1 | ✅ **2026-11-03 全过**（`run-demo.sh sa_demo`，11ms） |
+| **S2** | samock 世界 + **假电话 FSM**（Dialing→Ringing→Connected→Ended\|Failed）+ barge_in → demo 跑通 **C7 简版**（打电话→改口→转消息） | ⏳ 下一步 |
+| **S3** | M0 化：SA 语义层校验纯函数（V1–V8 子集）+ 坏 patch/坏模型对抗集（07 §5.2） | ⏳ |
+| S4+ | 漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8） | ⏳ |
 
-**待你确认**：
-1. 领域 agents 初集选哪几个？（建议 **电话域 + 消息域** 一组去跑 C7 简版；或 **电话 + 文件域** 覆盖 C7/C9）
-2. 第一 demo 场景是否就用 **C7 简版** 定验收？
-3. 目录命名是否用 `examples/sa_demo`（samock 放 `tests/plugin_demo/`）？还是想要更独立的摆放？
-4. 虚拟时钟 v1 用「samock 工具推进的模拟钟」是否够，还是要上全套双时钟域（N1 完整）？
+**落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；
+摆放 = `examples/sa_demo/` + `tests/plugin_demo/samock.cpp`；虚拟钟 v1 = **工具推进**的模拟钟（够用）。
 
 ## 六、关联
 

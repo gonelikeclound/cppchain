@@ -66,6 +66,7 @@ KNOWN_DEMOS=(
   "wf_eval:主动智能 Workflow 生成验收——12 例矩阵 + 调度模拟（需 LLM 端点）"
   "proactive:主动智能演示——ask_user 菜单澄清 → 易读 IR；--intent/--cases 批量自动作答（需 LLM 端点）"
   "phantasma_demo:problems/50 防幻觉信号灯——范围域 + 强制查证 + 豁免信号三场景（离线）"
+  "sa_demo:SystemAgent 骨架（S1，离线）——核心 + 电话/消息域 agents + samock 世界空跑"
   "file_retrieval_eval:problems/02 超长工具返回七法统一评测——grep/提取/采样/翻页 × 8 任务（离线）"
   "file_route_live:problems/02 S6 真机评测——路由预取臂 vs 模型自选工具臂（需 LLM 端点）"
 )

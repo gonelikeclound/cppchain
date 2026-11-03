@@ -45,6 +45,8 @@ set(PROXY_EXAMPLE_TARGETS proxy_call)
 # P1.5 声明式配置（arch 25）demo：declarations.configs 三形态 + ${workdir} 运行变量（纯离线）
 set(CONFIG_DECL_EXAMPLE_TARGETS config_decl)
 set(PHANTASMA_EXAMPLE_TARGETS phantasma_demo)
+# SystemAgent（problems/64）骨架 demo（S1）：核心 + 电话/消息域 agents + samock 世界（全离线）
+set(SA_EXAMPLE_TARGETS sa_demo)
 # problems/02 S6 真机评测：file_context 路由臂 vs 模型自选工具臂（需 .env LLM 端点）
 set(FILE_ROUTE_LIVE_EXAMPLE_TARGETS file_route_live)
 # arch 26 project 自管理（第一刀）demo：目录化多文件 + 多任务独立对话 + 项目级注入（纯离线）
@@ -78,6 +80,7 @@ list(APPEND EXAMPLE_TARGETS approve_interrupt)
 list(APPEND EXAMPLE_TARGETS ${PROXY_EXAMPLE_TARGETS})  # proxy_call：wfr-㊿ 子 workflow 调用（离线）
 list(APPEND EXAMPLE_TARGETS ${CONFIG_DECL_EXAMPLE_TARGETS})  # config_decl：P1.5 声明式配置（离线）
   list(APPEND EXAMPLE_TARGETS ${PHANTASMA_EXAMPLE_TARGETS})  # phantasma_demo：防幻觉信号灯（离线）
+list(APPEND EXAMPLE_TARGETS ${SA_EXAMPLE_TARGETS})  # sa_demo：SystemAgent 骨架 S1（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_EXAMPLE_TARGETS})  # project_run：arch 26 project 结构（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_DRIVE_EXAMPLE_TARGETS})  # project_drive：arch 27 调度循环（离线）
 list(APPEND EXAMPLE_TARGETS ${LONGDOC_EXAMPLE_TARGETS})  # longdoc：arch 28 超长内容通用方法（离线）
@@ -152,10 +155,25 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_http_curl cppchain_model)
   elseif(t IN_LIST MODEL_EXAMPLE_TARGETS)
     target_link_libraries(${t} PRIVATE cppchain_model)
+  elseif(t IN_LIST SA_EXAMPLE_TARGETS)
+    # sa_demo：Agent 组 + 动态工具加载（load_dynamic_tools 在 cppchain_tool）
+    target_link_libraries(${t} PRIVATE cppchain_agent cppchain_tool)
   else()
     target_link_libraries(${t} PRIVATE cppchain_message)
   endif()
 endforeach()
+
+# ---- SA 专属 mock 库：samock（problems/64 Round 2：mock 全进独立 so）----
+# 源在 tests/plugin_demo/（与 sidefx_notify 同地同居）；构建随 examples 出，供 sa_demo dlopen。
+# 纪律同 plugin_demo：纯 C descriptor + 裸函数指针，不链 cppchain（同 tool_plugin.hpp 契约）。
+# 输出到 examples 构建目录 → 与 sa_demo 同目录，demo 经 load_dynamic_tools 定位（SA_SAMOCK_DIR）。
+add_library(samock SHARED ../tests/plugin_demo/samock.cpp)
+target_include_directories(samock PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(samock SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+target_compile_options(samock PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(samock PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_dependencies(sa_demo samock)
+target_compile_definitions(sa_demo PRIVATE SA_SAMOCK_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 # mcp_mock（纯 server）：零 cppchain 库依赖，只用 nlohmann（SYSTEM 压三方告警）
 target_include_directories(mcp_mock SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
