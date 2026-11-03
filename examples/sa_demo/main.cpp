@@ -28,12 +28,15 @@
 #include <cppchain/model/task.hpp>
 #include <cppchain/tool/registry.hpp>
 
+#include "sa_guard.hpp"  // S3（M0）：SA 语义层校验纯函数
+
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
 #include <expected>
 #include <filesystem>
 #include <generator>
+#include <map>
 #include <print>
 #include <span>
 #include <string>
@@ -297,6 +300,16 @@ bool all_read_only(ToolRegistry const& reg) {
   return true;
 }
 
+// S3：转录里是否出现过"对某工具的 status=error 回喂"（运行时拒绝证据）。
+bool has_tool_error(agent::Agent const& a, std::string const& tool) {
+  for (Message const& m : a.transcript()) {
+    if (m.type == message::Role::Tool && m.status == "error" &&
+        m.text().find(tool) != std::string::npos)
+      return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 int main() {
@@ -364,13 +377,25 @@ int main() {
     ToolSpec const* s = samock.find(n);
     return *s;
   };
-  core_reg.add(copy_spec("samock_world_state"));
-  phone_reg.add(copy_spec("samock_make_call"));
-  phone_reg.add(copy_spec("samock_world_state"));
-  phone_reg.add(copy_spec("samock_clock_forward"));
-  phone_reg.add(copy_spec("samock_milestones"));  // 电话域读里程碑（观测归约）
-  msg_reg.add(copy_spec("samock_send_message"));
-  msg_reg.add(copy_spec("samock_world_state"));
+  std::vector<sa::Step> trace;  // S3：编排轨迹（域 agent 每把工具调用全录，供验证器过检）
+  // 录迹包装：不改工具语义，只在域注册表里包一层 recorder，
+  // 让每个域 agent 的工具调用落进 trace（M0 集成用的运行时事实）。
+  auto bind_agent_tool = [&trace](std::string const& agent, ToolSpec spec) {
+    std::string const name = spec.name;
+    ToolSpec::Handler base = spec.handler;
+    spec.handler = [&trace, agent, name, base](Json const& args, tool::ToolContext& ctx) {
+      trace.push_back(sa::Step{agent, name, args});
+      return base(args, ctx);
+    };
+    return spec;
+  };
+  core_reg.add(bind_agent_tool("core", copy_spec("samock_world_state")));
+  phone_reg.add(bind_agent_tool("phone", copy_spec("samock_make_call")));
+  phone_reg.add(bind_agent_tool("phone", copy_spec("samock_world_state")));
+  phone_reg.add(bind_agent_tool("phone", copy_spec("samock_clock_forward")));
+  phone_reg.add(bind_agent_tool("phone", copy_spec("samock_milestones")));  // 电话域读里程碑
+  msg_reg.add(bind_agent_tool("msg", copy_spec("samock_send_message")));
+  msg_reg.add(bind_agent_tool("msg", copy_spec("samock_world_state")));
 
   ScriptModel model_core, model_phone, model_msg;
 
@@ -519,10 +544,138 @@ int main() {
 
   for (std::string const& line : s2.lines) std::println("{}", line);
 
+  // ================= S3 · M0 化：SA 语义层校验纯函数 + 坏编排对抗集 ================
+  std::println("\n———— S3 · M0 化：SA 语义层校验纯函数 + 坏编排对抗集 ————");
+  std::println("规则：不需要 LLM/世界/时钟，纯函数即判（07 §0）—— 单元自检直灌坏样本，集成过检真实轨迹\n");
+
+  Verdict s3;
+  auto r3 = [&](bool b, std::string what) { s3.c(b, std::move(what)); };
+  auto expect_clean = [&](std::vector<sa::Issue> issues, std::string what) {
+    bool const ok = issues.empty();
+    r3(ok, std::move(what) + (ok ? std::string()
+                                 : std::string("（违规=" + issues.front().message + "）")));
+  };
+  auto expect_flagged = [&](std::vector<sa::Issue> issues, std::string const& code,
+                            std::string what) {
+    bool hit = false;
+    for (sa::Issue const& i : issues)
+      if (i.code == code) hit = true;
+    r3(hit, std::move(what));
+  };
+  std::vector<std::string> e3;  // S3 run_tool 失败收集
+
+  // 编排常量：白名单 = 实际发给各 agent 的注册表（防漂移 —— 验证器看的是部署真相）
+  auto names_of = [](ToolRegistry const& r) {
+    std::vector<std::string> n;
+    for (ToolSpec const& s : r.all()) n.push_back(s.name);
+    return n;
+  };
+  std::map<std::string, std::vector<std::string>> const whitelist = {
+      {"core", names_of(core_reg)}, {"phone", names_of(phone_reg)}, {"msg", names_of(msg_reg)}};
+  std::vector<std::string> read_only_tools;
+  for (ToolSpec const& s : samock.all())
+    if (s.read_only) read_only_tools.push_back(s.name);
+  std::vector<std::string> const vocabulary = {"dialing", "ringing", "rejected", "answered", "ended"};
+  std::vector<std::string> const known_domains = {"电话域", "消息域"};
+  Json const limits = Json{{"core_consultations", 3}, {"phone_tool_rounds", 8},
+                           {"msg_tool_rounds", 4},    {"call_retry_attempts", 2}};
+  std::vector<sa::TaskSpec> const tasks = {
+      {"电话域", "就晚饭安排达成答复", "已获得答复 ∨ 已切换渠道并送达"},  // 04 §5 N_assert 语义
+      {"消息域", "向妈妈确认晚饭", "消息送达（delivered=true）"},
+  };
+
+  // ① 单元自检：直灌好/坏样本（M0「oracle 直灌」的组编排版）—— 合法全过、对抗全拒
+  std::vector<sa::Step> const good = {
+      {"phone", "samock_make_call", Json{{"call_id", "x"}, {"number", "1"}, {"attempt", 1}}},
+      {"phone", "samock_clock_forward", Json{{"seconds", 15}}},
+      {"phone", "samock_make_call", Json{{"call_id", "x"}, {"number", "1"}, {"attempt", 2}}},
+  };
+  expect_clean(sa::check_unknown_tools(good, whitelist), "合法轨迹①：域白名单全过");
+  expect_clean(sa::check_dedup(good, 2), "合法轨迹①：attempt1/attempt2 不同参不算循环");
+
+  expect_flagged(sa::check_unknown_tools({{"phone", "samock_send_sms", Json::object()}}, whitelist),
+                 "I01", "对抗①：电话域幻觉出不存在的工具 samock_send_sms → I01 拒");
+  expect_flagged(sa::check_unknown_tools({{"msg", "samock_make_call", Json::object()}}, whitelist),
+                 "I01", "对抗②：消息域去打电话（越域）→ I01 拒");
+  expect_flagged(sa::check_unknown_tools({{"typo", "samock_world_state", Json::object()}}, whitelist),
+                 "I00", "对抗③：未知 agent（拼写错误）→ I00 拒");
+  expect_flagged(sa::check_core_tools_read_only({"samock_make_call"}, read_only_tools), "I02",
+                 "对抗④：把写工具塞给核心 → I02 拒（I1）");
+  expect_flagged(sa::check_dispatch({"总经办"}, known_domains), "I03",
+                 "对抗⑤：分诊路由到不存在的域「总经办」→ I03 拒");
+  expect_flagged(sa::check_vocabulary({"audio.frame"}, vocabulary), "I04",
+                 "对抗⑥：词汇表外里程碑 audio.frame → I04 拒");
+  expect_flagged(sa::check_budgets(Json{{"core_consultations", 4}}, limits), "I05",
+                 "对抗⑦：核心咨询 4 > 3（V4 预算）→ I05 拒");
+  expect_flagged(sa::check_budgets(Json{{"call_retry_attempts", 3}}, limits), "I05",
+                 "对抗⑦b：电话重试 3 > 2（V4 预算）→ I05 拒");
+  std::vector<sa::Step> const loop = {
+      {"phone", "samock_make_call", Json{{"call_id", "x"}, {"number", "1"}, {"attempt", 1}}},
+      {"phone", "samock_make_call", Json{{"call_id", "x"}, {"number", "1"}, {"attempt", 1}}},
+      {"phone", "samock_make_call", Json{{"call_id", "x"}, {"number", "1"}, {"attempt", 1}}},
+  };
+  expect_flagged(sa::check_dedup(loop, 2), "I06",
+                 "对抗⑧：同工具同参 3 次（S4 循环迹象）→ I06 拒");
+  expect_flagged(sa::check_task_templates({{"档案", "整理文件", ""}}), "I07",
+                 "对抗⑨：任务模板缺 goal_assertion → I07 拒");
+  expect_clean(sa::check_task_templates(tasks), "任务模板：电话/消息两模板 goal + assertion 齐备 ✓");
+
+  // ② 集成：S2 真实编排轨迹 + samock 里程碑全量过检（消费运行时事实，非宿主口报）
+  std::vector<sa::Issue> all_issues;
+  for (auto const& chunk : {sa::check_unknown_tools(trace, whitelist),
+                            sa::check_dispatch({"电话域", "消息域"}, known_domains),
+                            sa::check_dedup(trace, 2)})
+    all_issues.insert(all_issues.end(), chunk.begin(), chunk.end());
+  for (auto const& c : sa::check_core_tools_read_only(names_of(core_reg), read_only_tools))
+    all_issues.push_back(c);
+  for (auto const& c : sa::check_task_templates(tasks)) all_issues.push_back(c);
+
+  Json used = sa::usage_from_trace(trace);
+  used["core_consultations"] = static_cast<std::int64_t>(model_core.invoked);
+
+  std::vector<std::string> milestone_kinds;
+  e3.clear();
+  Json mi = run_tool(samock, "samock_milestones", Json{{"call_id", "c1"}, {"since", 0}}, e3);
+  bool const mi_ok = !mi.empty() && mi.contains("milestones");
+  r3(mi_ok, "集成：读回 c1 全集里程碑（7 条）供词汇表过检");
+  if (mi_ok)
+    for (Json const& m : mi["milestones"]) milestone_kinds.push_back(m.value("kind", ""));
+  for (auto const& c : sa::check_vocabulary(milestone_kinds, vocabulary)) all_issues.push_back(c);
+  for (auto const& c : sa::check_budgets(used, limits)) all_issues.push_back(c);
+
+  expect_clean(all_issues, "集成：S2 全量轨迹过检（白名单/只读/分诊/词汇表/预算/去重/任务断言）");
+  std::println("  用量账（轨迹自证）：{}", used.dump());
+  std::string kinds;
+  for (std::string const& k : milestone_kinds) {
+    if (!kinds.empty()) kinds += ",";
+    kinds += k;
+  }
+  std::println("  里程碑 kinds（{} 条）：{}", milestone_kinds.size(), kinds);
+  s3.note("V1–V8 落地（agent-group 取舍，64 §5.5 S3）：V4 预算→I05 · V6 断言→I07；"
+          "I01/I03/I04/I06 = 组编排层新增不变式（域白名单/分诊/词汇表/循环）；"
+          "V1/V2/V3/V5/V7/V8 依赖 DAG/waits/pivot，本形态无 → 标注 N/A 不硬凑。");
+
+  // ③ 运行时对抗：脚本桩弹幻觉工具 → ToolNode 当场拒绝（library 既有失败关闭）
+  model_phone.replies = {
+      ai_call("samock_send_sms", Json{{"to", "妈妈"}, {"text", "喂"}}),
+      message::ai_message("哦，我没有 samock_send_sms 这个工具，改用已有工具继续。"),
+  };
+  auto adv = phone_agent.invoke(one_human("对抗：尝试用不存在的工具 samock_send_sms 发短信。"));
+  r3(adv.has_value(), "运行时对抗：幻觉工具被拒后 agent 咨询仍正常收尾（错误回喂模型）");
+  r3(has_tool_error(phone_agent, "samock_send_sms"),
+     "运行时对抗：转录出现 status=error 的「unknown tool: samock_send_sms」（ToolNode 拒）");
+  e3.clear();
+  Json wa = world(samock, e3);
+  bool const clean_world = e3.empty() && wa["messages"].size() == 1 && wa["side_effects"].size() == 3;
+  r3(clean_world, "运行时对抗：世界零污染 —— 消息仍 1 条、台账仍 3 笔（幻觉副作用从未发生）");
+  s3.note("分工：验证器 = 审（对轨迹静态判）· ToolNode = 挡（未知工具回喂 error 不中断）——两层各自归位。");
+
+  for (std::string const& line : s3.lines) std::println("{}", line);
+
   // ---- 汇总 ----
   std::println("");
-  if (all && i1_core && s2.ok) {
-    std::println("验收结论：S1 + S2 全部通过 —— samock 装载 ✓ · 世界空跑六场景 ✓ · SA 组装配 + I1 ✓ · C7 简版组织闭环 ✓");
+  if (all && i1_core && s2.ok && s3.ok) {
+    std::println("验收结论：S1 + S2 + S3 全部通过 —— samock 世界 ✓ · C7 简版闭环 ✓ · M0 验证器纯函数 + 对抗集 ✓");
     return 0;
   }
   std::println("验收结论：存在失败项，见上 [✗]。");
