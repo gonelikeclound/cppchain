@@ -65,6 +65,24 @@
 - 下一步：**S2** —— 假电话 FSM（Dialing→Ringing→Connected→Ended|Failed）+ barge_in 进 samock，
   C7 简版组织闭环（核心→电话域→消息域，打电话→改口→转消息），先离线脚本桩、再决定真机。在线验证再收口。
 
+### 第 4 轮（2026-11-03 · S2 落地）
+
+- **S2 全过（10ms）**：假电话 FSM 进 samock + C7 简版组织闭环，24 项断言全绿。
+- **samock 新增**：
+  - **平台侧电话 FSM**：每次拨号 = 一个 Session，`phase = fold(剧本, dialed_at, now)` **纯派生、无后台线程**
+    （可回放、逐字节确定）；剧本 = attempt1 振铃@3s/拒接@10s、attempt2 振铃@3s/接通@8s；
+  - **里程碑事件**：dialing / ringing / rejected / answered / ended —— 相位跳变时**原子发一次**（幂等）、
+    事件时间取精确时刻（非查询时刻）；`samock_milestones` 按 **seq 游标**读增量（= 观测归约）；
+  - **`samock_barge_in`**：控制平面注入用户改口（仅 Talking 态有效——负路径留 F 系列故障注入），
+    平台挂断并发 `ended{reason=user_redirected}`。
+- **demo 新增 S2 导演编排**（全离线，脚本桩模型**弹 tool_calls**、Agent 循环+ToolNode 真跑工具，非导演代跑）：
+  核心 2 次咨询（初始分诊 + 改道编排 ≤3）· 电话域域内拒接→重拨 attempt2→接通（核心不醒）·
+  barge_in 直灌 · 消息域 send_message 收尾。**24 项断言**：世界终态（c1 ended / user_redirected /
+  redirect_to_messaging）· 里程碑全序恰 7 条（dialing:1,ringing:1,rejected:1,dialing:2,ringing:2,answered:2,
+  ended:2）· seq==7 · now_sec==27（零真实等待）· 核心模型咨询==2（拒接/振铃/重拨全程未打扰核心，
+  C7「唤醒 7→3」方向兑现）· 电话域 9 轮 / 消息域 2 轮。
+- 下一步：**S3** —— SA 语义层校验纯函数（V1–V8 子集）+ 坏 patch/坏模型对抗集（07 §5.2）。
+
 ### 第 1 轮（2026-11-03）
 
 - 用户指认研究源：`docs/01-discuss/system-agent/`（01–07 + `_research/01–05`）+
@@ -155,8 +173,8 @@ examples/CMakeLists.txt              # add_library(samock SHARED ../tests/plugin
 |---|---|---|---|
 | 世界模型 | N2 | 内存 `World`（calls/messages/side_effects 只追加台账 + seq 单调序号）+ 三诚实度
   （honest/lying/partial）；`world_state` 序列化整个世界（**断言唯一入口，永远说真话**）；重置含钟/诚实度 | ✅ **S1 已装**（`samock_world_state`/`samock_world_reset`；断言逻辑在 demo 侧 C++，见 07「查世界不查返回值」） |
-| 假电话 FSM | N3 | `make_call` v0 仅建 dialing 通话；S2 升级 phone-script FSM（Dialing→…→Ended\|Failed）+
-  `barge_in` / `ignore_sigterm`（C10 卡死）/ partial 链路断；消息侧 v0 已入（partial=在途 delivered=false） | 🔶 v0 已装（`samock_make_call`/`samock_send_message`），**完整 FSM = S2** |
+| 假电话 FSM | N3 | 每次拨号=Session，`phase=fold(剧本,dialed_at,now)` 纯派生；剧本=attempt1 拒接/attempt2 接通；
+  里程碑（dialing/ringing/rejected/answered/ended）seq 游标增量读；`samock_barge_in` 控制平面（仅 Talking 有效） | ✅ **S2 已装**（`samock_make_call`+`samock_milestones`+`samock_barge_in`；消息侧仍 v0） |
 | 事件源 | — | `event_storm`（C6 洪峰注入）+ 源侧聚合（G-l 简化版） | ⏳ 待 S2+ |
 | 虚拟时钟 | N1 | **工具推进**的模拟钟（`samock_clock_forward`，确定性从 0 起步、累加式）；全套 quiescence
   调度器留待 M2 需要时再上 | ✅ **S1 已装** |
@@ -183,8 +201,8 @@ examples/CMakeLists.txt              # add_library(samock SHARED ../tests/plugin
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | **S1** | `examples/sa_demo` 骨架：核心 agent + 电话域/消息域 agents + samock 装载 + 世界空跑六场景 + 组装配/I1 | ✅ **2026-11-03 全过**（`run-demo.sh sa_demo`，11ms） |
-| **S2** | samock 世界 + **假电话 FSM**（Dialing→Ringing→Connected→Ended\|Failed）+ barge_in → demo 跑通 **C7 简版**（打电话→改口→转消息） | ⏳ 下一步 |
-| **S3** | M0 化：SA 语义层校验纯函数（V1–V8 子集）+ 坏 patch/坏模型对抗集（07 §5.2） | ⏳ |
+| **S2** | samock **假电话 FSM**（Session 剧本 fold + 里程碑 seq 游标 + barge_in 控制平面）→ demo 跑通 **C7 简版**（打电话→改口→转消息，离线脚本桩组织闭环，24 断言） | ✅ **2026-11-03 全过**（10ms） |
+| **S3** | M0 化：SA 语义层校验纯函数（V1–V8 子集）+ 坏 patch/坏模型对抗集（07 §5.2） | ⏳ 下一步 |
 | S4+ | 漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8） | ⏳ |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；

@@ -1,20 +1,25 @@
-// demo: sa_demo —— SystemAgent（SA）骨架 demo（S1，纯离线）
+// demo: sa_demo —— SystemAgent（SA）骨架 demo（S1 + S2，纯离线）
 //
 // SA 不是一个 agent，而是一组 agent（problems/64 §5.1）：
 //   核心 agent（分诊/编排，只有只读观测工具 = I1 最小形态）
-//   + 电话域 agent（samock 的 make_call/时钟）
+//   + 电话域 agent（samock 的 make_call/FSM 里程碑/时钟）
 //   + 消息域 agent（samock 的 send_message）
 // 假世界全部来自独立 so：tests/plugin_demo/samock.cpp → libsamock.so。
 //
 // S1 里程碑内容（problems/64 §5.5 S1）：
-//   ① samock 装载：tool::load_dynamic_tools（wfr 动态工具库同一加载器，
-//      fail-closed：dlopen/符号/版本/名字/缺 handler 任一失败整体失败）；
-//   ② 世界空跑：samock_world_state 序列化整个世界，所有断言**查世界不查返回值**
-//      （机制测试不经自然语言，工具直灌 —— 07 R2 / oracle-patch 精神）；
-//      脚本覆盖：空世界 → 真实写（honest）→ 说谎被抓（lying）→ 半写（partial）
-//      → 虚拟钟推进 → 世界重置；
-//   ③ SA 组装配：核心 + 电话域 + 消息域三实例构造（模型=脚本桩，S1 不发起对话；
-//      组织闭环 + 假电话 FSM 在 S2 / C7 简版）。
+//   ① samock 装载：tool::load_dynamic_tools（wfr 动态工具库同一加载器，fail-closed）；
+//   ② 世界空跑六场景：断言**查世界不查返回值**（机制测试不经自然语言，工具直灌）；
+//   ③ SA 组装配：核心 + 电话域 + 消息域三实例构造 + I1（核心工具集全只读）。
+//
+// S2 里程碑内容（problems/64 §5.5 S2，C7 简版组织闭环）：
+//   ① samock 新增**平台侧电话 FSM**：每次拨号 = 一个 Session，状态 = fold(剧本, dialed_at, now)
+//      （纯派生、无后台线程、逐字节确定）；剧本 = attempt1 振铃→拒接 / attempt2 振铃→接通；
+//   ② **里程碑事件**（dialing/ringing/rejected/answered/ended）相位跳变时原子发一次（幂等），
+//      按 seq 游标增量读（samock_milestones = 观测归约）；**samock_barge_in** 控制平面注入
+//      （仅 Talking 有效，平台挂断发 ended{user_redirected}）；
+//   ③ **导演编排**（离线脚本桩弹 tool_calls，Agent 循环真跑工具）：核心 2 次咨询（初始分诊+改道），
+//      电话域域内拒接→重拨 attempt2→接通，barge_in 直灌，消息域 send_message 收尾；
+//      24 项断言 = 世界终态 + 里程碑全序 7 条 + 唤醒账（核心≤3）。
 //
 // 运行：./run-demo.sh sa_demo    （全离线；CI 纪律 R5：不碰真模型）
 #include <cppchain/agent/agent.hpp>
@@ -23,6 +28,7 @@
 #include <cppchain/model/task.hpp>
 #include <cppchain/tool/registry.hpp>
 
+#include <cstdint>
 #include <cstdlib>
 #include <deque>
 #include <expected>
@@ -53,8 +59,10 @@ constexpr char const* kSamockTools[] = {
     "samock_clock_forward",  // 测试控制：推进虚拟钟 N 秒
     "samock_set_honesty",    // 测试控制：honest / lying / partial
     "samock_world_reset",    // 测试控制：清空世界 + 钟 + 诚实度（跨用例隔离）
-    "samock_make_call",      // 能力（v0）：拨打电话（S2 换完整假电话 FSM）
+    "samock_make_call",      // 能力（S2）：假电话 FSM（每次拨号=一个 Session，attempt 显式）
+    "samock_barge_in",       // 控制平面（S2）：用户改口直灌（仅通话中有效）
     "samock_send_message",   // 能力（v0）：发送消息
+    "samock_milestones",     // 只读（S2）：通话里程碑增量（观测归约，按 seq 游标）
 };
 
 // 脚本化模型（纯离线桩，照 phantasma_demo 的 ScriptModel）。
@@ -121,6 +129,20 @@ Json run_tool(ToolRegistry const& reg, std::string const& name, Json args,
 // 一键取世界快照（断言入口）。
 Json world(ToolRegistry const& reg, std::vector<std::string>& fail) {
   return run_tool(reg, "samock_world_state", Json::object(), fail);
+}
+
+// 一个脚本桩的"人类输入"（每次咨询=独立上下文）。
+std::vector<Message> one_human(std::string text) {
+  return {message::human_message(std::move(text))};
+}
+
+// 脚本桩的"带 tool_calls 的 AI 消息"：给 ToolCall 造唯一 id（Agent 循环按 id 回填 ToolMessage）。
+Message ai_call(std::string name, Json args, std::string text = "…") {
+  static std::uint64_t g = 0;
+  Message m = message::ai_message(std::move(text));
+  m.tool_calls.push_back(
+      message::ToolCall{"sa_tc_" + std::to_string(++g), std::move(name), std::move(args)});
+  return m;
 }
 
 // 一个场景的核对条目。
@@ -346,6 +368,7 @@ int main() {
   phone_reg.add(copy_spec("samock_make_call"));
   phone_reg.add(copy_spec("samock_world_state"));
   phone_reg.add(copy_spec("samock_clock_forward"));
+  phone_reg.add(copy_spec("samock_milestones"));  // 电话域读里程碑（观测归约）
   msg_reg.add(copy_spec("samock_send_message"));
   msg_reg.add(copy_spec("samock_world_state"));
 
@@ -360,7 +383,7 @@ int main() {
                     AgentOptions{.system_prompt =
                                      "你是 SA 电话域 agent：你的域内能力是打电话（samock_make_call，通话由假电话 FSM 驱动）；"
                                      "你只上报里程碑（拨号/拒接/接通/挂断），不碰其他域。",
-                                 .max_iterations = 8, .thread_id = "", .checkpointer = nullptr});
+                                 .max_iterations = 12, .thread_id = "", .checkpointer = nullptr});
   Agent msg_agent(model_msg, msg_reg,
                   AgentOptions{.system_prompt =
                                    "你是 SA 消息域 agent：你的域内能力是发送消息（samock_send_message）；"
@@ -379,13 +402,127 @@ int main() {
                i1_core ? "通过" : "未通过");
   for (Agent const* a : {&core_agent, &phone_agent, &msg_agent}) (void)a;  // 证明已构造
 
-  std::println("\nS2 预告：假电话 FSM（Dialing→Ringing→Connected→Ended|Failed）+ barge_in"
-               " 进 samock，跑 C7 简版（打电话→改口→转消息）。");
+  // ================= S2 · C7 简版：打电话 → 改口 → 转消息（组织闭环，离线脚本桩） =================
+  std::println("\n———— S2 · C7 简版：打电话 → 改口 → 转消息 ————");
+  std::println("组织形态：核心 agent 分诊/改道（2 次咨询）· 电话域 agent 域内处理拒接重试 · 消息域 agent 收尾\n");
+
+  Verdict s2;
+  auto rec = [&](bool b, std::string what) { s2.c(b, std::move(what)); };
+  std::vector<std::string> e2;  // 导演层 run_tool 失败收集
+
+  // (1) 核心咨询①：初始分诊 → 电话域
+  model_core.replies = {message::ai_message("→电话域：给妈妈打电话问她晚上来不来吃饭。")};
+  auto core1 = core_agent.invoke(one_human("给妈妈打电话问她晚上来不来吃饭。"));
+  rec(core1.has_value() && core1->text().find("电话域") != std::string::npos,
+      "核心咨询①（初始分诊）→ 路由到电话域");
+
+  // (2) 电话域咨询①：拒接 → 按 retry_policy 重拨 attempt2 → 接通（域内闭环，核心不醒）
+  model_phone.replies = {
+      ai_call("samock_make_call", Json{{"call_id", "c1"}, {"number", "13800000000"}, {"attempt", 1}}),
+      ai_call("samock_clock_forward", Json{{"seconds", 15}}),
+      ai_call("samock_milestones", Json{{"call_id", "c1"}, {"since", 0}}),
+      ai_call("samock_make_call", Json{{"call_id", "c1"}, {"number", "13800000000"}, {"attempt", 2}}),
+      ai_call("samock_clock_forward", Json{{"seconds", 12}}),
+      ai_call("samock_milestones", Json{{"call_id", "c1"}, {"since", 3}}),
+      message::ai_message("电话域：attempt1 拒接 → 按重拨策略重试 attempt2 → 已接通。"),
+  };
+  auto phone1 = phone_agent.invoke(
+      one_human("域内任务：给妈妈打电话问她晚上来不来吃饭。拒接就按你的重拨策略处理，不要打扰核心。"));
+  rec(phone1.has_value(), "电话域咨询①：拒接 → 重拨 attempt2 → 接通（retry_policy 在域内，不打扰核心）");
+
+  // (3) 用户改口 → 控制平面 barge_in（导演代用户直灌，不经核心）
+  Json barge = run_tool(samock, "samock_barge_in",
+                        Json{{"call_id", "c1"}, {"intent", "redirect_to_messaging"}}, e2);
+  rec(!barge.empty() && barge.value("status", "") == "redirected",
+      "用户改口「算了，发个微信就行」→ barge_in 直灌控制平面（仅通话中有效）");
+
+  // (4) 电话域咨询②：观察 ended{user_redirected} → 上报核心改道
+  model_phone.replies = {
+      ai_call("samock_milestones", Json{{"call_id", "c1"}, {"since", 6}}),
+      message::ai_message("电话域：妈妈改口让发微信，通话已改道结束（ended user_redirected），请核心编排收尾。"),
+  };
+  auto phone2 =
+      phone_agent.invoke(one_human("通话有了新进展，查一下里程碑并汇报。"));
+  rec(phone2.has_value() && phone2->text().find("微信") != std::string::npos,
+      "电话域咨询②：读到 ended{user_redirected} → 上报核心改道");
+
+  // (5) 核心咨询②：改道编排 → 消息域
+  model_core.replies = {message::ai_message("→消息域：妈妈改口，让发微信。")};
+  auto core2 =
+      core_agent.invoke(one_human("电话域上报：妈妈改口要发微信，不再电话问。请你编排收尾。"));
+  rec(core2.has_value() && core2->text().find("消息") != std::string::npos,
+      "核心咨询②（改道编排）→ 路由到消息域");
+
+  // (6) 消息域咨询：发消息 → 送达回执
+  model_msg.replies = {
+      ai_call("samock_send_message", Json{{"msg_id", "m5"}, {"to", "妈妈"},
+                                          {"text", "你晚上来不来吃饭？我提前准备。"}}),
+      message::ai_message("消息域：已发送到妈妈并确认送达。"),
+  };
+  auto msg1 = msg_agent.invoke(one_human("域内任务：给妈妈发微信问晚上来不来吃饭。"));
+  rec(msg1.has_value() && msg1->text().find("送达") != std::string::npos,
+      "消息域咨询：send_message → 送达回执");
+
+  // —— 世界终态断言（查世界、不查返回值）——
+  e2.clear();
+  Json wf = world(samock, e2);
+  if (e2.empty()) {
+    rec(wf["calls"]["c1"].value("state", "") == "ended", "世界终态：c1.state == ended");
+    rec(wf["calls"]["c1"].value("ended_reason", "") == "user_redirected",
+        "ended_reason == user_redirected（用户改道，非失败）");
+    rec(wf["calls"]["c1"].value("ended_disposition", "") == "redirect_to_messaging",
+        "ended_disposition == redirect_to_messaging");
+    rec(wf.value("now_sec", -1) == 27, "虚拟钟 now_sec == 27（全程无真实等待）");
+    rec(wf["messages"].size() == 1 && wf["messages"][0].value("to", "") == "妈妈" &&
+            wf["messages"][0].value("delivered", false) == true,
+        "世界消息表：1 条 · 收件人=妈妈 · delivered=true（查询结果真实落在世界）");
+  } else {
+    rec(false, "世界读取失败：" + e2.front());
+  }
+
+  // —— 里程碑全序断言（C7 唯一感官：7 条事件，零音频/零逐句转写）——
+  e2.clear();
+  Json miles = run_tool(samock, "samock_milestones", Json{{"call_id", "c1"}, {"since", 0}}, e2);
+  if (!miles.empty()) {
+    std::string got;
+    bool first = true;
+    for (Json const& m : miles["milestones"]) {
+      if (!first) got += ",";
+      first = false;
+      got += m.value("kind", "?") + ":" + std::to_string(m.value("attempt", 0));
+    }
+    std::string const exp = "dialing:1,ringing:1,rejected:1,dialing:2,ringing:2,answered:2,ended:2";
+    rec(got == exp, "里程碑全序 == 「" + exp + "」 (实测：" + got + ")");
+    rec(miles.value("seq", -1) == 7, "里程碑 seq == 7（7 条事件全程可回放）");
+    if (!miles["milestones"].empty()) {
+      auto const ended = miles["milestones"].back();
+      rec(ended.value("reason", "") == "user_redirected",
+          "ended 里程碑 reason == user_redirected");
+      rec(ended.value("disposition", "") == "redirect_to_messaging",
+          "ended 里程碑 disposition == redirect_to_messaging");
+    }
+  } else {
+    rec(false, "里程碑读取失败：seq 断言跳过");
+  }
+
+  // —— 唤醒账（C7 口径：SA 唤醒从 7 降到 3 的方向在此兑现）——
+  rec(model_core.invoked == 2,
+      "核心模型咨询共 2 次（初始分派 + 改道编排）≤ 3 —— 拒接/振铃/重拨全程在电话域内部，未打扰核心");
+  rec(model_phone.invoked == 9, "电话域模型消耗 9 轮（拒接→重拨→接通→观察改道全在域内）");
+  rec(model_msg.invoked == 2, "消息域模型消耗 2 轮（发送 + 收尾汇报）");
+
+  s2.note("职责切分（04 §5 精缩）：拒接→重拨 = 电话域 retry_policy（域内契约）；挂断后做什么 = 核心（改道编排）；"
+          "到没到 = 世界断言（delivered）。");
+  s2.note("观测归约：SA 全程只看到 7 条里程碑 —— 音频/逐句转写不存在于任何上下文（04 §6 词汇表）。");
+  s2.note("Barge-in 走控制平面（不经核心也不经业务体）：平台侧约束=仅通话中（Talking）有效，"
+          "负路径（振铃时打断应被拒）留给后续故障注入 F 系列，本 demo 只走有效路径。");
+
+  for (std::string const& line : s2.lines) std::println("{}", line);
 
   // ---- 汇总 ----
   std::println("");
-  if (all && i1_core) {
-    std::println("验收结论：S1 全部通过 —— samock 装载 ✓ · 世界空跑六场景 ✓ · SA 组装配 + I1 ✓");
+  if (all && i1_core && s2.ok) {
+    std::println("验收结论：S1 + S2 全部通过 —— samock 装载 ✓ · 世界空跑六场景 ✓ · SA 组装配 + I1 ✓ · C7 简版组织闭环 ✓");
     return 0;
   }
   std::println("验收结论：存在失败项，见上 [✗]。");
