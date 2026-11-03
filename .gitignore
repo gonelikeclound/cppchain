@@ -10,6 +10,8 @@ tmp/
 
 # webui 测试报告快照（./run-tests-report.sh 生成，运行态非源码；git 不跟踪）
 web/tests_report.json
+# SA 编排台运行产物（sa_demo 每次运行写入；页面回退到内置 sample-tasklog.json）
+web/sa/sa_tasklog.json
 # run-webui.sh 启动时创建的 symlink（指向 build 产物，运行态不入库）
 web/cgi-bin/
 web/wfr_bin

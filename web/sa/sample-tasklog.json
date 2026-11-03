@@ -1,0 +1,419 @@
+{
+  "deterministic": true,
+  "schema": "sa-tasklog/v1",
+  "source": "sa_demo S1–S3 + S4（tasks：t1 C7 简版 / t2 消息直路 · 全离线脚本桩）",
+  "tasks": [
+    {
+      "dag": {
+        "edges": [
+          {
+            "from": "n_user",
+            "kind": "query",
+            "label": "query",
+            "to": "n_core1"
+          },
+          {
+            "from": "n_core1",
+            "kind": "dispatch",
+            "label": "→电话域",
+            "to": "n_call"
+          },
+          {
+            "from": "n_user",
+            "kind": "control",
+            "label": "改口(barge_in)",
+            "to": "n_call"
+          },
+          {
+            "from": "n_call",
+            "kind": "report",
+            "label": "ended 上报",
+            "to": "n_core2"
+          },
+          {
+            "from": "n_core2",
+            "kind": "dispatch",
+            "label": "→消息域",
+            "to": "n_msg"
+          },
+          {
+            "from": "n_msg",
+            "kind": "world",
+            "label": "写世界",
+            "to": "n_world"
+          }
+        ],
+        "nodes": [
+          {
+            "id": "n_user",
+            "label": "用户",
+            "layer": 0,
+            "role": "user",
+            "row": 0
+          },
+          {
+            "detail": "分诊：→电话域（核心第 1 次咨询）",
+            "id": "n_core1",
+            "label": "核心",
+            "layer": 1,
+            "role": "core",
+            "row": 1
+          },
+          {
+            "detail": "FSM 域内：attempt1 拒接@10s → 按 retry_policy 重拨 attempt2 → 接通；拒接/振铃/接通均不打扰核心（04 §5 职责切分）",
+            "id": "n_call",
+            "label": "电话域",
+            "layer": 2,
+            "role": "phone",
+            "row": 1
+          },
+          {
+            "detail": "改道编排（核心第 2 次咨询）：收到 ended{user_redirected} → 改派消息域",
+            "id": "n_core2",
+            "label": "核心",
+            "layer": 3,
+            "role": "core",
+            "row": 1
+          },
+          {
+            "detail": "send_message{m5, 妈妈} → delivered=true",
+            "id": "n_msg",
+            "label": "消息域",
+            "layer": 4,
+            "role": "msg",
+            "row": 1
+          },
+          {
+            "detail": "c1 state=ended · reason=user_redirected · disposition=redirect_to_messaging · 消息=[妈妈, delivered] · 钟=27s",
+            "id": "n_world",
+            "label": "世界",
+            "layer": 5,
+            "role": "world",
+            "row": 1
+          }
+        ]
+      },
+      "facts": {
+        "clock_end_sec": 27,
+        "milestones": 7,
+        "model_calls_core": 2,
+        "verdict": "Completed · ended(user_redirected) · 消息=妈妈 delivered"
+      },
+      "id": "t1",
+      "messages": [
+        {
+          "at_sec": 0,
+          "from": "用户",
+          "kind": "user",
+          "node": "n_user",
+          "text": "给妈妈打电话问她晚上来不来吃饭。"
+        },
+        {
+          "at_sec": 0,
+          "from": "核心",
+          "kind": "dispatch",
+          "node": "n_core1",
+          "text": "→电话域：给妈妈打电话问她晚上来不来吃饭。"
+        },
+        {
+          "at_sec": 0,
+          "from": "电话域",
+          "kind": "tool",
+          "node": "n_call",
+          "text": "make_call{c1, 13800000000, attempt:1}",
+          "tool": "samock_make_call"
+        },
+        {
+          "at_sec": 0,
+          "from": "电话域",
+          "kind": "tool",
+          "node": "n_call",
+          "text": "clock_forward{15}",
+          "tool": "samock_clock_forward"
+        },
+        {
+          "at_sec": 15,
+          "from": "电话域",
+          "kind": "tool",
+          "node": "n_call",
+          "text": "milestones{since:0} → [dialing:1, ringing:1, rejected:1]",
+          "tool": "samock_milestones"
+        },
+        {
+          "at_sec": 15,
+          "from": "电话域",
+          "kind": "tool",
+          "node": "n_call",
+          "text": "make_call{c1, 13800000000, attempt:2} （retry_policy 重拨）",
+          "tool": "samock_make_call"
+        },
+        {
+          "at_sec": 15,
+          "from": "电话域",
+          "kind": "tool",
+          "node": "n_call",
+          "text": "clock_forward{12}",
+          "tool": "samock_clock_forward"
+        },
+        {
+          "at_sec": 27,
+          "from": "电话域",
+          "kind": "tool",
+          "node": "n_call",
+          "text": "milestones{since:3} → [dialing:2, ringing:2, answered:2] —— 已接通",
+          "tool": "samock_milestones"
+        },
+        {
+          "at_sec": 27,
+          "from": "电话域",
+          "kind": "ai",
+          "node": "n_call",
+          "text": "attempt1 拒接 → 按重拨策略重试 attempt2 → 已接通。"
+        },
+        {
+          "at_sec": 27,
+          "from": "用户",
+          "kind": "control",
+          "node": "n_call",
+          "text": "barge_in{intent: redirect_to_messaging} —— 直灌控制平面（不经核心，仅通话中有效）"
+        },
+        {
+          "at_sec": 27,
+          "from": "电话域",
+          "kind": "milestone",
+          "node": "n_call",
+          "text": "call.ended{attempt:2, reason:user_redirected, disposition:redirect_to_messaging}"
+        },
+        {
+          "at_sec": 27,
+          "from": "电话域",
+          "kind": "ai",
+          "node": "n_call",
+          "text": "妈妈改口让发微信，通话已改道结束。请核心编排收尾。"
+        },
+        {
+          "at_sec": 27,
+          "from": "核心",
+          "kind": "dispatch",
+          "node": "n_core2",
+          "text": "→消息域：妈妈改口，让发微信。"
+        },
+        {
+          "at_sec": 27,
+          "from": "消息域",
+          "kind": "tool",
+          "node": "n_msg",
+          "text": "send_message{m5, 妈妈, 你晚上来不来吃饭？我提前准备。}",
+          "tool": "samock_send_message"
+        },
+        {
+          "at_sec": 27,
+          "from": "消息域",
+          "kind": "ai",
+          "node": "n_msg",
+          "text": "已发送到妈妈并确认送达。"
+        },
+        {
+          "at_sec": 27,
+          "from": "世界",
+          "kind": "assert",
+          "node": "n_world",
+          "text": "世界断言：c1 state=ended · ended_reason=user_redirected · messages=[妈妈, delivered=true] · 钟=27s"
+        }
+      ],
+      "milestones_summary": [
+        {
+          "at": 0,
+          "kind": "dialing:1",
+          "seq": 0
+        },
+        {
+          "at": 3,
+          "kind": "ringing:1",
+          "seq": 1
+        },
+        {
+          "at": 10,
+          "kind": "rejected:1",
+          "seq": 2
+        },
+        {
+          "at": 15,
+          "kind": "dialing:2",
+          "seq": 3
+        },
+        {
+          "at": 18,
+          "kind": "ringing:2",
+          "seq": 4
+        },
+        {
+          "at": 23,
+          "kind": "answered:2",
+          "seq": 5
+        },
+        {
+          "at": 27,
+          "kind": "ended:2",
+          "reason": "user_redirected",
+          "seq": 6
+        }
+      ],
+      "query": "给妈妈打电话问她晚上来不来吃饭。",
+      "sa_replies": [
+        {
+          "at_sec": 0,
+          "from": "核心",
+          "text": "→电话域：打电话问妈妈晚饭。"
+        },
+        {
+          "at_sec": 0,
+          "from": "电话域",
+          "text": "attempt1 拒接 → 重试 attempt2 → 已接通。"
+        },
+        {
+          "at_sec": 27,
+          "from": "电话域",
+          "text": "妈妈改口让发微信，通话已改道结束。"
+        },
+        {
+          "at_sec": 27,
+          "from": "核心",
+          "text": "→消息域：发微信。"
+        },
+        {
+          "at_sec": 27,
+          "from": "消息域",
+          "text": "已发送到妈妈并确认送达。"
+        }
+      ],
+      "status": "Completed",
+      "title": "给妈妈打电话问她晚上来不来吃饭",
+      "user_supplements": [
+        {
+          "at_sec": 27,
+          "text": "（用户改口）算了，发个微信就行 —— barge_in 直灌控制平面"
+        }
+      ]
+    },
+    {
+      "dag": {
+        "edges": [
+          {
+            "from": "n_user",
+            "kind": "query",
+            "label": "query",
+            "to": "n_core"
+          },
+          {
+            "from": "n_core",
+            "kind": "dispatch",
+            "label": "→消息域",
+            "to": "n_msg"
+          },
+          {
+            "from": "n_msg",
+            "kind": "world",
+            "label": "写世界",
+            "to": "n_world"
+          }
+        ],
+        "nodes": [
+          {
+            "id": "n_user",
+            "label": "用户",
+            "layer": 0,
+            "role": "user",
+            "row": 0
+          },
+          {
+            "detail": "分诊：直接 →消息域（单域快路 = 分诊的退化结论，05 §2）",
+            "id": "n_core",
+            "label": "核心",
+            "layer": 1,
+            "role": "core",
+            "row": 1
+          },
+          {
+            "detail": "send_message{m6, 妈妈} → delivered=true（其他域零介入）",
+            "id": "n_msg",
+            "label": "消息域",
+            "layer": 2,
+            "role": "msg",
+            "row": 1
+          },
+          {
+            "detail": "messages=[妈妈, delivered=true] · calls 空 · 钟=0s",
+            "id": "n_world",
+            "label": "世界",
+            "layer": 3,
+            "role": "world",
+            "row": 1
+          }
+        ]
+      },
+      "facts": {
+        "clock_end_sec": 0,
+        "milestones": 0,
+        "model_calls_core": 1,
+        "verdict": "Completed · 消息=妈妈 delivered · 单域快路（核心 1 咨询）"
+      },
+      "id": "t2",
+      "messages": [
+        {
+          "at_sec": 0,
+          "from": "用户",
+          "kind": "user",
+          "node": "n_user",
+          "text": "给妈妈发微信问她晚上来不来吃饭。"
+        },
+        {
+          "at_sec": 0,
+          "from": "核心",
+          "kind": "dispatch",
+          "node": "n_core",
+          "text": "→消息域：给妈妈发微信问她晚上来不来吃饭。"
+        },
+        {
+          "at_sec": 0,
+          "from": "消息域",
+          "kind": "tool",
+          "node": "n_msg",
+          "text": "send_message{m6, 妈妈, 你晚上来不来吃饭？}",
+          "tool": "samock_send_message"
+        },
+        {
+          "at_sec": 0,
+          "from": "消息域",
+          "kind": "ai",
+          "node": "n_msg",
+          "text": "已发送到妈妈并确认送达。"
+        },
+        {
+          "at_sec": 0,
+          "from": "世界",
+          "kind": "assert",
+          "node": "n_world",
+          "text": "世界断言：messages=[妈妈, delivered=true] · calls 空 · 钟=0s"
+        }
+      ],
+      "milestones_summary": [],
+      "query": "给妈妈发微信问她晚上来不来吃饭。",
+      "sa_replies": [
+        {
+          "at_sec": 0,
+          "from": "核心",
+          "text": "→消息域：发微信。"
+        },
+        {
+          "at_sec": 0,
+          "from": "消息域",
+          "text": "已发送到妈妈并确认送达。"
+        }
+      ],
+      "status": "Completed",
+      "title": "给妈妈发微信问她晚上来不来吃饭",
+      "user_supplements": []
+    }
+  ]
+}

@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>SA 编排台</title>
+<style>
+/* ============================================================
+   设计计划（写入文件内）
+   - 布局：整屏编排台。外两层 = 左任务列表 / 右详情（纵向分隔可拖）；
+           右详情再分上 DAG / 下消息（横向分隔可拖，默认 50%）。
+   - 色板（token，深色先行使签，匹配 wfr WebUI 套件）：bg/panel/panel2/panel3 + border +
+            text/dim + accent；语义色 ok/warn/bad；角色色 r-user/core/phone/msg/world；
+            边色 e-query/report/dispatch/control/world。
+   - 字体：system-ui 栈（贴套件）+ ui-monospace 工具面（时钟/工具/事件行）。
+   ============================================================
+   :root —— 深色（套件基调） */
+:root{
+  color-scheme: dark;
+  --bg:#0f1117; --panel:#141823; --panel2:#1b2030; --panel3:#232a3d;
+  --border:#2a3140; --text:#e8eaf0; --dim:#8b90a0; --accent:#6c8cff; --accent-ink:#0d1120;
+  --ok:#3ecf8e; --warn:#e8b14e; --bad:#ff7a85;
+  --r-user:#b18af4; --r-core:#7aa2ff; --r-phone:#4dd0e1; --r-msg:#ffb86b; --r-world:#95a0b4;
+  --edge-query:#8b90a0; --edge-report:#8b90a0; --edge-dispatch:#6c8cff; --edge-control:#e8b14e; --edge-world:#3ecf8e;
+  --node-face:#1c2130;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    color-scheme: light;
+    --bg:#eef0f4; --panel:#ffffff; --panel2:#f5f6f9; --panel3:#eceef4;
+    --border:#d8dce5; --text:#1b1f2a; --dim:#667085; --accent:#4d6def; --accent-ink:#ffffff;
+    --ok:#18934f; --warn:#b07d10; --bad:#cf2b38;
+    --r-user:#7c3aed; --r-core:#3b62e0; --r-phone:#0e8fa0; --r-msg:#c2660a; --r-world:#5b6472;
+    --edge-query:#667085; --edge-report:#667085; --edge-dispatch:#4d6def; --edge-control:#b07d10; --edge-world:#18934f;
+    --node-face:#ffffff;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#0f1117; --panel:#141823; --panel2:#1b2030; --panel3:#232a3d;
+  --border:#2a3140; --text:#e8eaf0; --dim:#8b90a0; --accent:#6c8cff; --accent-ink:#0d1120;
+  --ok:#3ecf8e; --warn:#e8b14e; --bad:#ff7a85;
+  --r-user:#b18af4; --r-core:#7aa2ff; --r-phone:#4dd0e1; --r-msg:#ffb86b; --r-world:#95a0b4;
+  --edge-query:#8b90a0; --edge-report:#8b90a0; --edge-dispatch:#6c8cff; --edge-control:#e8b14e; --edge-world:#3ecf8e;
+  --node-face:#1c2130;
+}
+:root[data-theme="light"]{
+  color-scheme: light;
+  --bg:#eef0f4; --panel:#ffffff; --panel2:#f5f6f9; --panel3:#eceef4;
+  --border:#d8dce5; --text:#1b1f2a; --dim:#667085; --accent:#4d6def; --accent-ink:#ffffff;
+  --ok:#18934f; --warn:#b07d10; --bad:#cf2b38;
+  --r-user:#7c3aed; --r-core:#3b62e0; --r-phone:#0e8fa0; --r-msg:#c2660a; --r-world:#5b6472;
+  --edge-query:#667085; --edge-report:#667085; --edge-dispatch:#4d6def; --edge-control:#b07d10; --edge-world:#18934f;
+  --node-face:#ffffff;
+}
+/* 布局分隔的缺省占位（拖动前 getComputedStyle 需能读到） */
+:root{ --leftPct:30%; --leftH:36%; --hrPct:50%; }
+*{ box-sizing:border-box; margin:0; padding:0; }
+html,body{ height:100%; }
+body{
+  font:14px/1.6 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background:var(--bg); color:var(--text);
+  overflow:hidden;
+}
+button{ font:inherit; color:var(--text); }
+:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
+.num{ font-variant-numeric:tabular-nums; }
+
+/* ---------- 整体 ---------- */
+#app{ display:flex; flex-direction:row; width:100%; height:100%; }
+#left{ width:var(--leftPct, 30%); min-width:250px; background:var(--panel);
+       border-right:1px solid var(--border); display:flex; flex-direction:column; min-height:0; }
+#main{ flex:1; min-width:0; display:flex; flex-direction:column; min-height:0; }
+
+/* ---------- 分隔条 ---------- */
+.vdiv{ width:7px; cursor:col-resize; flex:none; background:transparent;
+       border-left:1px solid var(--border); border-right:1px solid var(--border); touch-action:none; }
+.vdiv:hover{ background:var(--accent); opacity:.35; }
+.hdiv{ height:7px; cursor:row-resize; flex:none; background:transparent;
+       border-top:1px solid var(--border); border-bottom:1px solid var(--border); touch-action:none; }
+.hdiv:hover{ background:var(--accent); opacity:.35; }
+
+/* ---------- 左 · 任务列表 ---------- */
+#left .side-head{ padding:14px 14px 8px; display:flex; align-items:baseline; gap:8px; }
+#left .side-head h1{ font-size:15px; letter-spacing:.02em; }
+#left .side-head .cnt{ font-size:12px; color:var(--dim); }
+#left .side-actions{ display:flex; gap:8px; padding:0 14px 8px; flex-wrap:wrap; }
+.ghost{ background:transparent; color:var(--accent); border:1px solid var(--accent);
+        border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
+.ghost:hover{ background:var(--accent); color:var(--accent-ink); }
+#task-items{ list-style:none; overflow-y:auto; flex:1; padding:4px 8px 12px; }
+.task{ padding:10px 12px; border-radius:10px; border:1px solid transparent; cursor:pointer; margin-bottom:6px; }
+.task:hover{ background:var(--panel2); }
+.task.active{ background:var(--panel2); border-color:var(--border); box-shadow:inset 2px 0 0 var(--accent); }
+.t-top{ display:flex; gap:8px; align-items:center; margin-bottom:4px; }
+.tstatus{ font-size:10.5px; padding:1px 8px; border-radius:99px; color:var(--accent-ink); background:var(--accent);
+          font-weight:600; flex:none; }
+.tstatus.aborted{ background:var(--bad); }
+.tstatus.waiting{ background:var(--warn); }
+.ttitle{ font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+.tsum{ margin:2px 0 6px; display:flex; flex-direction:column; gap:3px; }
+.tm{ display:flex; gap:7px; font-size:12px; color:var(--dim); line-height:1.45; }
+.tm .tk{ flex:none; width:14px; height:14px; border-radius:4px; font-size:10px; display:inline-flex;
+         align-items:center; justify-content:center; font-weight:700; margin-top:2px; }
+.tm.q .tk{ background:var(--r-user); color:var(--accent-ink); }
+.tm.sa .tk{ background:var(--accent); color:var(--accent-ink); }
+.tm.su .tk{ background:var(--warn); color:var(--accent-ink); }
+.tm.q{ color:var(--text); }
+.tm .tx{ min-width:0; overflow:hidden; text-overflow:ellipsis;
+         display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+.tmet{ font-size:11px; color:var(--dim); display:flex; gap:10px; flex-wrap:wrap; }
+.tmet b{ color:var(--text); font-weight:600; }
+
+/* ---------- 右 · 详情（上 DAG / 下 消息） ---------- */
+#dag-pane{ height:var(--hrPct, 50%); min-height:140px; display:flex; flex-direction:column; min-height:0; }
+#msg-pane{ flex:1; min-height:140px; display:flex; flex-direction:column; min-height:0; }
+.pane-head{ flex:none; padding:10px 16px 8px; border-bottom:1px solid var(--border); }
+.pane-head .row1{ display:flex; align-items:center; gap:10px; }
+.pane-head h2{ font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.pills{ display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
+.pill{ font-size:11px; color:var(--dim); border:1px solid var(--border); border-radius:99px; padding:1px 9px; }
+.pill b{ color:var(--text); }
+#dag-svg{ display:block; width:100%; height:auto; min-height:140px; }
+
+/* DAG 画布 */
+#dag-scroll{ flex:1; overflow:auto; padding:8px 12px 2px; min-height:0; }
+#dag-svg{ /* scale */ }
+.edge{ stroke:currentColor; fill:none; stroke-width:1.6; }
+.e-query{ color:var(--edge-query); stroke-dasharray:4 3; }
+.e-report{ color:var(--edge-report); stroke-dasharray:4 3; }
+.e-dispatch{ color:var(--edge-dispatch); }
+.e-control{ color:var(--edge-control); stroke-width:2; }
+.e-world{ color:var(--edge-world); }
+.e-label{ font-size:10px; fill:var(--dim); text-anchor:middle; paint-order:stroke;
+          stroke:var(--bg); stroke-width:3px; }
+.node{ cursor:pointer; outline:none; }
+.node .nbox{ fill:var(--node-face); stroke:currentColor; stroke-width:1.5; }
+.node:hover .nbox{ stroke-width:2.5; }
+.node.selected .nbox{ stroke-width:3; }
+.node.selected{ filter:drop-shadow(0 0 4px var(--accent)); }
+.ndot[data-state="done"]{ fill:var(--ok); }
+.ndot[data-state="active"]{ fill:var(--warn); }
+.ndot[data-state="failed"]{ fill:var(--bad); }
+.nlabel{ font-size:13px; font-weight:600; fill:var(--text); }
+.nrole{ font-size:9px; fill:var(--dim); letter-spacing:.05em; }
+
+/* DAG 检查条 */
+#dag-inspector{ flex:none; padding:6px 16px 8px; min-height:34px; border-top:1px dashed var(--border);
+                font-size:12px; color:var(--dim); display:flex; align-items:baseline; gap:8px; }
+#dag-inspector .who{ color:var(--text); font-weight:600; }
+#dag-inspector .clear{ margin-left:auto; }
+
+/* 消息列表 */
+#msg-pane .pane-head .row2{ display:flex; align-items:center; gap:8px; }
+#chip{ display:none; font-size:11px; color:var(--accent); border:1px solid var(--accent);
+       border-radius:99px; padding:0 8px; }
+#chip.show{ display:inline-flex; align-items:center; gap:6px; }
+#chip .x{ cursor:pointer; font-weight:700; }
+#msg-list{ flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:8px; }
+.mrow{ display:flex; gap:10px; font-size:13px; align-items:baseline; }
+.mrow .clock{ flex:none; width:56px; color:var(--dim); font-size:11px; text-align:right; }
+.mrow .from{ flex:none; width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+             color:var(--dim); }
+.mrow .body{ flex:1; min-width:0; white-space:pre-wrap; word-break:break-word; }
+.mbadge{ flex:none; font-size:10px; padding:0 7px; border-radius:99px; border:1px solid var(--border);
+         color:var(--dim); }
+.mrow.user .mbadge{ background:var(--accent); color:var(--accent-ink); border-color:transparent; }
+.mrow.user .clock{ color:var(--text); }
+.mrow.user .from{ color:var(--r-user); }
+.mrow.ai .from{ color:var(--accent); }
+.mrow.dispatch .from{ color:var(--accent); }
+.mrow.milestone .from{ color:var(--r-phone); }
+.mrow.control .from{ color:var(--warn); }
+.mrow.assert .from{ color:var(--ok); }
+.mrow.tool .body{ color:var(--dim); font-family:ui-monospace, SFMono-Regular, Consolas, monospace;
+                  font-size:12px; }
+.mrow .body .tmock{ color:var(--accent); }
+
+.empty{ padding:26px 20px; color:var(--dim); font-size:13px; text-align:center; line-height:1.9; }
+.empty code{ background:var(--panel2); padding:1px 6px; border-radius:5px; font-size:12px; }
+
+/* 窄屏：任务列表移到上方（水平横分） */
+@media (max-width:760px){
+  #app{ flex-direction:column; }
+  #left{ width:auto; height:var(--leftH, 36%); min-height:150px; border-right:0; border-bottom:1px solid var(--border); }
+  body{ overflow:hidden; }
+  .vdiv{ width:auto; height:7px; cursor:row-resize;
+         border-left:0; border-right:0; border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- ================= 左 · 任务列表 ================= -->
+  <aside id="left">
+    <div class="side-head">
+      <h1>任务列表</h1>
+      <span class="cnt" id="task-count"></span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="import-btn" type="button">导入 JSON</button>
+      <input type="file" id="file-input" accept=".json,application/json" hidden>
+    </div>
+    <div class="side-actions">
+      <span class="cnt" id="src-label" style="line-height:24px">…</span>
+    </div>
+    <ul id="task-items"></ul>
+  </aside>
+  <div class="vdiv" id="vdivider" role="separator" aria-orientation="vertical"></div>
+
+  <!-- ================= 右 · 任务详情 ================= -->
+  <main id="main">
+    <!-- 上 50% · DAG 节点图 -->
+    <section id="dag-pane">
+      <div class="pane-head">
+        <div class="row1">
+          <h2 id="dag-title">—</h2>
+          <span class="tstatus" id="dag-status">—</span>
+          <div class="pills" id="dag-pills"></div>
+        </div>
+      </div>
+      <div id="dag-scroll">
+        <svg id="dag-svg" role="img" aria-label="任务执行 DAG 节点图"></svg>
+      </div>
+      <div id="dag-inspector">
+        <span class="who" id="insp-who"></span>
+        <span id="insp-detail"></span>
+        <button class="ghost clear" id="insp-clear" type="button" style="display:none">清除筛选</button>
+      </div>
+    </section>
+    <div class="hdiv" id="hdivider" role="separator" aria-orientation="horizontal"></div>
+
+    <!-- 下 50% · 对话 / 消息列表 -->
+    <section id="msg-pane">
+      <div class="pane-head">
+        <div class="row2">
+          <h2>对话 / 消息列表</h2>
+          <span id="chip"><span id="chip-txt"></span><span class="x" id="chip-x">✕</span></span>
+          <span style="flex:1"></span>
+          <span class="cnt" id="msg-count"></span>
+        </div>
+      </div>
+      <div id="msg-list"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+/* ======================== 数据契约 sa-tasklog/v1 ========================
+   schema:"sa-tasklog/v1"
+   tasks[]:{
+     id, title, status, query,
+     user_supplements:[{at_sec,text}],
+     sa_replies:[{at_sec,from,text}],          //「SA 的回传消息」
+     facts:{model_calls_core,milestones,clock_end_sec,verdict},
+     dag:{ nodes:[{id,label,role,layer,row?,state?,detail?}],
+           edges:[{from,to,label?,kind?}] },
+     messages:[{at_sec,kind,from?,node?,tool?,text}],
+     milestones_summary:[{seq,kind,at,reason?}]
+   }
+   roles:  user|core|phone|msg|world
+   edge kinds: query|dispatch|report|control|world
+   message kinds: user|ai|dispatch|tool|milestone|control|assert
+   ======================================================================== */
+const ROLE = {
+  user:  {label:'用户',   color:'var(--r-user)'},
+  core:  {label:'核心',   color:'var(--r-core)'},
+  phone: {label:'电话域', color:'var(--r-phone)'},
+  msg:   {label:'消息域', color:'var(--r-msg)'},
+  world: {label:'世界',   color:'var(--r-world)'},
+};
+const EKIND = ['query','dispatch','report','control','world'];
+const MKIND = {user:'查询', ai:'SA', dispatch:'分诊', tool:'工具',
+               milestone:'里程碑', control:'控制', assert:'断言'};
+
+const el = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let DATA=null, TASKS=[], CUR=null, FILTER=null;
+
+/* ======================== 左侧任务列表 ======================== */
+function nodeLabel(id){
+  if(!CUR || !CUR.dag) return id;
+  const n = CUR.dag.nodes.find(x=>x.id===id);
+  return n ? (ROLE[n.role]?.label || n.label) : id;
+}
+function renderTasks(){
+  const box = el('task-items');
+  box.innerHTML = '';
+  el('task-count').textContent = TASKS.length + ' 个任务';
+  for(const t of TASKS){
+    const li = document.createElement('li');
+    li.className = 'task' + (CUR && CUR.id===t.id ? ' active' : '');
+    li.dataset.id = t.id;
+
+    const replies = t.sa_replies || [];
+    const sups = t.user_supplements || [];
+    let sum = '';
+    sum += `<div class="tm q"><span class="tk">Q</span><span class="tx">${esc(t.query||'')}</span></div>`;
+    for(const r of replies){
+      sum += `<div class="tm sa"><span class="tk">S</span><span style="flex:none;color:var(--dim)">${esc(r.from||'')}</span>` +
+             `<span class="tx">${esc(r.text||'')}</span></div>`;
+    }
+    for(const s of sups){
+      sum += `<div class="tm su"><span class="tk">+</span><span class="tx">${esc(s.text||'')}</span></div>`;
+    }
+
+    const f = t.facts || {};
+    let met = '';
+    if(f.model_calls_core!=null) met += `<span>核心 <b>${f.model_calls_core}</b> 咨询</span>`;
+    if(f.milestones!=null)        met += `<span>里程碑 <b>${f.milestones}</b></span>`;
+    if(f.clock_end_sec!=null)      met += `<span>钟 <b>${f.clock_end_sec}s</b></span>`;
+
+    li.innerHTML = `
+      <div class="t-top">
+        <span class="tstatus ${esc((t.status||'').toLowerCase())}">${esc(t.status||'')}</span>
+        <span class="ttitle">${esc(t.title||'')}</span>
+      </div>
+      <div class="tsum">${sum}</div>
+      <div class="tmet">${met}</div>`;
+    li.addEventListener('click', ()=>showTask(t.id));
+    box.appendChild(li);
+  }
+}
+function setActiveTask(id){
+  el('task-items').querySelectorAll('.task').forEach(l =>
+    l.classList.toggle('active', l.dataset.id === id));
+}
+
+/* ======================== 右侧详情 ======================== */
+function showTask(id){
+  const t = TASKS.find(x=>x.id===id);
+  if(!t) return;
+  CUR = t; FILTER = null;
+  setActiveTask(id);
+  el('dag-title').textContent = t.title || id;
+  const st = el('dag-status');
+  st.textContent = t.status || '';
+  st.className = 'tstatus ' + (t.status||'').toLowerCase();
+
+  const pills = el('dag-pills');
+  pills.innerHTML = '';
+  const f = t.facts || {};
+  const items = [['核心', f.model_calls_core], ['里程碑', f.milestones], ['钟', f.clock_end_sec]];
+  for(const [k,v] of items){
+    if(v==null) continue;
+    const p = document.createElement('span');
+    p.className = 'pill';
+    p.innerHTML = `${esc(k)} <b>${esc(String(v)+ (k==='钟'?'s':''))}</b>`;
+    pills.appendChild(p);
+  }
+  if(f.verdict){
+    const p = document.createElement('span');
+    p.className = 'pill';
+    p.textContent = f.verdict;
+    p.style.maxWidth = '46ch';
+    p.style.overflow = 'hidden'; p.style.textOverflow='ellipsis'; p.style.whiteSpace='nowrap';
+    pills.appendChild(p);
+  }
+
+  renderDag(t.dag || {nodes:[], edges:[]});
+  clearFilter(false);
+  renderMsgs();
+}
+
+/* ---------------- DAG 节点图（内联 SVG） ---------------- */
+function edgeKind(e){
+  if(e.kind) return EKIND.includes(e.kind) ? e.kind : 'report';
+  const l = e.label||'';
+  if(l.includes('改口')) return 'control';
+  if(l.includes('上报')||l.includes('报告')) return 'report';
+  if(l.includes('世界')||l.includes('写')) return 'world';
+  if(l.includes('query')) return 'query';
+  return 'dispatch';
+}
+function renderDag(dag){
+  const svg = el('dag-svg');
+  const nodes = dag.nodes||[];
+  if(!nodes.length){
+    svg.removeAttribute('viewBox');
+    svg.innerHTML = '';
+    el('dag-inspector').querySelector('#insp-who').textContent = '（无节点）';
+    return;
+  }
+  const W0=158, H0=56, GAPX=64, PAD=22, PV=34, ROWGAP=88;
+  const minLayer = Math.min(...nodes.map(n=>n.layer ?? 0));
+  const maxLayer = Math.max(...nodes.map(n=>n.layer ?? 0));
+  const nLayers = maxLayer - minLayer + 1;
+  const rows = [...new Set(nodes.map(n=>n.row ?? 1))].sort((a,b)=>a-b);
+  const W = PAD*2 + nLayers*W0 + (nLayers-1)*GAPX;
+  const H = Math.max(200, PV*2 + (rows.length-1)*ROWGAP + H0);
+  const xs={}, ys={};
+  for(const n of nodes){
+    const ly = (n.layer ?? 0) - minLayer;
+    xs[n.id] = PAD + ly*(W0+GAPX);
+    const rIdx = rows.indexOf(n.row ?? 1);
+    ys[n.id] = PV + (rIdx>=0?rIdx:0)*ROWGAP + H0/2;
+  }
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  let html = `<defs><marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path></marker></defs>`;
+  for(const e of dag.edges||[]){
+    const a=xs[e.from], ya=ys[e.from], b=xs[e.to], yb=ys[e.to];
+    const x0=a+W0/2, y0=ya, x1=b-W0/2, y1=yb;
+    const dx=x1-x0, dy=y1-y0;
+    const d = `M ${x0} ${y0} C ${x0+dx*0.42} ${y0+dy*0.22}, ${x1-dx*0.42} ${y1-dy*0.22}, ${x1} ${y1}`;
+    const lx=(x0+x1)/2, ly=(y0+y1)/2;
+    html += `<path class="edge e-${edgeKind(e)}" d="${d}" marker-end="url(#arr)"></path>`;
+    if(e.label)
+      html += `<text class="e-label" x="${lx}" y="${ly-6}" text-anchor="middle">${esc(e.label)}</text>`;
+  }
+  for(const n of nodes){
+    const role = ROLE[n.role] || {color:'var(--dim)', label:n.role||''};
+    const st = n.state || 'done';
+    html += `
+    <g class="node" data-id="${esc(n.id)}" tabindex="0" role="button" aria-label="查看 ${esc(n.label||'')}">
+      <rect class="nbox" rx="10" width="${W0}" height="${H0}" x="${xs[n.id]}" y="${ys[n.id]-H0/2}"
+            style="color:${role.color}"></rect>
+      <circle class="ndot" data-state="${esc(st)}" cx="${xs[n.id]+W0-13}" cy="${ys[n.id]-H0/2+13}" r="5"></circle>
+      <text class="nlabel" x="${xs[n.id]+14}" y="${ys[n.id]-3}">${esc(n.label||'')}</text>
+      <text class="nrole" x="${xs[n.id]+14}" y="${ys[n.id]+17}">${esc(role.label||'')}</text>
+    </g>`;
+  }
+  svg.innerHTML = html;
+  svg.querySelectorAll('.node').forEach(g=>{
+    const id = g.dataset.id;
+    const click = ()=>selectNode(id);
+    g.addEventListener('click', click);
+    g.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); click(); } });
+  });
+  clearFilter(false);
+}
+function selectNode(id){
+  FILTER = id;
+  const svg = el('dag-svg');
+  svg.querySelectorAll('.node').forEach(g=>g.classList.toggle('selected', g.dataset.id===id));
+  const n = CUR && CUR.dag ? CUR.dag.nodes.find(x=>x.id===id) : null;
+  el('insp-who').textContent = n ? (ROLE[n.role]?.label || n.label) : '';
+  el('insp-detail').textContent = n && n.detail ? n.detail : '（该节点无执行细节）';
+  el('insp-clear').style.display = '';
+  el('chip-txt').textContent = '只看：' + nodeLabel(id);
+  el('chip').classList.add('show');
+  renderMsgs();
+}
+function clearFilter(rebuild=true){
+  FILTER = null;
+  const svg = el('dag-svg');
+  if(svg) svg.querySelectorAll('.node').forEach(g=>g.classList.remove('selected'));
+  el('insp-who').textContent = '';
+  el('insp-detail').textContent = '点击 DAG 节点 → 定位下方消息（只看该节点）并显示执行细节。';
+  el('insp-clear').style.display = 'none';
+  el('chip').classList.remove('show');
+  if(rebuild) renderMsgs();
+}
+
+/* ---------------- 消息列表 ---------------- */
+function renderMsgs(){
+  const list = el('msg-list');
+  list.innerHTML = '';
+  if(!CUR){ list.innerHTML='<div class="empty">未选中任务。</div>'; return; }
+  const all = CUR.messages || [];
+  const shown = FILTER ? all.filter(m=>m.node===FILTER) : all;
+  el('msg-count').textContent = shown.length + ' 条';
+  if(!shown.length){
+    list.innerHTML = `<div class="empty">${FILTER ? '该节点没有对应消息。' : '（无消息）'}</div>`;
+    return;
+  }
+  for(const m of shown){
+    const row = document.createElement('div');
+    row.className = 'mrow ' + (m.kind || '');
+    const clock = `<span class="clock">t=${esc(String(m.at_sec))}s</span>`;
+    const from = `<span class="from">${esc(m.from || '')}</span>`;
+    let body = '';
+    if(m.kind === 'tool'){
+      body = `<span class="tmock">${esc(m.tool||'')}</span> ${esc(m.text||'')}`;
+    } else {
+      body = esc(m.text || '');
+    }
+    const badge = `<span class="mbadge">${esc(MKIND[m.kind] || m.kind || '')}</span>`;
+    row.innerHTML = clock + from + `<span class="body">${body}</span>` + badge;
+    list.appendChild(row);
+  }
+  list.scrollTop = list.scrollHeight;
+}
+
+/* ======================== 数据装载 ======================== */
+function setData(j, src){
+  DATA = j;
+  TASKS = Array.isArray(j.tasks) ? j.tasks : [];
+  el('src-label').textContent = '数据源：' + (src || '导入');
+  renderTasks();
+  if(TASKS.length){ showTask(TASKS[0].id); }
+  else { el('dag-title').textContent='—'; el('msg-list').innerHTML='<div class="empty">任务列表为空。</div>'; }
+}
+function showEmpty(msg){
+  el('task-count').textContent = '0 个任务';
+  el('src-label').textContent = '数据源：未加载';
+  el('task-items').innerHTML = `<li class="empty">${msg}</li>`;
+  el('msg-list').innerHTML = '';
+  el('dag-title').textContent = '—';
+}
+async function loadData(){
+  for(const name of ['sa_tasklog.json', 'sample-tasklog.json']){
+    try{
+      const r = await fetch(name, {cache:'no-store'});
+      if(!r.ok) continue;
+      const j = await r.json();
+      setData(j, name);
+      return;
+    }catch(_){ /* try next */ }
+  }
+  showEmpty('未找到数据文件。运行 <code>./run-demo.sh sa_demo</code> 生成 <code>web/sa/sa_tasklog.json</code>；' +
+            '也可直接把 JSON 拖进页面，或用「导入 JSON」选择文件。');
+}
+function importText(text, name){
+  try{
+    setData(JSON.parse(text), name || '导入');
+  }catch(err){
+    showEmpty('JSON 解析失败：' + esc(err.message));
+  }
+}
+el('import-btn').addEventListener('click', ()=>el('file-input').click());
+el('file-input').addEventListener('change', ()=>{
+  const f = el('file-input').files && el('file-input').files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = ()=>importText(String(rd.result), f.name);
+  rd.readAsText(f);
+});
+window.addEventListener('dragover', e=>e.preventDefault());
+window.addEventListener('drop', e=>{
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = ()=>importText(String(rd.result), f.name);
+  rd.readAsText(f);
+});
+
+/* ======================== 分隔条（可拖动） ========================
+   base + 轴：×轴 → basePct（左右分宽）；y 轴 → baseH（上下分高）。
+   窄屏时 #app 变 column：vdivider 自动改拖 --leftH。 */
+function bindDivider(bar, ref, base, axisGetter){
+  let down=false, start=0, startPct=0;
+  bar.addEventListener('pointerdown', e=>{
+    down=true;
+    try{ bar.setPointerCapture(e.pointerId); }catch(_){}
+    const axis = axisGetter();
+    start = axis==='x' ? e.clientX : e.clientY;
+    bar.dataset.axis = axis;
+    bar.dataset.var = axis==='x' ? base+'Pct' : base+'H';
+    startPct = parseFloat(getComputedStyle(ref).getPropertyValue(bar.dataset.var)) || 0;
+  });
+  bar.addEventListener('pointermove', e=>{
+    if(!down) return;
+    const axis = bar.dataset.axis;
+    const d = (axis==='x' ? e.clientX : e.clientY) - start;
+    const lim = axis==='x' ? [14, 55] : [16, 84];
+    const size = axis==='x' ? ref.clientWidth : ref.clientHeight;
+    if(size<=0) return;
+    const pct = Math.max(lim[0], Math.min(lim[1], startPct + 100*d/size));
+    ref.style.setProperty(bar.dataset.var, pct.toFixed(1) + '%');
+  });
+  const end = ()=>{ down=false; };
+  bar.addEventListener('pointerup', end);
+  bar.addEventListener('pointercancel', end);
+}
+bindDivider(el('vdivider'), el('app'), '--left',
+  ()=>window.getComputedStyle(el('app')).flexDirection === 'column' ? 'y' : 'x');
+bindDivider(el('hdivider'), el('main'), '--hr', ()=>'y');
+el('insp-clear').addEventListener('click', ()=>clearFilter(true));
+el('chip-x').addEventListener('click', ()=>clearFilter(true));
+
+loadData();
+</script>
+</body>
+</html>

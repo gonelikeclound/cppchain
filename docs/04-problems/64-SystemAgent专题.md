@@ -36,13 +36,65 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
-### 第 2 轮（2026-11-03 · 拍板 cppchain 落地形态）
+### 第 6 轮（2026-11-03 · S4 SA 专用 UI 页落地）
 
-- **落点拍板**：基于 **cppchain** 做（非 DSH 宿主）；研究组 01–08 作语义基线，落点时映射到 cppchain 既有件。
-- **组织形态拍板**：SA = **一组 agent**（核心 agent + 领域 agents），复用 cppchain 多智能体原语。
-- **载体拍板**：SA 专属 **demo 目录** + **独立 `samock` so**（mock 代码全进 samock，参照 `sidefx_notify.so`
-  先例：tests/plugin_demo 源 + `add_library(SHARED)` + env 目录加载）。
-- 已产出：§六 落地方案骨架（demo / samock / 领域 agent 初集 / 落点映射），待逐条确认后开工。
+- **S4 全过（17ms）**：SA 专用 UI 页 [`web/sa/index.html`](../../web/sa/index.html)（自包含单文件）。
+- **页面布局（按用户规格原样）**：**左右两栏** —— 左 = **任务列表**（query + SA 回传消息 + 用户补充信息，
+  组成一个完整任务）；右 = **任务详情**，分上下两部分 —— **上 = DAG 节点图，下 = 对话/消息列表，
+  各占 50%、分隔条可拖动**（外纵/内横两条分隔，窄屏自动改轴）。
+- **数据契约 `sa-tasklog/v1`**：`tasks[] = {query, user_supplements, sa_replies, facts,
+  dag{nodes[layer×row/role/detail/state], edges[kind]}, messages[kind/node], milestones_summary}`。
+- **demo S4 段（两条真实任务）**：
+  - **t1 C7 简版**：6 节点 DAG —— 用户→核心①→电话域→核心②→消息域→世界（含`改口(barge_in)`控制平面边）；
+    16 条消息 + 7 里程碑总结；核心 2 咨询（S2 断言已锁）；
+  - **t2 消息直路**：单域快路（= 分诊退化结论，05 §2）—— 核心 1 咨询，4 节点链，无里程碑；
+  - 事实（钟/里程碑/世界）**实时读 samock** 拼装，唤醒账用 S2/S4 断言锁定的常量；写
+    `web/sa/sa_tasklog.json`（gitignore），页面回退内置 `sample-tasklog.json` + 拖放/导入 JSON。
+- **页面实现要点**：主题 token 化（深色=套件基调，配浅色变体）；DAG = 内联 SVG
+  （layer×row 网格布局、角色配色 currentColor、边 kind 着色 query/dispatch/report/control/world、
+  marker 箭头 + 边标签）；**点节点 → 检查条显示执行细节 + 下方消息按节点筛选**；消息 7 种 kind 徽章
+  （查询/SA/分诊/工具/里程碑/控制/断言）+ 虚拟钟 `t=Ns`。**零 CGI**：run-webui.sh 静态服务即看
+  （`http://localhost:8000/sa/`）；「从页面触发运行」需 CGI run 端点，留作后续。
+- 下一步：**S5+** —— 事件漏斗 / L1 任务表 / Reaper 善后；或给页面加「运行触发」。
+
+### 第 5 轮（2026-11-03 · S3 M0 化落地）
+
+- **S3 全过（13ms）**：SA 语义层校验**纯函数** + 坏编排对抗集 —— 全部不需要 LLM/世界/时钟（07 §0）。
+- **新增 `examples/sa_demo/sa_guard.hpp`**（demo 内、纯 std+nlohmann、零 cppchain 依赖）：
+  `cppchain::sa` 命名空间的七个纯函数不变式 —— **I00 未知 agent / I01 域外或幻觉工具 /
+  I02 核心只读（I1 静态面）/ I03 分诊目标∈已知域 / I04 里程碑∈词汇表 / I05 预算（≈V4）/
+  I06 循环迹象（S4）/ I07 任务断言（≈V6）**；辅助：`canonical_json`（参数指纹）、`usage_from_trace`
+  （轨迹自证用量，宿主不口报）。
+- **V1–V8 取舍（显式落档）**：**V4→I05 · V6→I07**；I01/I03/I04/I06 = 组编排层新增不变式；
+  **V1/V2/V3/V5/V7/V8 因 agent-group 形态无 DAG/waits/pivot → 标注 N/A，不硬凑**（等 Graph Runtime
+  形态出现再补）。
+- **demo 三形态**：① **单元自检**（oracle 直灌 12 条好/坏样本，坏样本必须被拒：幻觉工具 / 越域 /
+  未知 agent / 核心写工具 / 不存在域 / 词汇表外里程碑 / 预算超限×2 / S4 循环 / 缺断言）；
+  ② **集成过检**（S2 真实轨迹走完整验证链 —— 白名单=实际部署注册表防漂移；用量账轨迹自证：
+  core 咨询 2≤3 · phone 7≤8 · msg 1≤4 · 重试 2≤2；里程碑 7 条全∈词汇表）；
+  ③ **运行时对抗**（脚本桩弹幻觉工具 `samock_send_sms` → **ToolNode 既有失败关闭**回喂
+  `unknown tool` error、咨询不中断、世界零污染）——**分工：验证器=审、ToolNode=挡**。
+- 轨迹来源 = **录迹包装**：域注册表 handler 外包一层 recorder，域 agent 每把真实工具调用落 `trace`
+  （验证器消费的是运行时事实，不是导演口报）。
+- 下一步：**S4** —— SA 专用 UI 页（本轮已落，见下）。
+
+### 第 4 轮（2026-11-03 · S2 落地）
+
+- **S2 全过（10ms）**：假电话 FSM 进 samock + C7 简版组织闭环，24 项断言全绿。
+- **samock 新增**：
+  - **平台侧电话 FSM**：每次拨号 = 一个 Session，`phase = fold(剧本, dialed_at, now)` **纯派生、无后台线程**
+    （可回放、逐字节确定）；剧本 = attempt1 振铃@3s/拒接@10s、attempt2 振铃@3s/接通@8s；
+  - **里程碑事件**：dialing / ringing / rejected / answered / ended —— 相位跳变时**原子发一次**（幂等）、
+    事件时间取精确时刻（非查询时刻）；`samock_milestones` 按 **seq 游标**读增量（= 观测归约）；
+  - **`samock_barge_in`**：控制平面注入用户改口（仅 Talking 态有效——负路径留 F 系列故障注入），
+    平台挂断并发 `ended{reason=user_redirected}`。
+- **demo 新增 S2 导演编排**（全离线，脚本桩模型**弹 tool_calls**、Agent 循环+ToolNode 真跑工具，非导演代跑）：
+  核心 2 次咨询（初始分诊 + 改道编排 ≤3）· 电话域域内拒接→重拨 attempt2→接通（核心不醒）·
+  barge_in 直灌 · 消息域 send_message 收尾。**24 项断言**：世界终态（c1 ended / user_redirected /
+  redirect_to_messaging）· 里程碑全序恰 7 条（dialing:1,ringing:1,rejected:1,dialing:2,ringing:2,answered:2,
+  ended:2）· seq==7 · now_sec==27（零真实等待）· 核心模型咨询==2（拒接/振铃/重拨全程未打扰核心，
+  C7「唤醒 7→3」方向兑现）· 电话域 9 轮 / 消息域 2 轮。
+- 下一步：**S3** —— SA 语义层校验纯函数（V1–V8 子集）+ 坏 patch/坏模型对抗集（07 §5.2）。
 
 ### 第 3 轮（2026-11-03 · S1 demo 落地）
 
@@ -65,44 +117,13 @@
 - 下一步：**S2** —— 假电话 FSM（Dialing→Ringing→Connected→Ended|Failed）+ barge_in 进 samock，
   C7 简版组织闭环（核心→电话域→消息域，打电话→改口→转消息），先离线脚本桩、再决定真机。在线验证再收口。
 
-### 第 4 轮（2026-11-03 · S2 落地）
+### 第 2 轮（2026-11-03 · 拍板 cppchain 落地形态）
 
-- **S2 全过（10ms）**：假电话 FSM 进 samock + C7 简版组织闭环，24 项断言全绿。
-- **samock 新增**：
-  - **平台侧电话 FSM**：每次拨号 = 一个 Session，`phase = fold(剧本, dialed_at, now)` **纯派生、无后台线程**
-    （可回放、逐字节确定）；剧本 = attempt1 振铃@3s/拒接@10s、attempt2 振铃@3s/接通@8s；
-  - **里程碑事件**：dialing / ringing / rejected / answered / ended —— 相位跳变时**原子发一次**（幂等）、
-    事件时间取精确时刻（非查询时刻）；`samock_milestones` 按 **seq 游标**读增量（= 观测归约）；
-  - **`samock_barge_in`**：控制平面注入用户改口（仅 Talking 态有效——负路径留 F 系列故障注入），
-    平台挂断并发 `ended{reason=user_redirected}`。
-- **demo 新增 S2 导演编排**（全离线，脚本桩模型**弹 tool_calls**、Agent 循环+ToolNode 真跑工具，非导演代跑）：
-  核心 2 次咨询（初始分诊 + 改道编排 ≤3）· 电话域域内拒接→重拨 attempt2→接通（核心不醒）·
-  barge_in 直灌 · 消息域 send_message 收尾。**24 项断言**：世界终态（c1 ended / user_redirected /
-  redirect_to_messaging）· 里程碑全序恰 7 条（dialing:1,ringing:1,rejected:1,dialing:2,ringing:2,answered:2,
-  ended:2）· seq==7 · now_sec==27（零真实等待）· 核心模型咨询==2（拒接/振铃/重拨全程未打扰核心，
-  C7「唤醒 7→3」方向兑现）· 电话域 9 轮 / 消息域 2 轮。
-- 下一步：**S3** —— SA 语义层校验纯函数（V1–V8 子集）+ 坏 patch/坏模型对抗集（07 §5.2）。
-
-### 第 5 轮（2026-11-03 · S3 M0 化落地）
-
-- **S3 全过（13ms）**：SA 语义层校验**纯函数** + 坏编排对抗集 —— 全部不需要 LLM/世界/时钟（07 §0）。
-- **新增 `examples/sa_demo/sa_guard.hpp`**（demo 内、纯 std+nlohmann、零 cppchain 依赖）：
-  `cppchain::sa` 命名空间的七个纯函数不变式 —— **I00 未知 agent / I01 域外或幻觉工具 /
-  I02 核心只读（I1 静态面）/ I03 分诊目标∈已知域 / I04 里程碑∈词汇表 / I05 预算（≈V4）/
-  I06 循环迹象（S4）/ I07 任务断言（≈V6）**；辅助：`canonical_json`（参数指纹）、`usage_from_trace`
-  （轨迹自证用量，宿主不口报）。
-- **V1–V8 取舍（显式落档）**：**V4→I05 · V6→I07**；I01/I03/I04/I06 = 组编排层新增不变式；
-  **V1/V2/V3/V5/V7/V8 因 agent-group 形态无 DAG/waits/pivot → 标注 N/A，不硬凑**（等 Graph Runtime
-  形态出现再补）。
-- **demo 三形态**：① **单元自检**（oracle 直灌 12 条好/坏样本，坏样本必须被拒：幻觉工具 / 越域 /
-  未知 agent / 核心写工具 / 不存在域 / 词汇表外里程碑 / 预算超限×2 / S4 循环 / 缺断言）；
-  ② **集成过检**（S2 真实轨迹走完整验证链 —— 白名单=实际部署注册表防漂移；用量账轨迹自证：
-  core 咨询 2≤3 · phone 7≤8 · msg 1≤4 · 重试 2≤2；里程碑 7 条全∈词汇表）；
-  ③ **运行时对抗**（脚本桩弹幻觉工具 `samock_send_sms` → **ToolNode 既有失败关闭**回喂
-  `unknown tool` error、咨询不中断、世界零污染）——**分工：验证器=审、ToolNode=挡**。
-- 轨迹来源 = **录迹包装**：域注册表 handler 外包一层 recorder，域 agent 每把真实工具调用落 `trace`
-  （验证器消费的是运行时事实，不是导演口报）。
-- 下一步：**S4+** —— 事件漏斗 / L1 任务表 / Reaper 善后（按 §5.5 表续）。
+- **落点拍板**：基于 **cppchain** 做（非 DSH 宿主）；研究组 01–08 作语义基线，落点时映射到 cppchain 既有件。
+- **组织形态拍板**：SA = **一组 agent**（核心 agent + 领域 agents），复用 cppchain 多智能体原语。
+- **载体拍板**：SA 专属 **demo 目录** + **独立 `samock` so**（mock 代码全进 samock，参照 `sidefx_notify.so`
+  先例：tests/plugin_demo 源 + `add_library(SHARED)` + env 目录加载）。
+- 已产出：§六 落地方案骨架（demo / samock / 领域 agent 初集 / 落点映射），待逐条确认后开工。
 
 ### 第 1 轮（2026-11-03）
 
@@ -182,6 +203,9 @@ examples/CMakeLists.txt              # add_library(samock SHARED ../tests/plugin
                                      #   与 demo 同目录）；纯 C descriptor（tool_plugin.hpp）、不链 cppchain；
                                      # add_dependencies(sa_demo samock)；
                                      # compile-def SA_SAMOCK_DIR = examples 构建目录
+
+web/sa/index.html                    # SA 专用 UI 页（自包含单文件；run-webui.sh → http://localhost:8000/sa/）
+web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.json = demo 运行产物（gitignore）
 ```
 
 - demo 运行：`./run-demo.sh sa_demo`（装载走现有 **`tool::load_dynamic_tools`**，即 wfr 动态工具库同一加载器；
@@ -225,7 +249,8 @@ examples/CMakeLists.txt              # add_library(samock SHARED ../tests/plugin
 | **S1** | `examples/sa_demo` 骨架：核心 agent + 电话域/消息域 agents + samock 装载 + 世界空跑六场景 + 组装配/I1 | ✅ **2026-11-03 全过**（`run-demo.sh sa_demo`，11ms） |
 | **S2** | samock **假电话 FSM**（Session 剧本 fold + 里程碑 seq 游标 + barge_in 控制平面）→ demo 跑通 **C7 简版**（打电话→改口→转消息，离线脚本桩组织闭环，24 断言） | ✅ **2026-11-03 全过**（10ms） |
 | **S3** | M0 化：SA 语义层校验纯函数（V1–V8 子集 → I00–I07）+ 坏编排对抗集（07 §5.2）+ 运行时挡幻觉工具 | ✅ **2026-11-03 全过**（13ms） |
-| S4+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8） | ⏳ 下一步 |
+| **S4** | **SA 专用 UI 页**（`web/sa/index.html`）：左任务列表 / 右详情 50% 可拖动（上 DAG 节点图下消息列表）；数据契约 `sa-tasklog/v1`；t1 C7 简版 + t2 消息直路两任务 | ✅ **2026-11-03 全过**（17ms） |
+| S5+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8） | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；
 摆放 = `examples/sa_demo/` + `tests/plugin_demo/samock.cpp`；虚拟钟 v1 = **工具推进**的模拟钟（够用）。
