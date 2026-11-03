@@ -280,6 +280,17 @@ else()
   message(STATUS "未找到 node —— 跳过 debug_derive_js（页面 JS 的推导测试不跑）")
 endif()
 
+# ---- SA 规划器静态校验（problems/64 S7）：纯函数，不碰模型/网络 ----
+add_executable(sa_plan_tests
+  sa/sa_plan_test.cpp)
+
+target_include_directories(sa_plan_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)
+target_link_libraries(sa_plan_tests PRIVATE
+  cppchain_message
+  GTest::gtest_main)
+target_compile_options(sa_plan_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(sa_plan_tests)
+
 # ---- CGI WebUI 纯逻辑测试（wfr-🈟 增强）：header-only cgi_lib，无需链 CGI 可执行 ----
 add_executable(webui_tests
   webui/cgi_lib_test.cpp)

@@ -36,6 +36,56 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 13 轮（2026-11-03 · S8：任务历史保留/删除 + 下载 + 更多示例）
+
+- **用户需求**：① SA 页面保留过去历史，用户可删除，删除即持久删除；② 增加下载等其他 demo。
+- **历史库**：`web/sa/sa_tasklog.json` 从「每次覆盖的结果文件」升级为**历史库**：
+  - 合并规则：同 id 覆盖（脚本 demo 的 t1/t2 稳定 id，不会越跑越多）；一句话规划任务用
+    `p<epoch-ms>` 唯一 id，每次运行**追加**；新任务在前（最近优先），上限 60 条；
+  - 原子写（`.tmp` → `rename`），页面不会读到半截 JSON；
+  - 脚本模式与规划模式都走同一合并函数（`load_history`/`merge_history`/`write_json_atomic`）。
+- **删除（持久）**：`sa_cgi?action=delete&id=<task id>` —— id 白名单字符（≤64），从历史库移除并原子落盘；
+  不存在则 `ok=false` 明确报错；页面每条任务卡右上角 `×`，删除后重拉历史（若删的是当前任务则自动选第一条）；
+  运行中禁止删除（UI 侧拦截）。
+- **并发护栏**：`sa_cgi` 运行路径加 `flock(web/sa/.run.lock)` 单运行锁——两个标签页同时点运行时，
+  后到者明确返回「已有一次运行在进行」，避免 tasklog/进度互相覆盖（实测并发验证）。
+- **下载（纯前端 Blob，无新增服务端端点）**：右上面板「下载当前」（当前任务 dag+messages+facts JSON）、
+  「下载历史」（全部 tasks 的 sa-tasklog.json）。
+- **更多 demo**：左栏示例 chip ×3（电话+改口 / 只发微信 / 只打电话），一键填入一句话规划输入框。
+- **验收**：E2E 扩至 **16/16**——离线 fixture 连跑两次断言历史保留>1 条；删除后服务端文件真实减少且
+  重复删除报错；页面骨架新增「生成 DAG 并运行 / 下载历史」标记；全仓串行 **1092/1092** 不变。
+- 备注：历史合并后，生成文件不再与 `sample-tasklog.json` 逐字节等价（第 12 轮的说法只适用于空的
+  全新数据目录）；`sample` 继续作为页面静态回退数据源。
+
+### 第 12 轮（2026-11-03 · S7：一句话 → DAG（真机 LLM Planner）→ 校验 → 执行）
+
+- **用户澄清关键点**：SA 的核心不是「运行 DAG」，而是「**生成 DAG**」——能否根据用户一句话产出
+  一张 DAG，然后把它跑起来。选定范围：**直接接真机 LLM Planner**。
+- **分层**（LLM 只出现在规划 gate；域执行保持确定性、可回放）：
+  1. **Planner**：`sa_demo --query="…"` → OpenAI 兼容端点（.env：`LLM_*`，本项目 deepseek-flash）
+     产出**受限 IR**（role ∈ user/core/phone/msg/world；edge kind ∈ query/dispatch/report/control/world）；
+     解析容忍 ```json 围栏与前后解释文字；不合法 → 把 issue 回喂模型重试（≤3 次），仍不过则 fail-closed 拒跑。
+  2. **静态校验**（`examples/sa_demo/sa_plan.hpp`，纯函数）：P00–P29 —— 角色/kind 白名单、
+     id 唯一、恰好 1 user/1 world、域节点必须有 core→域 dispatch、core 必须有 dispatch 出边、
+     无环、所有节点在 user→world 路径上、control 只能 user→phone 且必须配 msg 域、规模上限（节点 3..12）。
+  3. **通用解释器**：按拓扑序执行——user 消息 → core 分诊 dispatch → 电话域拨号/拒接重拨/接通
+     （有 control 边则 barge_in 改道）→ 消息域 send_message → world 节点逐项查世界断言；
+     消息与 tasklog/进度事件双写，UI 实时可视化；断言不过则任务 Failed。
+  4. **入口**：CLI `--query` / `--plan-json`（跳过模型，离线可测）/ `--dry-run`；
+     CGI `?planner=llm&query=<一句话>`（URL 解码在 CGI 做，query 经 **env `SA_QUERY`** 传子进程，
+     不拼 shell，零注入面）；页面左栏新增「一句话」输入框 + 「生成 DAG 并运行」。
+- **实测（真机 deepseek-flash）**：
+  - 「给妈妈打电话…拒接再打一次，改口就发微信」→ 6 节点/6 边（含 control 边）→ 执行
+    Completed、16 消息、7 里程碑、钟 27s；
+  - 「给妈妈发微信说我晚上不回家吃饭」→ 4 节点/3 边 → 5 消息、钟 0s；
+  - 电话-only（无 control）→ `c1 state=talking` 断言通过、6 里程碑。
+- **测试纪律（R5）**：真机 Planner 不进 CI——新增 `sa_plan_tests`（12 条纯函数用例：合法计划、
+  缺 world、环、未知角色、域缺 dispatch、core 无 dispatch、control 指向非电话、改口无 msg、
+  phone-only 合法、布局、JSON 抽取）；E2E 扩至 **14/14**：离线 fixture 走完整校验+解释器
+  （16 消息/7 里程碑/钟 27s）+ 坏计划（缺 world）必须拒跑且零产出；全仓串行 **1092/1092**。
+- **诚实边界**：本轮的「智能」在规划 gate；域内工具序仍由确定性执行器（电话 FSM/消息发送）驱动，
+  不是让 LLM 自由调工具。下一步可把域节点也交给 agent loop（真机），并让 Reaper/事件漏斗接管失败恢复。
+
 ### 第 11 轮（2026-11-03 · S6c：运行可视化——后端真慢跑 + 页面实时进度）
 
 - **用户反馈**：「电话 mock 的例子太快了，看不到执行过程，mock 时候慢一点」。
@@ -352,6 +402,8 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S6** | **WebUI E2E**：`run-sa-e2e.sh` 三阶段 —— A 静态 HTTP（页面骨架+sample 契约）/ B CGI 运行整路（回执·磁盘三产物·run.log verdict·确定性数值·二次递增·v1 拒答）/ C headless Chrome（渲染 + 真实点击「运行 demo」→「运行完成」）；11/11 | ✅ **2026-11-03 全过** |
 | **S6b** | **右上面板「源码」标签页（图源码）**：显示**当前任务 DAG 的定义**（节点×边清单 ⇄ 原始 JSON，纯前端）；**Round 10 修正**——撤去误做的「读仓库 C++ 文件」与 `sa_cgi?action=src` 端点；E2E 11/11（C 阶段断言图源码渲染） | ✅ **2026-11-03 全过** |
 | **S6c** | **运行可视化（真慢跑 + 实时进度）**：`sa_demo --progress/--pace-ms` 边跑边写 JSONL（run/task/dag/node/msg），`sa_cgi?pace=` 控制节奏；页面轮询后节点逐个点亮、消息逐条出现；E2E **12/12**（B 阶段进度事件断言）；tasklog 与 sample 逐字节等价 | ✅ **2026-11-03 全过** |
+| **S7** | **一句话 → DAG → 运行**：真机 LLM Planner（`--query` / CGI `?planner=llm&query=`）产出受限 IR → `sa_plan.hpp` P00–P29 静态校验（fail-closed，回喂重试≤3）→ 通用解释器按拓扑序调度电话/消息域 + 世界断言；页面输入框 + 实时 DAG；`--plan-json` 离线可测；`sa_plan_tests` 12 条 + E2E **14/14** + 全仓 **1092/1092** | ✅ **2026-11-03 全过** |
+| **S8** | **任务历史 + 删除 + 下载 + 更多示例**：`sa_tasklog.json` 即历史库（稳定 id 覆盖 / 规划任务追加 / 最近优先 / 上限 60 / 原子写）；`sa_cgi?action=delete&id=` 持久删除；`flock` 单运行锁防并发覆盖；页面任务卡 `×`、下载当前/历史 JSON、3 个示例 chip；E2E **16/16** | ✅ **2026-11-03 全过** |
 | S7+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；

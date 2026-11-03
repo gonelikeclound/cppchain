@@ -29,6 +29,16 @@
 #include <cppchain/tool/registry.hpp>
 
 #include "sa_guard.hpp"  // S3（M0）：SA 语义层校验纯函数
+#include "sa_plan.hpp"   // S7：一句话 → DAG（规划契约 + 静态校验）
+
+#ifdef SA_PLAN_LIVE
+#include <cppchain/http/curl_multi_transport.hpp>
+#include <cppchain/model/openai/openai_chat_model.hpp>
+
+#include <memory>
+
+#include "support/dotenv.hpp"
+#endif
 
 #include <chrono>
 #include <cstdint>
@@ -40,6 +50,7 @@
 #include <generator>
 #include <map>
 #include <print>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -175,6 +186,7 @@ class Progress {
   std::string const& task() const { return task_; }
   void set_clock(std::int64_t c) { clock_ = c; }
   std::int64_t clock() const { return clock_; }
+  long pace_ms() const { return pace_ms_; }
 
  private:
   std::ofstream os_;
@@ -403,14 +415,519 @@ bool has_tool_error(agent::Agent const& a, std::string const& tool) {
   return false;
 }
 
+/* ======================== S7 · 一句话 → DAG → 执行 ========================
+   与 S1–S6c 的分工：那些是「手写 DAG + 导演段」证明执行/观测；S7 把 DAG 变成**输入**——
+   LLM 规划器生成受限 IR → sa_plan.hpp 静态校验 → 通用解释器按拓扑序调度域能力。
+   LLM 只出现在规划 gate；域执行沿用 samock 的确定性 FSM/工具（可回放）。 */
+
+std::expected<ToolRegistry, std::string> load_samock_registry() {
+  std::filesystem::path const so = find_samock_so();
+  std::vector<std::string> names(std::begin(kSamockTools), std::end(kSamockTools));
+  auto specs = load_dynamic_tools(so.string(), names);
+  if (!specs) return std::unexpected("samock 加载失败：" + specs.error());
+  if (specs->size() != names.size())
+    return std::unexpected("加载工具数不符：期望 " + std::to_string(names.size()) + " 实际 " +
+                           std::to_string(specs->size()));
+  ToolRegistry reg;
+  for (ToolSpec& s : *specs) reg.add(std::move(s));
+  auto vio = effect_class_violations(reg);
+  if (!vio.empty()) {
+    std::string msg = "samock 效果分类违规（read_only=false 必须声明效果分类）：";
+    for (std::string const& v : vio) msg += "\n  " + v;
+    return std::unexpected(std::move(msg));
+  }
+  return reg;
+}
+
+/* ---- S8 · 任务历史（web/sa/sa_tasklog.json 即历史库）----
+   过去历史要保留、可删除（删除即持久删除）。合并规则：
+   · 同 id 的新结果覆盖旧结果（脚本 demo 的 t1/t2 稳定 id，不会越跑越多）；
+   · 新结果在最前（最近优先），历史上限 60 条；
+   · 原子写（tmp → rename），避免页面读到半截 JSON。 */
+Json load_history(std::string const& path) {
+  std::ifstream in(path);
+  if (!in) return Json{{"schema", "sa-tasklog/v1"}, {"tasks", Json::array()}};
+  Json j = Json::parse(in, nullptr, /*allow_exceptions=*/false);
+  if (j.is_discarded() || !j.is_object())
+    return Json{{"schema", "sa-tasklog/v1"}, {"tasks", Json::array()}};
+  if (!j.contains("tasks") || !j["tasks"].is_array()) j["tasks"] = Json::array();
+  return j;
+}
+
+Json merge_history(Json const& existing_tasks, Json const& new_tasks,
+                   std::size_t cap = 60) {
+  Json merged = Json::array();
+  std::set<std::string> new_ids;
+  for (Json const& t : new_tasks) {
+    merged.push_back(t);
+    new_ids.insert(t.value("id", ""));
+  }
+  for (Json const& t : existing_tasks)
+    if (new_ids.count(t.value("id", "")) == 0) merged.push_back(t);
+  while (merged.size() > cap) merged.erase(merged.end() - 1);
+  return merged;
+}
+
+bool write_json_atomic(std::string const& path, Json const& j) {
+  std::string const tmp = path + ".tmp";
+  {
+    std::ofstream o(tmp, std::ios::trunc);
+    if (!o) return false;
+    o << j.dump(2) << "\n";
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, path, ec);
+  if (ec) {
+    std::ofstream o(path, std::ios::trunc);
+    if (!o) return false;
+    o << j.dump(2) << "\n";
+    std::error_code ec2;
+    std::filesystem::remove(tmp, ec2);
+  }
+  return true;
+}
+
+std::string next_plan_id(Json const& existing_tasks) {
+  auto const ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count();
+  std::string const base = "p" + std::to_string(ms);
+  std::set<std::string> ids;
+  for (Json const& t : existing_tasks) ids.insert(t.value("id", ""));
+  std::string id = base;
+  for (int n = 2; ids.count(id) != 0; ++n) id = base + "-" + std::to_string(n);
+  return id;
+}
+
+Json find_plan_node(Json const& plan, std::string const& id) {
+  for (Json const& n : plan.value("nodes", Json::array()))
+    if (n.value("id", "") == id) return n;
+  return Json::object();
+}
+
+std::string plan_task_text(Json const& n) {
+  return n.value("task", std::string());
+}
+
+// 节点 args 的 id 缺省值：按节点 id 派生，避免多个域节点共用 c1/m1 互相踩踏。
+std::string plan_arg_id(Json const& n, char const* key, char const* prefix) {
+  std::string v = n.value("args", Json::object()).value(key, std::string());
+  return v.empty() ? std::string(prefix) + n.value("id", "x") : v;
+}
+
+bool has_control_edge(Json const& plan, std::string const& phone_id) {
+  for (Json const& e : plan.value("edges", Json::array()))
+    if (e.value("kind", "") == "control" && e.value("to", "") == phone_id) return true;
+  return false;
+}
+
+// 实时事件 + tasklog 消息双写（一次 L.msg 同时进进度流和最终任务日志）。
+struct LiveRec {
+  Progress* prog = nullptr;
+  Json msgs = Json::array();
+  void msg(std::string const& node, std::string const& kind, std::string const& from,
+           std::string const& text, std::string const& tool = {}) {
+    Json m{{"at_sec", prog->clock()}, {"kind", kind}, {"from", from},
+           {"node", node},           {"text", text}};
+    if (!tool.empty()) m["tool"] = tool;
+    msgs.push_back(m);
+    prog->msg(m);
+  }
+  void node(std::string const& id, char const* state) { prog->node(prog->task(), id, state); }
+  void sync_clock(Json const& out) { prog->set_clock(out.value("now_sec", prog->clock())); }
+};
+
+struct ExecOutcome {
+  bool ok = true;
+  std::vector<std::string> fails;
+};
+
+// 电话域执行器：拨号 → 拒接重拨一次 → 接通；有 control 边则注入 barge_in 改道。
+void exec_phone(Json const& n, Json const& plan, ToolRegistry& samock, LiveRec& L,
+                ExecOutcome& o) {
+  std::string const id = n.value("id", "");
+  Json const args = n.value("args", Json::object());
+  std::string const cid = plan_arg_id(n, "call_id", "c_");
+  std::string const number = args.value("number", "13800000000");
+  bool const redirect = has_control_edge(plan, id);
+
+  L.node(id, "active");
+  auto call = [&](std::string const& tool, Json const& a) -> Json {
+    Json out = run_tool(samock, tool, a, o.fails);
+    L.msg(id, "tool", "电话域", tool_msg_text(tool, a, out), tool);
+    return out;
+  };
+  call("samock_make_call", Json{{"call_id", cid}, {"number", number}, {"attempt", 1}});
+  Json const c1_out = call("samock_clock_forward", Json{{"seconds", 15}});
+  L.sync_clock(c1_out);
+  Json const m1 = call("samock_milestones", Json{{"call_id", cid}, {"since", 0}});
+
+  bool rejected = false;
+  for (Json const& m : m1.value("milestones", Json::array()))
+    if (m.value("kind", "") == "rejected") rejected = true;
+  if (rejected) {
+    call("samock_make_call", Json{{"call_id", cid}, {"number", number}, {"attempt", 2}});
+    Json const c2_out = call("samock_clock_forward", Json{{"seconds", 12}});
+    L.sync_clock(c2_out);
+    call("samock_milestones", Json{{"call_id", cid}, {"since", 3}});
+  }
+  L.msg(id, "ai", "电话域",
+        rejected ? "attempt1 拒接 → 按重拨策略重试 attempt2 → 已接通。" : "已接通。");
+
+  if (redirect) {
+    run_tool(samock, "samock_barge_in",
+             Json{{"call_id", cid}, {"intent", "redirect_to_messaging"}}, o.fails);
+    L.msg(id, "control", "用户",
+          "barge_in{intent: redirect_to_messaging} —— 直灌控制平面（不经核心，仅通话中有效）");
+    L.msg(id, "milestone", "电话域",
+          "call.ended{attempt:2, reason:user_redirected, disposition:redirect_to_messaging}");
+    L.msg(id, "ai", "电话域", "妈妈改口让发微信，通话已改道结束。请核心编排收尾。");
+  }
+  L.node(id, "done");
+}
+
+// 消息域执行器：send_message(args.to, args.text) → 送达回执。
+void exec_msg(Json const& n, ToolRegistry& samock, LiveRec& L, ExecOutcome& o) {
+  std::string const id = n.value("id", "");
+  Json const args = n.value("args", Json::object());
+  std::string const mid = plan_arg_id(n, "msg_id", "m_");
+  std::string const to = args.value("to", "妈妈");
+  std::string text = args.value("text", std::string());
+  if (text.empty()) text = plan_task_text(n);
+
+  L.node(id, "active");
+  Json const a{{"msg_id", mid}, {"to", to}, {"text", text}};
+  Json const out = run_tool(samock, "samock_send_message", a, o.fails);
+  L.msg(id, "tool", "消息域", tool_msg_text("samock_send_message", a, out),
+        "samock_send_message");
+  L.msg(id, "ai", "消息域", "已发送到" + to + "并确认送达。");
+  L.node(id, "done");
+}
+
+// 世界断言：按计划里的域效果逐项核对（查世界，不查工具返回值）。
+void exec_world(Json const& n, Json const& plan, ToolRegistry& samock, LiveRec& L,
+                ExecOutcome& o) {
+  std::string const id = n.value("id", "");
+  std::vector<std::string> wf;
+  Json const w = world(samock, wf);
+  bool ok = wf.empty();
+  std::string clock_txt;
+  std::vector<std::string> parts;
+
+  for (Json const& pn : plan.value("nodes", Json::array())) {
+    std::string const role = pn.value("role", "");
+    Json const args = pn.value("args", Json::object());
+    if (role == "phone") {
+      std::string const cid = plan_arg_id(pn, "call_id", "c_");
+      bool const redirect = has_control_edge(plan, pn.value("id", ""));
+      if (!w.contains("calls") || !w["calls"].contains(cid)) {
+        ok = false;
+        parts.push_back("缺通话 " + cid);
+        continue;
+      }
+      Json const& c = w["calls"][cid];
+      std::string const st = c.value("state", "?");
+      if (redirect) {
+        bool const good = (st == "ended" && c.value("ended_reason", "") == "user_redirected");
+        ok = ok && good;
+        parts.push_back(cid + " state=" + st + " · reason=" +
+                        c.value("ended_reason", "-"));
+      } else {
+        ok = ok && (st == "talking");
+        parts.push_back(cid + " state=" + st);
+      }
+    } else if (role == "msg") {
+      std::string const mid = plan_arg_id(pn, "msg_id", "m_");
+      bool found = false, delivered = false;
+      std::string to;
+      for (Json const& m : w.value("messages", Json::array()))
+        if (m.value("id", "") == mid) {
+          found = true;
+          delivered = m.value("delivered", false);
+          to = m.value("to", "");
+        }
+      ok = ok && found && delivered;
+      parts.push_back("消息=[" + to + ", delivered=" + (delivered ? "true" : "false") + "]");
+    }
+  }
+  clock_txt = "钟=" + std::to_string(w.value("now_sec", 0)) + "s";
+  parts.push_back(clock_txt);
+
+  std::string text = "世界断言：";
+  for (std::size_t i = 0; i < parts.size(); ++i) {
+    if (i != 0) text += " · ";
+    text += parts[i];
+  }
+  L.msg(id, "assert", "世界", text);
+  L.node(id, "done");
+  o.ok = o.ok && ok;
+}
+
+ExecOutcome execute_plan(Json const& plan, std::string const& query, ToolRegistry& samock,
+                         LiveRec& L) {
+  ExecOutcome o;
+  run_tool(samock, "samock_world_reset", Json::object(), o.fails);  // 跨任务隔离
+  auto const order = sa::plan::topo_order(plan);
+  for (std::string const& id : order) {
+    Json const n = find_plan_node(plan, id);
+    std::string const role = n.value("role", "");
+    if (role == "user") {
+      L.node(id, "active");
+      std::string text = plan_task_text(n);
+      if (text.empty()) text = query;
+      L.msg(id, "user", "用户", text);
+      L.node(id, "done");
+    } else if (role == "core") {
+      L.node(id, "active");
+      bool dispatched = false;
+      for (Json const& e : plan.value("edges", Json::array())) {
+        if (e.value("from", "") != id || e.value("kind", "") != "dispatch") continue;
+        Json const target = find_plan_node(plan, e.value("to", ""));
+        std::string text = plan_task_text(n);
+        if (text.empty())
+          text = e.value("label", "→" + target.value("label", "")) + "：" + plan_task_text(target);
+        L.msg(id, "dispatch", "核心", text);
+        dispatched = true;
+      }
+      if (!dispatched) L.msg(id, "ai", "核心", plan_task_text(n));
+      L.node(id, "done");
+    } else if (role == "phone") {
+      exec_phone(n, plan, samock, L, o);
+    } else if (role == "msg") {
+      exec_msg(n, samock, L, o);
+    } else if (role == "world") {
+      exec_world(n, plan, samock, L, o);
+    }
+  }
+  return o;
+}
+
+Json gather_plan_milestones(Json const& plan, ToolRegistry& samock) {
+  Json arr = Json::array();
+  std::vector<std::string> fail;
+  for (Json const& n : plan.value("nodes", Json::array())) {
+    if (n.value("role", "") != "phone") continue;
+    std::string const cid = plan_arg_id(n, "call_id", "c_");
+    Json const m =
+        run_tool(samock, "samock_milestones", Json{{"call_id", cid}, {"since", 0}}, fail);
+    for (Json const& ev : m.value("milestones", Json::array())) {
+      Json row{{"seq", ev.value("seq", 0)},
+               {"kind", ev.value("kind", "?") + ":" + std::to_string(ev.value("attempt", 0))},
+               {"at", ev.value("at_sec", 0)}};
+      if (ev.contains("reason")) row["reason"] = ev["reason"];
+      arr.push_back(std::move(row));
+    }
+  }
+  return arr;
+}
+
+Json build_plan_task(Json const& plan, std::string const& query, LiveRec const& L,
+                     ToolRegistry& samock, bool ok, std::string const& source,
+                     std::string const& model_name) {
+  Json t;
+  t["id"] = "p1";
+  t["title"] = plan.value("title", query);
+  t["status"] = ok ? "Completed" : "Failed";
+  t["query"] = query;
+  t["user_supplements"] = Json::array();
+
+  Json replies = Json::array();
+  for (Json const& m : L.msgs) {
+    std::string const kind = m.value("kind", "");
+    if (kind != "dispatch" && kind != "ai" && kind != "milestone") continue;
+    replies.push_back(Json{{"at_sec", m.value("at_sec", 0)},
+                           {"from", m.value("from", "")},
+                           {"text", m.value("text", "")}});
+  }
+  t["sa_replies"] = std::move(replies);
+
+  Json const miles = gather_plan_milestones(plan, samock);
+  std::vector<std::string> fail;
+  Json const w = world(samock, fail);
+  t["facts"] = Json{{"planner", source},
+                    {"model", model_name},
+                    {"model_calls_core", 0},
+                    {"milestones", static_cast<std::int64_t>(miles.size())},
+                    {"clock_end_sec", w.value("now_sec", 0)},
+                    {"verdict", ok ? (source == "llm" ? "Completed · LLM 规划 → 校验 → 执行"
+                                                      : "Completed · 计划文件 → 校验 → 执行")
+                                   : "Failed · 世界断言/工具失败"}};
+  t["dag"] = plan;
+  t["messages"] = L.msgs;
+  t["milestones_summary"] = miles;
+  return t;
+}
+
+#ifdef SA_PLAN_LIVE
+struct PlannerResult {
+  bool ok = false;
+  Json plan;
+  std::string error;
+  std::string model;
+};
+
+PlannerResult plan_with_llm(std::string const& query) {
+  auto const dotenv = demo::load_dotenv({".env", "../.env", "../../.env"});
+  std::string const api_key = demo::env_or(dotenv, "LLM_API_KEY");
+  std::string const base_url = demo::env_or(dotenv, "LLM_BASE_URL", "https://api.deepseek.com/v1");
+  std::string const model_name = demo::env_or(dotenv, "LLM_MODEL", "deepseek-chat");
+  if (api_key.empty()) return {false, {}, "缺少 LLM_API_KEY（请在 .env 提供）", model_name};
+
+  std::string ca_bundle = demo::env_or(dotenv, "LLM_CA_BUNDLE");
+  if (ca_bundle.empty()) {
+    if (char const* home = std::getenv("HOME")) {
+      std::string const candidate = std::string(home) + "/.geo/corp-ca.pem";
+      if (std::filesystem::exists(candidate)) ca_bundle = candidate;
+    }
+  }
+  model::ModelConfig cfg;
+  cfg.api_key = api_key;
+  cfg.base_url = base_url;
+  cfg.model = model_name;
+  cfg.timeout_ms = 90000;
+  cfg.ca_info = ca_bundle;
+
+  auto transport = std::make_shared<http::CurlMultiTransport>();
+  model::openai::OpenAIChatModel llm(cfg, transport);
+
+  std::vector<Message> msgs{message::system_message(sa::plan::planner_system_prompt()),
+                            message::human_message("用户一句话：" + query)};
+  std::string last_raw;
+  std::vector<std::string> issues;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    model::CallOptions opt;
+    opt.temperature = 0.0;
+    opt.response_format = Json{{"type", "json_object"}};
+    auto resp = llm.invoke(msgs, opt);
+    if (!resp) return {false, {}, "模型调用失败：" + resp.error().message, model_name};
+    last_raw = resp->text();
+    Json p = Json::parse(sa::plan::extract_json_text(last_raw), nullptr, /*allow_exceptions=*/false);
+    if (p.is_discarded()) {
+      issues = {"P00: 输出不是合法 JSON"};
+    } else {
+      auto const v = sa::plan::validate(p);
+      if (v.empty()) return {true, sa::plan::layout(std::move(p)), {}, model_name};
+      issues.clear();
+      for (auto const& i : v) issues.push_back(i.code + ": " + i.message);
+    }
+    msgs.push_back(message::ai_message(last_raw));
+    std::string feedback = "上面的计划不合法：\n";
+    for (std::string const& s : issues) feedback += "- " + s + "\n";
+    feedback += "请只输出修正后的 JSON（不要解释、不要 Markdown）。";
+    msgs.push_back(message::human_message(feedback));
+  }
+  std::string err = "规划重试 3 次仍不合法：";
+  for (std::string const& s : issues) err += "\n  - " + s;
+  return {false, {}, std::move(err), model_name};
+}
+#endif
+
+int run_plan_mode(std::string const& query, std::string const& plan_json_path,
+                  std::string const& tl_path, Progress& prog, bool dry_run) {
+  std::string source = "fixture";
+  std::string model_name = "(fixture)";
+  Json plan;
+
+  if (!plan_json_path.empty()) {
+    std::ifstream in(plan_json_path);
+    if (!in) {
+      std::println("[✗] 读不到计划文件：{}", plan_json_path);
+      return 2;
+    }
+    Json p = Json::parse(in, nullptr, /*allow_exceptions=*/false);
+    if (p.is_discarded()) {
+      std::println("[✗] 计划文件不是合法 JSON：{}", plan_json_path);
+      return 2;
+    }
+    plan = std::move(p);
+  } else {
+#ifdef SA_PLAN_LIVE
+    std::println("—— S7 · LLM 规划（一句话 → DAG）——\n用户：{}", query);
+    PlannerResult const pr = plan_with_llm(query);
+    model_name = pr.model;
+    if (!pr.ok) {
+      std::println("[✗] 规划失败：{}", pr.error);
+      return 2;
+    }
+    source = "llm";
+    plan = pr.plan;
+#else
+    std::println("[✗] 本构建未启用 HTTP/模型，无法真机规划（可传 --plan-json=<路径> 离线执行）");
+    return 2;
+#endif
+  }
+
+  auto const issues = sa::plan::validate(plan);
+  if (!issues.empty()) {
+    std::println("[✗] 计划未通过静态校验（fail-closed，不执行）：");
+    for (auto const& i : issues) std::println("  - {}: {}", i.code, i.message);
+    return 2;
+  }
+  plan = sa::plan::layout(std::move(plan));
+
+  if (dry_run) {
+    std::println("{}", plan.dump(2));
+    return 0;
+  }
+
+  auto loaded = load_samock_registry();
+  if (!loaded) {
+    std::println("[✗] {}", loaded.error());
+    return 1;
+  }
+  ToolRegistry samock = std::move(*loaded);
+
+  Json const history = load_history(tl_path);
+  std::string const plan_id = next_plan_id(history.value("tasks", Json::array()));
+  prog.set_task(plan_id);
+  prog.set_clock(0);
+  prog.emit(Json{{"t", "run"}, {"state", "start"}, {"pace_ms", prog.pace_ms()}});
+  prog.emit(Json{{"t", "task"}, {"state", "start"}, {"id", plan_id},
+                 {"title", plan.value("title", query)}});
+  prog.emit(Json{{"t", "dag"}, {"task", plan_id}, {"dag", plan}});
+
+  LiveRec L;
+  L.prog = &prog;
+  ExecOutcome const out = execute_plan(plan, query, samock, L);
+  prog.emit(Json{{"t", "task"}, {"state", "done"}, {"id", plan_id}});
+
+  Json task = build_plan_task(plan, query, L, samock, out.ok, source, model_name);
+  task["id"] = plan_id;
+  Json tl = history;
+  tl["schema"] = "sa-tasklog/v1";
+  tl["deterministic"] = (source == "fixture");
+  tl["source"] = "sa_demo S7/S8 · 一句话规划（" + source + "）+ 历史合并";
+  tl["tasks"] = merge_history(history.value("tasks", Json::array()), Json::array({task}));
+  if (!write_json_atomic(tl_path, tl)) {
+    std::println("[✗] 写 {} 失败", tl_path);
+    prog.emit(Json{{"t", "run"}, {"state", "done"}});
+    return 1;
+  }
+  prog.emit(Json{{"t", "run"}, {"state", "done"}});
+
+  std::println("\n计划：{} · 节点 {} · 边 {}", plan.value("title", query),
+               plan["nodes"].size(), plan["edges"].size());
+  std::println("执行：{} · 消息 {} 条 · 世界钟 {}s", out.ok ? "Completed" : "Failed",
+               L.msgs.size(), task["facts"].value("clock_end_sec", 0));
+  for (std::string const& f : out.fails) std::println("  - 工具失败：{}", f);
+  std::println("已写 {}", tl_path);
+  return out.ok ? 0 : 3;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   // 参数：--tasklog=<path>（默认 web/sa/sa_tasklog.json；sa_cgi 传绝对路径）
   //       --progress=<path>（实时进度 JSONL；空 = 不写，直跑/测试默认）
   //       --pace-ms=<N>（每条进度消息后 sleep N ms；0 = 全速，页面运行默认 300）
+  //       --query=<一句话>（S7：LLM 规划 → DAG → 执行；也可经 env SA_QUERY 传入）
+  //       --plan-json=<path>（S7：跳过 LLM，直接执行计划文件；离线可测）
+  //       --dry-run（只规划/校验并打印 DAG，不执行）
   std::string tl_path = "web/sa/sa_tasklog.json";
   std::string prog_path;
+  std::string query;
+  std::string plan_json_path;
+  bool dry_run = false;
   long pace_ms = 0;
   for (int i = 1; i < argc; ++i) {
     std::string const a = argv[i];
@@ -418,6 +935,12 @@ int main(int argc, char** argv) {
       tl_path = a.substr(std::string("--tasklog=").size());
     } else if (a.starts_with("--progress=")) {
       prog_path = a.substr(std::string("--progress=").size());
+    } else if (a.starts_with("--query=")) {
+      query = a.substr(std::string("--query=").size());
+    } else if (a.starts_with("--plan-json=")) {
+      plan_json_path = a.substr(std::string("--plan-json=").size());
+    } else if (a == "--dry-run") {
+      dry_run = true;
     } else if (a.starts_with("--pace-ms=")) {
       std::string const v = a.substr(std::string("--pace-ms=").size());
       try {
@@ -430,11 +953,19 @@ int main(int argc, char** argv) {
       if (pace_ms > 5000) pace_ms = 5000;
     } else if (a == "--help" || a == "-h") {
       std::println(
-          "用法：sa_demo [--tasklog=<路径>] [--progress=<JSONL 路径>] [--pace-ms=<0..5000>]");
+          "用法：sa_demo [--tasklog=<路径>] [--progress=<JSONL 路径>] [--pace-ms=<0..5000>]\n"
+          "              [--query=<一句话> | --plan-json=<路径>] [--dry-run]");
       return 0;
     }
   }
+  if (query.empty()) {
+    if (char const* q = std::getenv("SA_QUERY"); q != nullptr && *q != '\0') query = q;
+  }
   Progress prog(prog_path, pace_ms);
+
+  // S7：一句话 / 计划文件模式（不跑 S1–S4 手写导演段）。
+  if (!query.empty() || !plan_json_path.empty())
+    return run_plan_mode(query, plan_json_path, tl_path, prog, dry_run);
 
   std::println("SystemAgent 骨架 demo（problems/64 · S1–S4 · 全离线）\n");
   std::println("SA ≠ 单个 agent：核心 agent（编排·只读观测） + 电话域 agent + 消息域 agent；");
@@ -444,26 +975,12 @@ int main(int argc, char** argv) {
   std::println("samock 库：{}", so.string());
 
   // ---- ① samock 装载（fail-closed 加载器；wfr 动态工具库同一路径）----
-  std::vector<std::string> names(std::begin(kSamockTools), std::end(kSamockTools));
-  auto specs = load_dynamic_tools(so.string(), names);
-  if (!specs) {
-    std::println("[✗] samock 加载失败：{}", specs.error());
+  auto loaded = load_samock_registry();
+  if (!loaded) {
+    std::println("[✗] {}", loaded.error());
     return 1;
   }
-  if (specs->size() != names.size()) {
-    std::println("[✗] 加载工具数不符：期望 {} 实际 {}", names.size(), specs->size());
-    return 1;
-  }
-  ToolRegistry samock;
-  for (ToolSpec& s : *specs) samock.add(std::move(s));
-
-  // 启动自检（wfr-㊹ 治理惯例）：有副作用却未声明效果分类 → fail-fast。
-  auto vio = effect_class_violations(samock);
-  if (!vio.empty()) {
-    std::println("[✗] samock 效果分类违规（read_only=false 必须声明 Idempotent/Irreversible）：");
-    for (std::string const& t : vio) std::println("     {}", t);
-    return 1;
-  }
+  ToolRegistry samock = std::move(*loaded);
 
   std::println("\n已装载 {} 把 samock 工具（read / effect / approval）：", samock.size());
   for (ToolSpec const& s : samock.all())
@@ -1045,18 +1562,17 @@ int main(int argc, char** argv) {
             {"text", "世界断言：messages=[妈妈, delivered=true] · calls 空 · 钟=0s"}}});
   t2["milestones_summary"] = Json::array();
 
-  // —— 组装任务日志并落盘（web/sa/index.html 的数据源）——
-  Json tl;
+  // —— 组装任务日志并与历史合并落盘（web/sa/index.html 的数据源）——
+  // S8：scripts 的 t1/t2 用稳定 id 覆盖更新；一句话规划产生的任务保留在历史里（删除才消失）。
+  Json tl = load_history(tl_path);
   tl["schema"] = "sa-tasklog/v1";
   tl["deterministic"] = true;
-  tl["source"] = "sa_demo S1–S3 + S4（tasks：t1 C7 简版 / t2 消息直路 · 全离线脚本桩）";
-  tl["tasks"] = Json::array({t1, t2});
+  tl["source"] = "sa_demo S1–S4 脚本（t1 C7 简版 / t2 消息直路）+ S7/S8 一句话规划历史";
+  tl["tasks"] = merge_history(tl.value("tasks", Json::array()), Json::array({t1, t2}));
 
-  std::ofstream os(tl_path);
-  if (!os) {
+  if (!write_json_atomic(tl_path, tl)) {
     r4(false, "写 " + tl_path + " 失败（页面将退到内置 sample-tasklog.json）");
   } else {
-    os << tl.dump(2) << "\n";
     r4(true, "已写 " + tl_path + " —— ./run-webui.sh 起服后开 http://localhost:8000/sa/ 查看");
   }
   prog.emit(Json{{"t", "run"}, {"state", "done"}});

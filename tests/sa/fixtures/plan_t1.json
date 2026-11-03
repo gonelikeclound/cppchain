@@ -1,0 +1,19 @@
+{
+  "title": "给妈妈打电话；改口后发微信",
+  "nodes": [
+    {"id": "n_user", "role": "user", "label": "用户", "task": "给妈妈打电话问她晚上来不来吃饭"},
+    {"id": "n_core1", "role": "core", "label": "核心", "task": "→电话域：给妈妈打电话问她晚上来不来吃饭。"},
+    {"id": "n_call", "role": "phone", "label": "电话域", "task": "给妈妈打电话，拒接按策略重拨一次；若改口则改道消息域", "args": {"call_id": "c1", "number": "13800000000"}},
+    {"id": "n_core2", "role": "core", "label": "核心", "task": "→消息域：妈妈改口，让发微信。"},
+    {"id": "n_msg", "role": "msg", "label": "消息域", "task": "给妈妈发微信", "args": {"msg_id": "m5", "to": "妈妈", "text": "你晚上来不来吃饭？我提前准备。"}},
+    {"id": "n_world", "role": "world", "label": "世界", "task": "核对通话已结束、消息已送达"}
+  ],
+  "edges": [
+    {"from": "n_user", "to": "n_core1", "kind": "query", "label": "query"},
+    {"from": "n_core1", "to": "n_call", "kind": "dispatch", "label": "→电话域"},
+    {"from": "n_user", "to": "n_call", "kind": "control", "label": "改口(barge_in)"},
+    {"from": "n_call", "to": "n_core2", "kind": "report", "label": "ended 上报"},
+    {"from": "n_core2", "to": "n_msg", "kind": "dispatch", "label": "→消息域"},
+    {"from": "n_msg", "to": "n_world", "kind": "world", "label": "写世界"}
+  ]
+}

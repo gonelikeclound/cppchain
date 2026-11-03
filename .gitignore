@@ -17,6 +17,8 @@ web/sa/run_meta.json
 web/sa/run.log
 # S6c 实时进度（sa_demo 边跑边写，页面轮询；运行态非源码）
 web/sa/sa_progress.jsonl
+# S8 单运行锁（sa_cgi flock；运行态非源码）
+web/sa/.run.lock
 # run-webui.sh 启动时创建的 symlink（指向 build 产物，运行态不入库）
 web/cgi-bin/
 web/wfr_bin

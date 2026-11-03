@@ -87,6 +87,19 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 #left .side-head h1{ font-size:15px; letter-spacing:.02em; }
 #left .side-head .cnt{ font-size:12px; color:var(--dim); }
 #left .side-actions{ display:flex; gap:8px; padding:0 14px 8px; flex-wrap:wrap; }
+#left .side-actions.plan-row{ flex-wrap:nowrap; }
+#plan-input{ flex:1; min-width:0; background:var(--panel2); color:var(--text);
+             border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-size:12px; }
+#plan-input:focus{ outline:1px solid var(--accent); }
+#plan-btn{ flex:none; }
+#left .side-actions.demo-row{ padding-top:0; gap:6px; }
+.chip{ background:var(--panel2); color:var(--dim); border:1px solid var(--border);
+       border-radius:99px; padding:2px 9px; font-size:11px; cursor:pointer; }
+.chip:hover{ color:var(--text); border-color:var(--accent); }
+.tdel{ flex:none; background:transparent; border:none; color:var(--dim); cursor:pointer;
+       font-size:15px; line-height:1; padding:0 3px; border-radius:4px; }
+.tdel:hover{ color:var(--bad); background:var(--panel2); }
+#dl-task, #dl-all{ padding:2px 8px; font-size:11px; }
 .ghost{ background:transparent; color:var(--accent); border:1px solid var(--accent);
         border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
 .ghost:hover{ background:var(--accent); color:var(--accent-ink); }
@@ -232,6 +245,20 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
       <button class="ghost" id="run-btn" type="button">▶ 运行 demo</button>
       <span class="cnt" id="src-label" style="line-height:24px">…</span>
     </div>
+    <div class="side-actions plan-row">
+      <input id="plan-input" type="text" aria-label="一句话生成 DAG"
+             placeholder="一句话：给妈妈打电话，改口就发微信…">
+      <button class="ghost" id="plan-btn" type="button">生成 DAG 并运行</button>
+    </div>
+    <div class="side-actions demo-row" id="demo-row">
+      <span class="cnt">示例</span>
+      <button class="chip" type="button"
+              data-q="给妈妈打电话问她晚上来不来吃饭，拒接就再打一次，改口就说发微信">电话+改口</button>
+      <button class="chip" type="button"
+              data-q="给妈妈发微信说我晚上不回家吃饭了，让她别等我">只发微信</button>
+      <button class="chip" type="button"
+              data-q="给妈妈打个电话问她晚上来不来吃饭">只打电话</button>
+    </div>
     <div class="side-status" id="run-status">CGI：—</div>
     <ul id="task-items"></ul>
   </aside>
@@ -250,6 +277,9 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
         <div class="tabs">
           <button class="tab active" id="tab-dag" type="button">节点图</button>
           <button class="tab" id="tab-src" type="button">源码</button>
+          <span style="flex:1"></span>
+          <button class="ghost" id="dl-task" type="button">下载当前</button>
+          <button class="ghost" id="dl-all" type="button">下载历史</button>
         </div>
       </div>
       <div id="dag-scroll">
@@ -359,10 +389,16 @@ function renderTasks(){
       <div class="t-top">
         <span class="tstatus ${esc((t.status||'').toLowerCase())}">${esc(t.status||'')}</span>
         <span class="ttitle">${esc(t.title||'')}</span>
+        <button class="tdel" type="button" data-del="${esc(t.id)}"
+                title="删除这条历史（持久删除）" aria-label="删除 ${esc(t.title||t.id)}">×</button>
       </div>
       <div class="tsum">${sum}</div>
       <div class="tmet">${met}</div>`;
     li.addEventListener('click', ()=>showTask(t.id));
+    li.querySelector('.tdel').addEventListener('click', e=>{
+      e.stopPropagation();
+      deleteTask(t.id);
+    });
     box.appendChild(li);
   }
 }
@@ -740,22 +776,23 @@ function runPace(){   // 页面节奏：默认 300ms/步；?pace=NNN 可覆盖�
   const p = new URLSearchParams(location.search).get('pace');
   return (p && /^\d{1,4}$/.test(p)) ? String(Math.min(5000, +p)) : '300';
 }
-async function runCgi(){
+async function runCgiUrl(url, busy, btn){
   const st = el('run-status');
-  const btn = el('run-btn');
-  const pace = runPace();
   st.className = 'side-status busy';
-  st.textContent = '▶ 运行中…（逐节点慢放 ' + pace + ' ms/步，sa_cgi 触发 sa_demo 全离线重放）';
-  btn.disabled = true;
+  st.textContent = busy;
+  if(btn) btn.disabled = true;
   startLive();   // 先开轮询：sa_cgi 会先清空进度文件，随后事件逐条到达
   try{
-    const r = await fetch('/cgi-bin/sa_cgi?scenario=all&pace=' + pace, {cache:'no-store'});
+    const r = await fetch(url, {cache:'no-store'});
     if(!r.ok) throw new Error('CGI HTTP ' + r.status);
     const j = await r.json();
     if(!j.ok) throw new Error(j.error || '运行失败');
     stopLive();
     st.className = 'side-status ok';
-    st.textContent = '✓ 运行完成 · ' + j.elapsed_ms + ' ms · 第 ' + j.run_total + ' 次 · ' + fmtAgo(j.last_run_at);
+    st.textContent = '✓ 运行完成 · ' + j.elapsed_ms + ' ms · 第 ' + j.run_total + ' 次 · ' +
+                     fmtAgo(j.last_run_at) +
+                     (j.mode === 'plan' && j.title ? ' · DAG「' + j.title + '」' +
+                        (j.dag_nodes != null ? '（' + j.dag_nodes + ' 节点 / ' + j.dag_edges + ' 边）' : '') : '');
     document.body.dataset.e2eRun = 'pass';   // E2E 钩子：直接落结果，避免轮询竞态
     document.body.dataset.e2eRunDetail = st.textContent;
     await loadData(true);   // 重拉 tasklog（唯一真相，保留当前选中任务）
@@ -767,10 +804,69 @@ async function runCgi(){
     document.body.dataset.e2eRun = 'fail';   // E2E 钩子
     document.body.dataset.e2eRunDetail = st.textContent;
   }finally{
-    btn.disabled = false;
+    if(btn) btn.disabled = false;
   }
 }
+async function runCgi(){
+  const pace = runPace();
+  await runCgiUrl('/cgi-bin/sa_cgi?scenario=all&pace=' + pace,
+    '▶ 运行中…（逐节点慢放 ' + pace + ' ms/步，sa_cgi 触发 sa_demo 全离线重放）', el('run-btn'));
+}
+async function planCgi(){
+  const q = el('plan-input').value.trim();
+  if(!q){ el('plan-input').focus(); return; }
+  const pace = runPace();
+  await runCgiUrl('/cgi-bin/sa_cgi?planner=llm&pace=' + pace + '&query=' + encodeURIComponent(q),
+    '▶ LLM 规划中…（一句话 → DAG → 校验 → 执行，' + pace + ' ms/步）', el('plan-btn'));
+}
 el('run-btn').addEventListener('click', runCgi);
+el('plan-btn').addEventListener('click', planCgi);
+el('plan-input').addEventListener('keydown', e=>{ if(e.key === 'Enter') planCgi(); });
+
+/* S8 · 历史删除（持久）：服务端从 sa_tasklog.json 移除该 task，页面重拉。 */
+async function deleteTask(id){
+  const st = el('run-status');
+  if(LIVE_TIMER){ st.className = 'side-status busy'; st.textContent = '运行中：等本次跑完再删历史'; return; }
+  try{
+    const r = await fetch('/cgi-bin/sa_cgi?action=delete&id=' + encodeURIComponent(id), {cache:'no-store'});
+    if(!r.ok) throw new Error('CGI HTTP ' + r.status);
+    const j = await r.json();
+    if(!j.ok) throw new Error(j.error || '删除失败');
+    st.className = 'side-status ok';
+    st.textContent = '✓ 已删除 ' + id + '（剩余 ' + j.remaining + ' 条历史）';
+    await loadData(true);   // 历史库已变：重拉；若删的是当前任务则自动选中第一条
+  }catch(e){
+    st.className = 'side-status err';
+    st.textContent = '✗ 删除失败：' + e.message;
+  }
+}
+
+/* S8 · 下载：当前任务 / 全部历史（纯前端 Blob，不新增服务端端点）。 */
+function downloadJson(obj, name){
+  const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+}
+el('dl-task').addEventListener('click', ()=>{
+  if(!CUR) return;
+  downloadJson(CUR, 'sa-task-' + (CUR.id || 'task') + '.json');
+});
+el('dl-all').addEventListener('click', ()=>{
+  downloadJson({schema:'sa-tasklog/v1', tasks:TASKS}, 'sa-tasklog.json');
+});
+
+/* S8 · 其他 demo：一键填入示例句子（不自动执行，用户可改）。 */
+document.querySelectorAll('#demo-row .chip').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    el('plan-input').value = b.dataset.q || '';
+    el('plan-input').focus();
+  });
+});
 
 /* ======================== S6b · 图源码标签页（右上面板 · 节点图/源码） ========================
    这里的「源码」= 当前任务 **DAG 图的定义本身**（SA 生成的图源码）：

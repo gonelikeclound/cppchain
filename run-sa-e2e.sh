@@ -80,8 +80,8 @@ if [[ "$started" == 0 ]]; then echo "服务器未就绪" >&2; exit 1; fi
 echo ""
 echo "==== A · 静态 HTTP ===="
 html=$(curl -s "$BASE/sa/")
-if [[ "$html" == *"SA 编排台"* && "$html" == *"任务列表"* && "$html" == *"运行 demo"* && "$html" == *"DAG"* && "$html" == *"源码"* ]]; then
-  ok "页面 /sa/ 渲染骨架齐（SA 编排台 / 任务列表 / 运行 demo / DAG / 源码标签页）"
+if [[ "$html" == *"SA 编排台"* && "$html" == *"任务列表"* && "$html" == *"运行 demo"* && "$html" == *"DAG"* && "$html" == *"源码"* && "$html" == *"生成 DAG 并运行"* && "$html" == *"下载历史"* ]]; then
+  ok "页面 /sa/ 渲染骨架齐（SA 编排台 / 任务列表 / 运行 demo / DAG / 源码 / 一句话 / 下载）"
 else
   bad "页面 /sa/ 骨架缺失"
 fi
@@ -117,16 +117,77 @@ import json, os, sys
 d = sys.argv[1]
 assert os.path.exists(d + "/sa_tasklog.json")
 j = json.load(open(d + "/sa_tasklog.json"))
-assert j["schema"] == "sa-tasklog/v1" and len(j["tasks"]) == 2, j.get("schema")
+assert j["schema"] == "sa-tasklog/v1", j.get("schema")
+ids = {t["id"] for t in j["tasks"]}
+assert {"t1", "t2"} <= ids, ids
 m = json.load(open(d + "/run_meta.json"))
 assert m["total"] >= 1
 assert os.path.exists(d + "/run.log")
 PY
-then ok "运行产物落盘：tasklog（2 任务）+ run_meta（total≥1）+ run.log"
+then ok "运行产物落盘：tasklog（含 t1/t2）+ run_meta（total≥1）+ run.log"
 else bad "运行产物缺失"; fi
 
 chk "run.log 含「S1 + S2 + S3 + S4 全部通过」（执行真发生）" \
     grep -q "S1 + S2 + S3 + S4 全部通过" "$SA_DIR/run.log"
+
+# S7：一句话 → DAG 的**离线**链路（fixture 跳过真机模型）：校验 → 解释器 → tasklog。
+PLANTL="$SA_DIR/.e2e_plan_tasklog.json"
+PLANPROG="$SA_DIR/.e2e_plan_progress.jsonl"
+if "$SCRIPT_DEMO" --plan-json=tests/sa/fixtures/plan_t1.json --tasklog="$PLANTL" \
+      --progress="$PLANPROG" --pace-ms=0 >/dev/null 2>&1 \
+   && "$SCRIPT_DEMO" --plan-json=tests/sa/fixtures/plan_t1.json --tasklog="$PLANTL" \
+      --pace-ms=0 >/dev/null 2>&1 \
+   && python3 - "$PLANTL" <<'PY'
+import json, sys
+tasks = json.load(open(sys.argv[1]))["tasks"]
+assert len(tasks) == 2, len(tasks)                       # 两次运行 → 历史保留两条
+assert tasks[0]["id"] != tasks[1]["id"], tasks
+for t in tasks:
+    assert t["status"] == "Completed", t["status"]
+    assert t["facts"]["milestones"] == 7 and t["facts"]["clock_end_sec"] == 27, t["facts"]
+    assert len(t["messages"]) == 16, len(t["messages"])
+    assert t["dag"]["nodes"][2]["layer"] == 2, t["dag"]["nodes"]
+PY
+then ok "S7 一句话计划（离线 fixture ×2）：校验 → 解释器 → 16 消息/7 里程碑/钟 27s + 历史保留"
+else bad "S7 计划执行失败"; fi
+
+# S7 fail-closed：坏计划（缺 world）必须拒跑，且不产出 tasklog。
+BADPLAN="$SA_DIR/.e2e_bad_plan.json"
+BADTL="$SA_DIR/.e2e_bad_tasklog.json"
+python3 - "$BADPLAN" <<'PY'
+import json, sys
+p = json.load(open("tests/sa/fixtures/plan_t1.json"))
+p["nodes"] = [n for n in p["nodes"] if n["role"] != "world"]
+p["edges"] = [e for e in p["edges"] if e["to"] != "n_world"]
+json.dump(p, open(sys.argv[1], "w"))
+PY
+if "$SCRIPT_DEMO" --plan-json="$BADPLAN" --tasklog="$BADTL" --pace-ms=0 >/dev/null 2>&1 \
+   || [[ -f "$BADTL" ]]; then bad "S7 fail-closed：坏计划未被拒"; else ok "S7 fail-closed：坏计划（缺 world）拒跑且零产出"; fi
+rm -f "$BADPLAN" "$BADTL"
+
+# S8：历史删除必须持久（从 sa_tasklog.json 真删），且再删同一 id 要明确报错。
+DELDIR="$(mktemp -d)"
+cp "$PLANTL" "$DELDIR/sa_tasklog.json"
+DELID="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"][0]["id"])' "$PLANTL")"
+del_resp=$(SA_DATA_DIR="$DELDIR" QUERY_STRING="action=delete&id=$DELID" "$SCRIPT_BIN")
+if printf '%s\n' "$del_resp" | tail -n 1 | python3 -c '
+import json, sys
+j = json.load(sys.stdin)
+assert j.get("ok") is True and j.get("deleted") == sys.argv[1] and j.get("remaining") == 1, j
+' "$DELID" && python3 - "$DELDIR" "$DELID" <<'PY'
+import json, sys
+tasks = json.load(open(sys.argv[1] + "/sa_tasklog.json"))["tasks"]
+assert len(tasks) == 1 and all(t.get("id") != sys.argv[2] for t in tasks), tasks
+PY
+then ok "S8 历史删除：持久移除并原子落盘（剩余 1 条）"
+else bad "S8 历史删除失败：$del_resp"; fi
+del_resp2=$(SA_DATA_DIR="$DELDIR" QUERY_STRING="action=delete&id=$DELID" "$SCRIPT_BIN")
+if printf '%s\n' "$del_resp2" | tail -n 1 | python3 -c '
+import json, sys
+assert json.load(sys.stdin).get("ok") is False
+'; then ok "S8 删除不存在任务：明确报错（ok=false）"; else bad "S8 重复删除未报错"; fi
+rm -rf "$DELDIR"
+rm -f "$PLANTL" "$PLANPROG"
 
 if python3 - "$SA_DIR" <<'PY'
 import json, sys

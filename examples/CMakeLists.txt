@@ -161,6 +161,11 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   elseif(t IN_LIST SA_EXAMPLE_TARGETS)
     # sa_demo：Agent 组 + 动态工具加载（load_dynamic_tools 在 cppchain_tool）
     target_link_libraries(${t} PRIVATE cppchain_agent cppchain_tool)
+    # S7：一句话 → DAG 需要真机 LLM（OpenAI 兼容端点）；HTTP 关闭时只保留离线脚本模式。
+    if(CPPCHAIN_BUILD_HTTP)
+      target_link_libraries(${t} PRIVATE cppchain_http_curl cppchain_model)
+      target_compile_definitions(${t} PRIVATE SA_PLAN_LIVE=1)
+    endif()
   elseif(t IN_LIST SA_CGI_EXAMPLE_TARGETS)
     # sa_cgi：纯 spawn CGI，不链 cppchain（只碰 std + nlohmann）
   else()
