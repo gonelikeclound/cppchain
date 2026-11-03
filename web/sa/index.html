@@ -96,10 +96,11 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 .chip{ background:var(--panel2); color:var(--dim); border:1px solid var(--border);
        border-radius:99px; padding:2px 9px; font-size:11px; cursor:pointer; }
 .chip:hover{ color:var(--text); border-color:var(--accent); }
-.tdel{ flex:none; background:transparent; border:none; color:var(--dim); cursor:pointer;
-       font-size:15px; line-height:1; padding:0 3px; border-radius:4px; }
-.tdel:hover{ color:var(--bad); background:var(--panel2); }
-#dl-task, #dl-all{ padding:2px 8px; font-size:11px; }
+.tdel{ flex:none; background:transparent; border:1px solid var(--border); color:var(--dim);
+       cursor:pointer; font-size:10.5px; line-height:1.4; padding:0 7px; border-radius:99px; }
+.tdel:hover{ color:#fff; background:var(--bad); border-color:var(--bad); }
+#dl-task, #dl-all, #del-cur{ padding:2px 9px; font-size:11px; }
+#del-cur:hover{ background:var(--bad); border-color:var(--bad); color:#fff; }
 .ghost{ background:transparent; color:var(--accent); border:1px solid var(--accent);
         border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
 .ghost:hover{ background:var(--accent); color:var(--accent-ink); }
@@ -258,6 +259,20 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
               data-q="给妈妈发微信说我晚上不回家吃饭了，让她别等我">只发微信</button>
       <button class="chip" type="button"
               data-q="给妈妈打个电话问她晚上来不来吃饭">只打电话</button>
+      <button class="chip" type="button"
+              data-q="先给妈妈打电话问她晚上来不来吃饭，打完再发微信提醒她">电话→微信</button>
+      <button class="chip" type="button"
+              data-q="先给妈妈发微信说晚上不回家吃饭，再打电话确认她看到">微信→电话</button>
+      <button class="chip" type="button"
+              data-q="给爸爸发微信说我这周末回家看他">发给爸爸</button>
+      <button class="chip" type="button"
+              data-q="给妈妈打电话约明天中午一起吃饭，如果她改口就发微信确认">约饭+改口</button>
+    </div>
+    <div class="side-actions" id="ops-row">
+      <span class="cnt">操作</span>
+      <button class="ghost" id="dl-task" type="button">⬇ 下载当前</button>
+      <button class="ghost" id="dl-all" type="button">⬇ 下载历史</button>
+      <button class="ghost" id="del-cur" type="button">删除当前</button>
     </div>
     <div class="side-status" id="run-status">CGI：—</div>
     <ul id="task-items"></ul>
@@ -277,9 +292,6 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
         <div class="tabs">
           <button class="tab active" id="tab-dag" type="button">节点图</button>
           <button class="tab" id="tab-src" type="button">源码</button>
-          <span style="flex:1"></span>
-          <button class="ghost" id="dl-task" type="button">下载当前</button>
-          <button class="ghost" id="dl-all" type="button">下载历史</button>
         </div>
       </div>
       <div id="dag-scroll">
@@ -390,7 +402,7 @@ function renderTasks(){
         <span class="tstatus ${esc((t.status||'').toLowerCase())}">${esc(t.status||'')}</span>
         <span class="ttitle">${esc(t.title||'')}</span>
         <button class="tdel" type="button" data-del="${esc(t.id)}"
-                title="删除这条历史（持久删除）" aria-label="删除 ${esc(t.title||t.id)}">×</button>
+                title="删除这条历史（持久删除）" aria-label="删除 ${esc(t.title||t.id)}">删除</button>
       </div>
       <div class="tsum">${sum}</div>
       <div class="tmet">${met}</div>`;
@@ -778,6 +790,11 @@ function runPace(){   // 页面节奏：默认 300ms/步；?pace=NNN 可覆盖�
 }
 async function runCgiUrl(url, busy, btn){
   const st = el('run-status');
+  if(LIVE_TIMER){   // 已有一次运行在进行：忽略重复点击（服务端还有 flock 兜底）
+    st.className = 'side-status busy';
+    st.textContent = '已有一次运行在进行，请等它结束';
+    return;
+  }
   st.className = 'side-status busy';
   st.textContent = busy;
   if(btn) btn.disabled = true;
@@ -859,12 +876,13 @@ el('dl-task').addEventListener('click', ()=>{
 el('dl-all').addEventListener('click', ()=>{
   downloadJson({schema:'sa-tasklog/v1', tasks:TASKS}, 'sa-tasklog.json');
 });
+el('del-cur').addEventListener('click', ()=>{ if(CUR) deleteTask(CUR.id); });
 
-/* S8 · 其他 demo：一键填入示例句子（不自动执行，用户可改）。 */
+/* S8 · 其他 demo：示例 chip = 一键运行（填词 + 立刻生成 DAG 并执行）。 */
 document.querySelectorAll('#demo-row .chip').forEach(b=>{
   b.addEventListener('click', ()=>{
     el('plan-input').value = b.dataset.q || '';
-    el('plan-input').focus();
+    planCgi();
   });
 });
 

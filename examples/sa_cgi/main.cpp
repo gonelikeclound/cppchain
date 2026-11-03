@@ -331,19 +331,28 @@ int main() {
     return respond();
   }
 
-  // 读回任务 id 列表（tasklog 是唯一真相）；规划模式顺带回传标题/状态。
+  // 读回本次运行产生的任务（tasklog 是唯一真相）。
+  // S8 历史库：数组是「最近优先」——规划模式的新任务在最前，只取第一条；
+  // 脚本模式只回传本轮稳定 id t1/t2（历史里的其他任务不算本次产物）。
   std::vector<std::string> task_ids;
   try {
     std::ifstream in(tl);
-    Json tl_json = Json::parse(in);
-    for (Json const& t : tl_json["tasks"]) {
-      task_ids.push_back(t.value("id", "?"));
-      if (plan_mode) {
+    Json const tl_json = Json::parse(in);
+    Json const tasks = tl_json.value("tasks", Json::array());
+    if (plan_mode) {
+      if (!tasks.empty()) {
+        Json const& t = tasks.front();
+        task_ids.push_back(t.value("id", "?"));
         out["title"] = t.value("title", "");
         out["task_status"] = t.value("status", "");
         Json const dag = t.value("dag", Json::object());
         out["dag_nodes"] = static_cast<std::int64_t>(dag.value("nodes", Json::array()).size());
         out["dag_edges"] = static_cast<std::int64_t>(dag.value("edges", Json::array()).size());
+      }
+    } else {
+      for (Json const& t : tasks) {
+        std::string const id = t.value("id", "?");
+        if (id == "t1" || id == "t2") task_ids.push_back(id);
       }
     }
   } catch (...) { /* 列表拿不到不强判失败 */ }
