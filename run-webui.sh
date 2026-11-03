@@ -19,12 +19,13 @@ PORT="${1:-8000}"
 BIN="${WFR_BIN:-$PWD/build/dev/bin/wfr}"
 mkdir -p web/cgi-bin
 # wfr_cgi 产物若已构建则软链；未构建则先编
-if [[ ! -x build/dev/bin/wfr_cgi ]]; then
+if [[ ! -x build/dev/bin/wfr_cgi || ! -x build/dev/examples/sa_cgi ]]; then
   source ~/opt/gcc16/env.sh
-  cmake --build --preset dev --target wfr_cgi wfr
+  cmake --build --preset dev --target wfr_cgi wfr sa_cgi
 fi
 ln -sf ../../build/dev/bin/wfr_cgi web/cgi-bin/wfr_cgi
 ln -sf ../../build/dev/bin/wfr web/wfr_bin          # 供 CGI 默认路径走 web 相对（可选）
+ln -sf ../../build/dev/examples/sa_cgi web/cgi-bin/sa_cgi   # SA 运行 CGI（problems/64 S5）
 
 export WFR_BIN="${WFR_BIN:-$PWD/build/dev/bin/wfr}"
 # GCC16 libstdc++ 运行时（wfr_cgi / wfr 都需 GLIBCXX_3.4.35）；http.server --cgi 会继承此 env

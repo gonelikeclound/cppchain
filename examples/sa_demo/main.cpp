@@ -313,8 +313,21 @@ bool has_tool_error(agent::Agent const& a, std::string const& tool) {
 
 }  // namespace
 
-int main() {
-  std::println("SystemAgent 骨架 demo（problems/64 · S1 · 全离线）\n");
+int main(int argc, char** argv) {
+  // 参数：--tasklog=<path>（默认 web/sa/sa_tasklog.json；sa_cgi 传绝对路径）
+  std::string tl_path = "web/sa/sa_tasklog.json";
+  for (int i = 1; i < argc; ++i) {
+    std::string const a = argv[i];
+    std::string const pfx = "--tasklog=";
+    if (a.starts_with(pfx)) {
+      tl_path = a.substr(pfx.size());
+    } else if (a == "--help" || a == "-h") {
+      std::println("用法：sa_demo [--tasklog=<tasklog 路径>]");
+      return 0;
+    }
+  }
+
+  std::println("SystemAgent 骨架 demo（problems/64 · S1–S4 · 全离线）\n");
   std::println("SA ≠ 单个 agent：核心 agent（编排·只读观测） + 电话域 agent + 消息域 agent；");
   std::println("假世界全部来自独立 so：tests/plugin_demo/samock.cpp → libsamock.so\n");
 
@@ -850,7 +863,6 @@ int main() {
   tl["source"] = "sa_demo S1–S3 + S4（tasks：t1 C7 简版 / t2 消息直路 · 全离线脚本桩）";
   tl["tasks"] = Json::array({t1, t2});
 
-  std::string const tl_path = "web/sa/sa_tasklog.json";
   std::ofstream os(tl_path);
   if (!os) {
     r4(false, "写 " + tl_path + " 失败（页面将退到内置 sample-tasklog.json）");

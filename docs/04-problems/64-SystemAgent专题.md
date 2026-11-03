@@ -36,6 +36,27 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 7 轮（2026-11-03 · S5 CGI 运行端点）
+
+- **S5 全过**：浏览器 `GET /cgi-bin/sa_cgi?scenario=all` → `application/json` 运行回执；页面「▶ 运行 demo」
+  按钮触发 → 重拉 tasklog/meta、保留当前选中。
+- **`sa_cgi`（examples 目标，薄壳零 cppchain 依赖）**：解析 `QUERY_STRING`（scenario；
+  **v1 仅 all** —— t1/t2 单场景触发 = v2，需把 S2/S4 导演段抽成可单独调用，已按契约明确拒答）
+  → 定位 sa_demo 二进制（`/proc/self/exe` 真实路径同目录，或 `SA_DEMO_BIN` env 覆盖）
+  → `chdir` 仓库根 → `popen` 子进程（stdout/stderr → `web/sa/run.log`）→ 测墙钟
+  → 追加 `web/sa/run_meta.json`（runs 保留最近 50 条，gitignored 宿主观测、不进 tasklog）
+  → 输出 JSON（ok / elapsed_ms / run_total / last_run_at / task_ids / tasklog 绝对路径）。
+- **sa_demo 参数化**：`--tasklog=<path>`（默认 `web/sa/sa_tasklog.json`；CGI 传绝对路径），余下行为不变。
+- **页面**：左栏加「▶ 运行 demo」+ `#run-status` 三态（运行中 / ✓耗时·次数·相对时间 / ✗失败原因）；
+  `loadData(keepSel)` 重拉并保留当前选中；`loadMeta()` 显示 CGI 累计（上次 ms · 相对时间）；
+  非 WebUI 环境（fetch /cgi-bin 404）优雅降级提示。
+- **实测**：手动 CGI env 模拟 ✓（11ms · [t1,t2] · total 递增）；`python3 -m http.server --cgi` 全通路
+  ✓（scenario=all → ok；scenario=t1 → 按 v1 契约明确拒答；/sa/、tasklog、run_meta 全 200）；
+  run_meta 每次成功调用真实追加。
+- **诚实边界**：sa_cgi 只做「触发 + 回执 + meta」，执行语义全在 sa_demo（全离线确定性，
+  R5 纪律不碰真模型）。
+- 下一步：**S6** —— 事件漏斗 / L1 任务表 / Reaper 善后；**v2** 单场景触发（抽导演段）并行候选。
+
 ### 第 6 轮（2026-11-03 · S4 SA 专用 UI 页落地）
 
 - **S4 全过（17ms）**：SA 专用 UI 页 [`web/sa/index.html`](../../web/sa/index.html)（自包含单文件）。
@@ -250,7 +271,8 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S2** | samock **假电话 FSM**（Session 剧本 fold + 里程碑 seq 游标 + barge_in 控制平面）→ demo 跑通 **C7 简版**（打电话→改口→转消息，离线脚本桩组织闭环，24 断言） | ✅ **2026-11-03 全过**（10ms） |
 | **S3** | M0 化：SA 语义层校验纯函数（V1–V8 子集 → I00–I07）+ 坏编排对抗集（07 §5.2）+ 运行时挡幻觉工具 | ✅ **2026-11-03 全过**（13ms） |
 | **S4** | **SA 专用 UI 页**（`web/sa/index.html`）：左任务列表 / 右详情 50% 可拖动（上 DAG 节点图下消息列表）；数据契约 `sa-tasklog/v1`；t1 C7 简版 + t2 消息直路两任务 | ✅ **2026-11-03 全过**（17ms） |
-| S5+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8） | ⏳ 下一步 |
+| **S5** | **浏览器触发运行**：`sa_cgi` CGI 端点（`/cgi-bin/sa_cgi?scenario=all` —— spawn sa_demo + run_meta 维护，v1 仅 all）+ 页面「▶ 运行 demo」按钮 | ✅ **2026-11-03 全过**（11ms 回执，http --cgi 全通路） |
+| S6+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；
 摆放 = `examples/sa_demo/` + `tests/plugin_demo/samock.cpp`；虚拟钟 v1 = **工具推进**的模拟钟（够用）。

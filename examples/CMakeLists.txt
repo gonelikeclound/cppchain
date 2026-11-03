@@ -47,6 +47,8 @@ set(CONFIG_DECL_EXAMPLE_TARGETS config_decl)
 set(PHANTASMA_EXAMPLE_TARGETS phantasma_demo)
 # SystemAgent（problems/64）骨架 demo（S1）：核心 + 电话/消息域 agents + samock 世界（全离线）
 set(SA_EXAMPLE_TARGETS sa_demo)
+# sa_cgi（problems/64 S5）：SA 运行 CGI —— 浏览器触发 SA demo 运行（spawn 子进程 + 维护 run_meta）
+set(SA_CGI_EXAMPLE_TARGETS sa_cgi)
 # problems/02 S6 真机评测：file_context 路由臂 vs 模型自选工具臂（需 .env LLM 端点）
 set(FILE_ROUTE_LIVE_EXAMPLE_TARGETS file_route_live)
 # arch 26 project 自管理（第一刀）demo：目录化多文件 + 多任务独立对话 + 项目级注入（纯离线）
@@ -81,6 +83,7 @@ list(APPEND EXAMPLE_TARGETS ${PROXY_EXAMPLE_TARGETS})  # proxy_call：wfr-㊿ �
 list(APPEND EXAMPLE_TARGETS ${CONFIG_DECL_EXAMPLE_TARGETS})  # config_decl：P1.5 声明式配置（离线）
   list(APPEND EXAMPLE_TARGETS ${PHANTASMA_EXAMPLE_TARGETS})  # phantasma_demo：防幻觉信号灯（离线）
 list(APPEND EXAMPLE_TARGETS ${SA_EXAMPLE_TARGETS})  # sa_demo：SystemAgent 骨架 S1（离线）
+list(APPEND EXAMPLE_TARGETS ${SA_CGI_EXAMPLE_TARGETS})  # sa_cgi：SA 运行 CGI（浏览器触发）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_EXAMPLE_TARGETS})  # project_run：arch 26 project 结构（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_DRIVE_EXAMPLE_TARGETS})  # project_drive：arch 27 调度循环（离线）
 list(APPEND EXAMPLE_TARGETS ${LONGDOC_EXAMPLE_TARGETS})  # longdoc：arch 28 超长内容通用方法（离线）
@@ -158,6 +161,8 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
   elseif(t IN_LIST SA_EXAMPLE_TARGETS)
     # sa_demo：Agent 组 + 动态工具加载（load_dynamic_tools 在 cppchain_tool）
     target_link_libraries(${t} PRIVATE cppchain_agent cppchain_tool)
+  elseif(t IN_LIST SA_CGI_EXAMPLE_TARGETS)
+    # sa_cgi：纯 spawn CGI，不链 cppchain（只碰 std + nlohmann）
   else()
     target_link_libraries(${t} PRIVATE cppchain_message)
   endif()
@@ -177,6 +182,9 @@ target_compile_definitions(sa_demo PRIVATE SA_SAMOCK_DIR="${CMAKE_CURRENT_BINARY
 
 # mcp_mock（纯 server）：零 cppchain 库依赖，只用 nlohmann（SYSTEM 压三方告警）
 target_include_directories(mcp_mock SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+
+# sa_cgi（problems/64 S5）：SA 运行 CGI —— 只用 nlohmann 做 JSON 响应
+target_include_directories(sa_cgi SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
 
 # mcp_provider demo：注入 so:// 发现插件目录（编译期绝对路径，同测试的 MCP_TEST_SO_DIR 做法）
 target_compile_definitions(mcp_provider PRIVATE

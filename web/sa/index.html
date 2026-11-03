@@ -112,6 +112,11 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
          display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
 .tmet{ font-size:11px; color:var(--dim); display:flex; gap:10px; flex-wrap:wrap; }
 .tmet b{ color:var(--text); font-weight:600; }
+.side-status{ padding:0 14px 10px; font-size:11px; color:var(--dim); min-height:16px;
+              display:flex; align-items:center; gap:6px; }
+.side-status.ok{ color:var(--ok); }
+.side-status.err{ color:var(--bad); }
+.side-status.busy{ color:var(--accent); }
 
 /* ---------- 右 · 详情（上 DAG / 下 消息） ---------- */
 #dag-pane{ height:var(--hrPct, 50%); min-height:140px; display:flex; flex-direction:column; min-height:0; }
@@ -203,8 +208,10 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
       <input type="file" id="file-input" accept=".json,application/json" hidden>
     </div>
     <div class="side-actions">
+      <button class="ghost" id="run-btn" type="button">▶ 运行 demo</button>
       <span class="cnt" id="src-label" style="line-height:24px">…</span>
     </div>
+    <div class="side-status" id="run-status">CGI：—</div>
     <ul id="task-items"></ul>
   </aside>
   <div class="vdiv" id="vdivider" role="separator" aria-orientation="vertical"></div>
@@ -502,18 +509,25 @@ function showEmpty(msg){
   el('msg-list').innerHTML = '';
   el('dag-title').textContent = '—';
 }
-async function loadData(){
+async function loadData(keepSel){
+  const prev = CUR && CUR.id;
+  let loaded = false;
   for(const name of ['sa_tasklog.json', 'sample-tasklog.json']){
     try{
       const r = await fetch(name, {cache:'no-store'});
       if(!r.ok) continue;
       const j = await r.json();
       setData(j, name);
-      return;
+      loaded = true;
+      break;
     }catch(_){ /* try next */ }
   }
-  showEmpty('未找到数据文件。运行 <code>./run-demo.sh sa_demo</code> 生成 <code>web/sa/sa_tasklog.json</code>；' +
-            '也可直接把 JSON 拖进页面，或用「导入 JSON」选择文件。');
+  if(!loaded){
+    showEmpty('未找到数据文件。运行 <code>./run-demo.sh sa_demo</code> 生成 <code>web/sa/sa_tasklog.json</code>；' +
+              '也可直接把 JSON 拖进页面，或用「导入 JSON」选择文件。');
+    return;
+  }
+  if(keepSel && prev && TASKS.some(t=>t.id===prev)) showTask(prev);
 }
 function importText(text, name){
   try{
@@ -574,7 +588,60 @@ bindDivider(el('hdivider'), el('main'), '--hr', ()=>'y');
 el('insp-clear').addEventListener('click', ()=>clearFilter(true));
 el('chip-x').addEventListener('click', ()=>clearFilter(true));
 
+/* ======================== S5 · CGI 触发运行（浏览器→sa_cgi→sa_demo） ======================== */
+function fmtAgo(ts){
+  if(!ts) return '';
+  const d = Date.now()/1000 - ts;
+  if(d < 5) return '刚刚';
+  if(d < 60) return Math.floor(d) + ' 秒前';
+  if(d < 3600) return Math.floor(d/60) + ' 分钟前';
+  if(d < 86400) return Math.floor(d/3600) + ' 小时前';
+  const dt = new Date(ts*1000);
+  return dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' +
+         String(dt.getDate()).padStart(2,'0') + ' ' + String(dt.getHours()).padStart(2,'0') + ':' +
+         String(dt.getMinutes()).padStart(2,'0');
+}
+async function loadMeta(){
+  try{
+    const r = await fetch('run_meta.json', {cache:'no-store'});
+    if(!r.ok) return;
+    const m = await r.json();
+    const st = el('run-status');
+    st.className = 'side-status';
+    if(Array.isArray(m.runs) && m.runs.length){
+      const last = m.runs[m.runs.length - 1];
+      st.textContent = 'CGI：共 ' + (m.total||m.runs.length) + ' 次 · 上次 ' + last.ms + ' ms · ' + fmtAgo(last.at);
+    } else {
+      st.textContent = 'CGI：尚未运行（页面只读）';
+    }
+  }catch(_){ /* meta 缺失不打扰 */ }
+}
+async function runCgi(){
+  const st = el('run-status');
+  const btn = el('run-btn');
+  st.className = 'side-status busy';
+  st.textContent = '▶ 运行中…（sa_cgi 触发 sa_demo 全离线重放）';
+  btn.disabled = true;
+  try{
+    const r = await fetch('/cgi-bin/sa_cgi?scenario=all', {cache:'no-store'});
+    if(!r.ok) throw new Error('CGI HTTP ' + r.status);
+    const j = await r.json();
+    if(!j.ok) throw new Error(j.error || '运行失败');
+    st.className = 'side-status ok';
+    st.textContent = '✓ 运行完成 · ' + j.elapsed_ms + ' ms · 第 ' + j.run_total + ' 次 · ' + fmtAgo(j.last_run_at);
+    await loadData(true);   // 重拉 tasklog（保留当前选中任务）
+    await loadMeta();
+  }catch(e){
+    st.className = 'side-status err';
+    st.textContent = '✗ 运行失败：' + e.message + '（CGI 需 ./run-webui.sh 起服）';
+  }finally{
+    btn.disabled = false;
+  }
+}
+el('run-btn').addEventListener('click', runCgi);
+
 loadData();
+loadMeta();
 </script>
 </body>
 </html>

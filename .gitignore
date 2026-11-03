@@ -12,6 +12,9 @@ tmp/
 web/tests_report.json
 # SA 编排台运行产物（sa_demo 每次运行写入；页面回退到内置 sample-tasklog.json）
 web/sa/sa_tasklog.json
+# sa_cgi 宿主观测（墙钟/次数）与运行日志（运行态非源码）
+web/sa/run_meta.json
+web/sa/run.log
 # run-webui.sh 启动时创建的 symlink（指向 build 产物，运行态不入库）
 web/cgi-bin/
 web/wfr_bin
