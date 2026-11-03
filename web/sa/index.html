@@ -142,8 +142,6 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 #dag-pane.src-on #src-pane{ display:flex; }
 #src-toolbar{ flex:none; padding:8px 16px; display:flex; align-items:center; gap:10px;
               border-top:1px dashed var(--border); flex-wrap:wrap; }
-#src-select{ background:var(--panel2); color:var(--text); border:1px solid var(--border);
-             border-radius:6px; padding:3px 8px; font-size:12px; }
 #src-view{ flex:1; min-height:0; overflow:auto; margin:0; padding:10px 16px;
            font:12.5px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
            white-space:pre; color:var(--text); tab-size:4; }
@@ -261,12 +259,12 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
       </div>
       <div id="src-pane">
         <div id="src-toolbar">
-          <select id="src-select" aria-label="选择源码文件"></select>
-          <span class="cnt">只读源码 · sa_cgi action=src（封闭允许名单）</span>
+          <span class="cnt">当前任务 DAG 定义（图源码 · 节点 × 边）</span>
+          <span class="cnt" id="src-count"></span>
           <span style="flex:1"></span>
-          <span class="cnt" id="src-hint"></span>
+          <button class="ghost" id="src-toggle" type="button">原始 JSON</button>
         </div>
-        <pre id="src-view" role="region" aria-label="源码"></pre>
+        <pre id="src-view" role="region" aria-label="DAG 图源码"></pre>
       </div>
     </section>
     <div class="hdiv" id="hdivider" role="separator" aria-orientation="horizontal"></div>
@@ -404,6 +402,7 @@ function showTask(id){
   renderDag(t.dag || {nodes:[], edges:[]});
   clearFilter(false);
   renderMsgs();
+  renderDagSource();   // 图源码同步（切任务即刷新「源码」标签）
 }
 
 /* ---------------- DAG 节点图（内联 SVG） ---------------- */
@@ -678,52 +677,49 @@ async function runCgi(){
 }
 el('run-btn').addEventListener('click', runCgi);
 
-/* ======================== S6b · 源码标签页（右上面板 · 节点图/源码） ========================
-   「demo 的关系没看懂 → 直接看源码对照」：经 sa_cgi ?action=src&file=<key> 读封闭允许名单文件。
-   DAG 的边（分诊/改口/上报/写世界）分别来自 main.cpp 的导演段与 samock 的假电话剧本。 */
-const SRC_FILES = [
-  ['main',   'sa_demo/main.cpp（导演·编排，DAG 边由此定义）'],
-  ['samock', 'samock.cpp（假世界 · 假电话 FSM · 剧本）'],
-  ['guard',  'sa_guard.hpp（M0 验证器）'],
-  ['cgi',    'sa_cgi/main.cpp（运行端点）'],
-  ['e2e',    'run-sa-e2e.sh（端到端测试）'],
-  ['page',   'index.html（本页源码）'],
-];
-function fillSrcSelect(){
-  const sel = el('src-select');
-  sel.innerHTML = '';
-  for(const [key, label] of SRC_FILES){
-    const o = document.createElement('option');
-    o.value = key; o.textContent = label;
-    sel.appendChild(o);
+/* ======================== S6b · 图源码标签页（右上面板 · 节点图/源码） ========================
+   这里的「源码」= 当前任务 **DAG 图的定义本身**（SA 生成的图源码）：
+   节点×边的清单视图 与 原始 JSON 双视角；数据=页内已加载的 sa-tasklog 的 cur.dag，
+   纯前端、零外部读取（改 S6c 曾误做成「仓库 C++ 源码」，已改正）。 */
+let srcViewMode = 'list';
+function dagSourceList(dag){
+  const N = dag.nodes || [], E = dag.edges || [];
+  const lines = ['// 节点（node）：id [role] layer·row — label — detail'];
+  for(const n of N){
+    lines.push('node ' + (n.id || '?') + ' [' + (n.role || '?') + '] layer=' + (n.layer ?? 0) +
+               ' row=' + (n.row ?? 1) + ' · ' + (n.label || '') +
+               (n.detail ? ' — ' + n.detail : ''));
   }
+  lines.push('', '// 边（edge）：from --(label, kind)--> to');
+  for(const e of E){
+    lines.push('edge ' + (e.from || '?') + ' --(' + (e.label || '') + ', ' + (e.kind || 'auto') +
+               ')--> ' + (e.to || '?'));
+  }
+  if(!N.length && !E.length) lines.push('（该任务无 DAG 定义）');
+  return lines.join('\n');
 }
-async function loadSrc(){
-  const view = el('src-view');
-  const key = el('src-select').value;
-  view.textContent = '…加载中';
-  el('src-hint').textContent = '';
-  try{
-    const r = await fetch('/cgi-bin/sa_cgi?action=src&file=' + encodeURIComponent(key), {cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    const t = await r.text();
-    if(t.startsWith('error')) throw new Error(t.slice(0, 140));
-    view.textContent = t;
-    el('src-hint').textContent = t.length + ' 字节';
-  }catch(e){
-    view.textContent = '源码不可用：' + e.message + '\n（源码标签页依赖 WebUI/CGI 服务，./run-webui.sh 起服即可）';
-  }
+function renderDagSource(){
+  const pre = el('src-view');
+  const dag = CUR && CUR.dag;
+  el('src-count').textContent =
+      dag ? ('节点 ' + (dag.nodes || []).length + ' · 边 ' + (dag.edges || []).length) : '';
+  if(!dag){ pre.textContent = '（无 DAG 定义）'; return; }
+  pre.textContent = srcViewMode === 'json' ? JSON.stringify(dag, null, 2) : dagSourceList(dag);
+  el('src-toggle').textContent = srcViewMode === 'json' ? '清单视图' : '原始 JSON';
+}
+function toggleSrcView(){
+  srcViewMode = srcViewMode === 'json' ? 'list' : 'json';
+  renderDagSource();
 }
 function showTopTab(onSrc){
   el('dag-pane').classList.toggle('src-on', onSrc);
   el('tab-dag').classList.toggle('active', !onSrc);
   el('tab-src').classList.toggle('active', onSrc);
-  if(onSrc) loadSrc();
+  if(onSrc) renderDagSource();
 }
 el('tab-dag').addEventListener('click', ()=>showTopTab(false));
 el('tab-src').addEventListener('click', ()=>showTopTab(true));
-el('src-select').addEventListener('change', loadSrc);
-fillSrcSelect();
+el('src-toggle').addEventListener('click', toggleSrcView);
 
 /* ======================== E2E 测试钩子（run-sa-e2e.sh 的 C 阶段：headless Chrome） ========================
    ?e2e=show → 等首屏渲染完，body[data-e2e-render]="ok|bad" + data-e2e-render-detail
@@ -738,8 +734,11 @@ fillSrcSelect();
     if(mode === 'show'){
       const n = document.querySelectorAll('#task-items .task').length;
       const svg = (document.getElementById('dag-svg') && document.getElementById('dag-svg').childElementCount > 0) ? 1 : 0;
-      document.body.dataset.e2eRender = (n>0 && svg===1) ? 'ok' : 'bad';
-      document.body.dataset.e2eRenderDetail = 'tasks=' + n + ' svg=' + svg;
+      if(document.getElementById('tab-src')) showTopTab(true);   // 切到「源码」标签
+      const src = (document.getElementById('src-view') || {}).textContent || '';
+      const dagsrc = (src.indexOf('edge') !== -1) ? 1 : 0;        // 图源码（节点×边清单/JSON）已渲染
+      document.body.dataset.e2eRender = (n>0 && svg===1 && dagsrc===1) ? 'ok' : 'bad';
+      document.body.dataset.e2eRenderDetail = 'tasks=' + n + ' svg=' + svg + ' dagsrc=' + dagsrc;
       return;
     }
     if(mode === 'run'){
