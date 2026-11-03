@@ -42,6 +42,7 @@
 | [25](25-复杂任务批4中断与回退验收.md) | **wfr-㊹ 批④（收官）**：`plan_review` 步骤边界中断（continue/rollback_to:K/abort）+ 引擎 goto 容器名解析 + aborted 标记与审计；674 全绿 + 真机 | 🟢 收官 |
 | [24](24-复杂任务三级验证对照验收.md) | **wfr-㊹ PEV 三级对照验收**：L1 盲跑保证 / L2 确定性产物门 / L3 语义门 —— 7 外部真实 case × 三级 × 2 次的实测差异 + 探针子串能力 | 🟢 已对照 |
 | [23](23-提示注入健壮性.md) | **提示注入健壮性（wfr-㊸ ⑤）**：注入文本驱动模型 ≠ 防线被破——修复两个语义洞（人审批准被 guard 二次拦 / allow 前缀被串联升级→类别封顶）+ 对抗语料；658 全绿 | 🟢 已对抗 |
+| [64](64-SystemAgent专题.md) | **SystemAgent 专题**：2026-11-02 开题；**Round 1（11-03）定义转正**——SA=「事件驱动+状态机驱动」的系统级 Agent，与 ReAct 循环对照，空白原语=显式迁移表×可记账咨询×进程可死；研究源=`system-agent/` 01–07+_research 与 doubao 设计档，整理稿 `system-agent/08`（核心架构 / 测试框架 / Mock 外围） | 🟡 Round 1 完成，逐轮讨论中 |
 
 ## 文件列表
 
@@ -110,3 +111,4 @@
 | 61 | [61-longdoc人物关系故事线索落地.md](61-longdoc人物关系故事线索落地.md) | **落地**（longdoc 全局综合）：ingest 模型档提示词一次调用追加 relations/thread → 索引 v4 units 带 relations/thread + 预聚合 rel_net（a-b 排序键去重+引用块，展示保留原序）+ threads；新节点 longdoc_relation（问题+关系网+线索→system_context→model 作答）+ 模板 longdoc_relask；真机实证 39 条关系网、「李宁—周淳→故交」「双线主线汇向赴成都杀毛太」；3 新测试；926 全绿 |
 | 62 | [62-事实幻觉的范围化处理与防幻觉信号灯验收.md](62-事实幻觉的范围化处理与防幻觉信号灯验收.md) | **验收记录（2026-10-27）**：防幻觉信号灯五切片落地——message 63 / workflow 421 全绿、默认关零影响；`phantasma_demo` 三场景离线验收（范围内强制查证 / 范围外快答 / 有效信号免查，`run-demo.sh` 一键）；`phantasma_in_scope` 范围域、`phantasma_reason_passes` 防伪表、c_model 合成 web_search 强制取数；联动 [44](44-副作用·防重放·防环·结果可信·可回溯·可恢复.md)·篇七 防幻觉主线；遗留见 §8；**§9 P0 机械化**：plan_log `kind=phantasma` + `time_window_months` + `uncertainty_gate`；**§9.4 P1（2026-10-28）**：reason 扩表（hex/注释包裹硬直）+ 误杀率量化 20/20 + 强制取数 route 化（`search_tools` 挂 MCP 网搜 / `rewrite_template` 改写 / 审计明细） | 🟢 已验收 + P0 机械化 + P1 全落（串行 1069 绿） |
 | 63 | [63-长上下文蜀山案例停置收口记录.md](63-长上下文蜀山案例停置收口记录.md) | **收口记录（2026-10-31）**：长上下文蜀山案例**停置（停车）正式落档**——30 回/42 块语料 + 两批真机对照残留（`tmp/cmp`、`tmp/cmp2`）保留备查；**梗概方案（缩 1/10~1/20 再分析）拍板不做**（保人物名录需内嵌名册、丢细节）；机制已移交 longdoc（57–61 演进，蜀山=测试物）；原 problems/32 验收稿编号被治理专题占用，全文可追溯 git `7c00431`；遗留=text.hpp utf8_truncate 统一 / C1 vs C2·rolling vs tree 对照 / 残留清理或续跑 / 全量 309 回交长程 cron | ⏸️ 停置收口 |
+| 64 | [64-SystemAgent专题.md](64-SystemAgent专题.md) | **研究专题（11-02 开题，11-03 Round 1）**：定义转正——SA=「事件驱动+状态机驱动」系统级 Agent（与 DSH ReAct 对照）；空白原语=显式迁移表×可记账 LLM 咨询×进程可死；v1 倾向 B+D 最小闭环；**整理稿 `system-agent/08`**（核心架构五对象+I0/两层上下文/4 级漏斗/双平面/档位=图形状/Reaper 善后/C1–C12；测试框架机制·集成·故障·质量四层+M0–M4；Mock 外围 N1–N4+模型四形态）；落点开放项=DSH→cppchain 平移；后续逐轮收敛 Q1–Q12/Q-m1–Q-m5 与 M0 第一刀 | 🟡 Round 1 完成，逐轮讨论中 |
