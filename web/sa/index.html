@@ -608,6 +608,7 @@ async function loadMeta(){
     const m = await r.json();
     const st = el('run-status');
     st.className = 'side-status';
+    if(st.textContent.startsWith('✓ 运行完成')) return;  // 刚完成：保留运行回执，不覆盖
     if(Array.isArray(m.runs) && m.runs.length){
       const last = m.runs[m.runs.length - 1];
       st.textContent = 'CGI：共 ' + (m.total||m.runs.length) + ' 次 · 上次 ' + last.ms + ' ms · ' + fmtAgo(last.at);
@@ -629,16 +630,53 @@ async function runCgi(){
     if(!j.ok) throw new Error(j.error || '运行失败');
     st.className = 'side-status ok';
     st.textContent = '✓ 运行完成 · ' + j.elapsed_ms + ' ms · 第 ' + j.run_total + ' 次 · ' + fmtAgo(j.last_run_at);
+    document.body.dataset.e2eRun = 'pass';   // E2E 钩子：直接落结果，避免轮询竞态
+    document.body.dataset.e2eRunDetail = st.textContent;
     await loadData(true);   // 重拉 tasklog（保留当前选中任务）
     await loadMeta();
   }catch(e){
     st.className = 'side-status err';
     st.textContent = '✗ 运行失败：' + e.message + '（CGI 需 ./run-webui.sh 起服）';
+    document.body.dataset.e2eRun = 'fail';   // E2E 钩子
+    document.body.dataset.e2eRunDetail = st.textContent;
   }finally{
     btn.disabled = false;
   }
 }
 el('run-btn').addEventListener('click', runCgi);
+
+/* ======================== E2E 测试钩子（run-sa-e2e.sh 的 C 阶段：headless Chrome） ========================
+   ?e2e=show → 等首屏渲染完，body[data-e2e-render]="ok|bad" + data-e2e-render-detail
+   ?e2e=run  → 自动点「▶ 运行 demo」→ 轮询状态条 ≤30s → body[data-e2e-run]="pass|fail|timeout|no-btn"
+   状态经 DOM 属性透出，bash 用 --dump-dom + grep data-e2e-* 读取。 */
+(function e2e(){
+  const mode = new URLSearchParams(location.search).get('e2e');
+  if(!mode) return;
+  const wait = ms => new Promise(r=>setTimeout(r, ms));
+  (async ()=>{
+    for(let i=0; i<60 && !document.querySelector('#task-items .task'); i++) await wait(100);
+    if(mode === 'show'){
+      const n = document.querySelectorAll('#task-items .task').length;
+      const svg = (document.getElementById('dag-svg') && document.getElementById('dag-svg').childElementCount > 0) ? 1 : 0;
+      document.body.dataset.e2eRender = (n>0 && svg===1) ? 'ok' : 'bad';
+      document.body.dataset.e2eRenderDetail = 'tasks=' + n + ' svg=' + svg;
+      return;
+    }
+    if(mode === 'run'){
+      const btn = document.getElementById('run-btn');
+      if(!btn){ document.body.dataset.e2eRun = 'no-btn'; return; }
+      btn.click();
+      // 看门狗：runCgi 成功/失败处会直接落 data-e2e-run；此处只保底超时标记
+      setTimeout(()=>{
+        if(!document.body.dataset.e2eRun){
+          document.body.dataset.e2eRun = 'timeout';
+          document.body.dataset.e2eRunDetail = 'status=' + document.getElementById('run-status').textContent;
+        }
+      }, 15000);
+      return;
+    }
+  })();
+})();
 
 loadData();
 loadMeta();

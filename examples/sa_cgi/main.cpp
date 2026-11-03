@@ -88,6 +88,14 @@ int main() {
   // bindir = <root>/build/dev/examples → 父级 ×3 = 仓库根
   fs::path const root = bindir.parent_path().parent_path().parent_path();
 
+  // 数据目录：SA_DATA_DIR（隔离/测试用，缺省 SA_DATA_DIR 时 = <root>/web/sa）。
+  // E2E 既可指向临时目录，也可用真实目录配备份恢复。
+  std::error_code mk_ec;
+  fs::path data_dir = root / "web" / "sa";
+  std::string const dd = env_or("SA_DATA_DIR", "");
+  if (!dd.empty()) data_dir = fs::path(dd);
+  fs::create_directories(data_dir, mk_ec);
+
   fs::path sa_demo = fs::path(env_or("SA_DEMO_BIN", ""));
   if (sa_demo.empty()) sa_demo = bindir / "sa_demo";
   if (!fs::exists(sa_demo)) {
@@ -104,8 +112,8 @@ int main() {
     return respond();
   }
 
-  fs::path const tl = root / "web/sa/sa_tasklog.json";
-  fs::path const log = root / "web/sa/run.log";
+  fs::path const tl = data_dir / "sa_tasklog.json";
+  fs::path const log = data_dir / "run.log";
 
   auto const t0 = std::chrono::steady_clock::now();
   std::string const cmd = sa_demo.string() + " --tasklog=" + tl.string() + " > " + log.string() +
@@ -152,7 +160,7 @@ int main() {
                          .count();
   Json meta = Json{{"runs", Json::array()}};
   try {
-    std::ifstream in(root / "web/sa/run_meta.json");
+    std::ifstream in(data_dir / "run_meta.json");
     Json old = Json::parse(in);
     if (old.contains("runs") && old["runs"].is_array()) meta = old;
   } catch (...) { /* 首次建立 */ }
@@ -168,7 +176,7 @@ int main() {
   }
   meta["total"] = static_cast<std::int64_t>(meta["runs"].size());
   {
-    std::ofstream o(root / "web/sa/run_meta.json");
+    std::ofstream o(data_dir / "run_meta.json");
     o << meta.dump(2) << "\n";
   }
 

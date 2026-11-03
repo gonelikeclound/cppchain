@@ -36,6 +36,32 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 8 轮（2026-11-03 · S6 WebUI E2E 测试）
+
+- **S6 全过（11/11）**：`run-sa-e2e.sh` —— SA 编排台 WebUI 端到端，驱动**真实服务**
+  `python3 -m http.server --cgi`（同 run-webui.sh），**三阶段**：
+  - **A 静态 HTTP**：`/sa/` 渲染骨架（SA 编排台 / 任务列表 / 运行 demo / DAG 四标记）+ 
+    `sample-tasklog.json` 契约（schema=sa-tasklog/v1 · tasks=[t1,t2]）；
+  - **B CGI 运行整路**：`scenario=all` 真实触发 sa_cgi→sa_demo —— JSON 回执（ok · elapsed_ms≥0 ·
+    task_ids 含 t1/t2）、磁盘三产物（tasklog 2 任务 / run_meta total≥1 / run.log）、
+    **run.log 含「S1 + S2 + S3 + S4 全部通过」=执行真发生**、确定性数值贯通
+    （facts.milestones==7 · clock_end_sec==27 · core==2）、**第二次 run_total 递增**（append 语义）、
+    `scenario=t1` → v1 明确拒答（含 v2 提示）；
+  - **C 浏览器 DOM**：headless Chrome（`--dump-dom` × 页面内建 `?e2e=show/run` 钩子）——
+    `show`：任务列表 + DAG 真实渲染（`data-e2e-render=ok`）；`run`：**真实点击「▶ 运行 demo」
+    → fetch CGI →「运行完成」回执**（`data-e2e-run=pass`）。
+- **隔离方案**：跑真实 `web/sa/`（保证页面↔CGI 数据同源），测试前后**快照/还原**三个运行态文件
+  （sa_tasklog.json / run_meta.json / run.log），`trap EXIT` 清理服务器 / Chrome / 快照目录；
+  已实测还原干净（run_meta 回 3、`.e2e_snapshot` 已删）。
+- **同轮配套**：`sa_cgi` 加 **`SA_DATA_DIR`** env 旋钮（数据目录缺省 `<root>/web/sa`，可指临时目录做隔离）。
+- **页面小修**（C 阶段暴露的瞬态竞态）：`runCgi` 成功/失败**直落 `data-e2e-run` 钩子**、
+  `loadMeta()` 不再覆盖刚完成的「✓ 运行完成」、15s 看门狗兜底。
+- **诚实边界**：E2E 覆盖 HTTP/CGI/磁盘效果 + headless Chrome 渲染/点击闭合；**非** playwright 人工
+  视觉校验（环境只有 chrome --dump-dom，无 playwright），真手指视觉留给人工抽检。
+- 下一步：**S7+** —— 事件漏斗 / L1 任务表 / Reaper 善后；**CGI v2**（单场景触发）并行候选。
+- **脚本定位**：入口 `run-sa-e2e.sh`（仓库根，`./run-sa-e2e.sh [--no-build] [--no-chrome]`）；
+  通过/失败计数打印、退出码=失败条数。
+
 ### 第 7 轮（2026-11-03 · S5 CGI 运行端点）
 
 - **S5 全过**：浏览器 `GET /cgi-bin/sa_cgi?scenario=all` → `application/json` 运行回执；页面「▶ 运行 demo」
@@ -272,7 +298,8 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S3** | M0 化：SA 语义层校验纯函数（V1–V8 子集 → I00–I07）+ 坏编排对抗集（07 §5.2）+ 运行时挡幻觉工具 | ✅ **2026-11-03 全过**（13ms） |
 | **S4** | **SA 专用 UI 页**（`web/sa/index.html`）：左任务列表 / 右详情 50% 可拖动（上 DAG 节点图下消息列表）；数据契约 `sa-tasklog/v1`；t1 C7 简版 + t2 消息直路两任务 | ✅ **2026-11-03 全过**（17ms） |
 | **S5** | **浏览器触发运行**：`sa_cgi` CGI 端点（`/cgi-bin/sa_cgi?scenario=all` —— spawn sa_demo + run_meta 维护，v1 仅 all）+ 页面「▶ 运行 demo」按钮 | ✅ **2026-11-03 全过**（11ms 回执，http --cgi 全通路） |
-| S6+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
+| **S6** | **WebUI E2E**：`run-sa-e2e.sh` 三阶段 —— A 静态 HTTP（页面骨架+sample 契约）/ B CGI 运行整路（回执·磁盘三产物·run.log verdict·确定性数值·二次递增·v1 拒答）/ C headless Chrome（渲染 + 真实点击「运行 demo」→「运行完成」）；11/11 | ✅ **2026-11-03 全过** |
+| S7+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；
 摆放 = `examples/sa_demo/` + `tests/plugin_demo/samock.cpp`；虚拟钟 v1 = **工具推进**的模拟钟（够用）。
