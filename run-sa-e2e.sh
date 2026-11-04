@@ -165,6 +165,37 @@ if "$SCRIPT_DEMO" --plan-json="$BADPLAN" --tasklog="$BADTL" --pace-ms=0 >/dev/nu
    || [[ -f "$BADTL" ]]; then bad "S7 fail-closed：坏计划未被拒"; else ok "S7 fail-closed：坏计划（缺 world）拒跑且零产出"; fi
 rm -f "$BADPLAN" "$BADTL"
 
+# S9：工具节点（离线 fixture）——calculator 真实执行；副作用工具默认不可见（fail-closed）。
+TOOLTL="$SA_DIR/.e2e_tool_tasklog.json"
+if "$SCRIPT_DEMO" --plan-json=tests/sa/fixtures/plan_tool_calc.json --tasklog="$TOOLTL" \
+      --pace-ms=0 >/dev/null 2>&1 \
+   && python3 - "$TOOLTL" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))["tasks"][0]
+assert t["status"] == "Completed", t["status"]
+assert t["facts"]["tools_used"] == ["calculator"], t["facts"]
+assert t["tool_results"][0]["result"]["result"] == "83", t["tool_results"]
+PY
+then ok "S9 工具节点：calculator 真实执行 → 83（离线 fixture）"
+else bad "S9 工具节点执行失败"; fi
+rm -f "$TOOLTL"
+
+SXPLAN="$SA_DIR/.e2e_sx_plan.json"
+python3 - "$SXPLAN" <<'PY'
+import json, sys
+p = json.load(open("tests/sa/fixtures/plan_tool_calc.json"))
+p["nodes"][2]["tool"] = "file_write"
+p["nodes"][2]["args"] = {"path": "tmp/x", "content": "y"}
+json.dump(p, open(sys.argv[1], "w"), ensure_ascii=False)
+PY
+if "$SCRIPT_DEMO" --plan-json="$SXPLAN" --tasklog="$SA_DIR/.e2e_sx_tl.json" >/dev/null 2>&1 \
+   || [[ -f "$SA_DIR/.e2e_sx_tl.json" ]]; then
+  bad "S9 副作用工具默认未隔离"
+else
+  ok "S9 副作用工具默认隐藏：file_write 计划被拒（P30）"
+fi
+rm -f "$SXPLAN" "$SA_DIR/.e2e_sx_tl.json"
+
 # S8：历史删除必须持久（从 sa_tasklog.json 真删），且再删同一 id 要明确报错。
 DELDIR="$(mktemp -d)"
 cp "$PLANTL" "$DELDIR/sa_tasklog.json"

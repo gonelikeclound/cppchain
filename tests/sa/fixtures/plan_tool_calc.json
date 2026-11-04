@@ -1,0 +1,14 @@
+{
+  "title": "计算 (23*7+5)/2",
+  "nodes": [
+    {"id": "n_user", "role": "user", "label": "用户", "task": "算一下 (23*7+5)/2 等于多少"},
+    {"id": "n_core", "role": "core", "label": "核心", "task": "→工具：用 calculator 计算表达式。"},
+    {"id": "n_calc", "role": "tool", "label": "计算器", "tool": "calculator", "args": {"expression": "(23*7+5)/2"}, "task": "精确计算"},
+    {"id": "n_world", "role": "world", "label": "世界", "task": "核对工具执行成功"}
+  ],
+  "edges": [
+    {"from": "n_user", "to": "n_core", "kind": "query", "label": "query"},
+    {"from": "n_core", "to": "n_calc", "kind": "dispatch", "label": "→工具"},
+    {"from": "n_calc", "to": "n_world", "kind": "world", "label": "写世界"}
+  ]
+}

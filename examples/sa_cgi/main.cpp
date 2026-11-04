@@ -54,6 +54,14 @@ fs::path cgi_bin_dir() {
   return fs::weakly_canonical(real).parent_path();
 }
 
+// 取 UTF-8 安全的后缀（按字节上限，不切断多字节字符；nlohmann 对非法 UTF-8 会抛异常）。
+std::string utf8_suffix(std::string const& s, std::size_t max_bytes) {
+  if (s.size() <= max_bytes) return s;
+  std::size_t start = s.size() - max_bytes;
+  while (start < s.size() && (static_cast<unsigned char>(s[start]) & 0xC0) == 0x80) ++start;
+  return s.substr(start);
+}
+
 // URL 解码（S7 一句话查询含中文，必须解码；+ → 空格）。
 std::string url_decode(std::string const& s) {
   auto hex = [](char c) -> int {
@@ -109,6 +117,10 @@ int main() {
   std::string const scenario = query_param("scenario");
   std::string const planner = query_param("planner");
   std::string query = url_decode(query_param("query"));
+  // S9：副作用工具（file_write/bash）需**服务端**显式开启 SA_ENABLE_SIDEFX=1，
+  // 请求侧的 sidefx=1 只是"想要"，不能单独生效（避免局域网任意客户端直接跑命令）。
+  bool const sidefx = query_param("sidefx") == "1" &&
+                      env_or("SA_ENABLE_SIDEFX", std::string()) == "1";
   // 一句话规划（S7）：query 非空即进入；长度上限防滥用；NUL 直接拒（会截断 env）。
   bool const plan_mode = !query.empty();
   Json out;
@@ -116,6 +128,7 @@ int main() {
   out["scenario"] = scenario.empty() ? "all" : scenario;
   out["mode"] = plan_mode ? "plan" : "scripted";
   if (plan_mode) out["query"] = query;
+  out["sidefx"] = sidefx;
 
   // CGI 首行是响应头；fail 也输出 JSON（页面靠 ok 字段判断，不靠 HTTP 码）。
   auto respond = [&out] {
@@ -276,6 +289,7 @@ int main() {
     ::setenv("SA_QUERY", query.c_str(), 1);
   else
     ::unsetenv("SA_QUERY");
+  ::setenv("SA_ALLOW_SIDEFX", sidefx ? "1" : "0", 1);
 
   auto const t0 = std::chrono::steady_clock::now();
   std::string const cmd = sa_demo.string() + " --tasklog=" + tl.string() +
@@ -316,7 +330,7 @@ int main() {
           if (!tail.empty()) tail += " | ";
           tail += s;
         }
-        if (tail.size() > 600) tail = tail.substr(tail.size() - 600);
+        tail = utf8_suffix(tail, 600);
       }
       out["ok"] = false;
       out["error"] = "sa_demo 退出码 " + std::to_string(rc) +
@@ -348,6 +362,16 @@ int main() {
         Json const dag = t.value("dag", Json::object());
         out["dag_nodes"] = static_cast<std::int64_t>(dag.value("nodes", Json::array()).size());
         out["dag_edges"] = static_cast<std::int64_t>(dag.value("edges", Json::array()).size());
+        Json const facts = t.value("facts", Json::object());
+        out["tools_available"] = facts.value("tools_available", 0);
+        out["tool_calls"] = facts.value("tool_calls", 0);
+        out["tools_used"] = facts.value("tools_used", Json::array());
+        out["summary_chars"] = facts.value("summary_chars", 0);
+        out["llm_calls"] = facts.value("llm_calls", 0);
+        out["chunks_read"] = facts.value("chunks_read", 0);
+        out["chunk_llm_calls"] = facts.value("chunk_llm_calls", 0);
+        out["source_files"] = facts.value("source_files", Json::array());
+        out["summary_path"] = facts.value("summary_path", std::string());
       }
     } else {
       for (Json const& t : tasks) {

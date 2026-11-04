@@ -7,6 +7,9 @@ demo-out/
 
 # wfr 默认临时工作区（wfr.sh；session/checkpoint/debug 产物都在这里）
 tmp/
+# SA 下载/摘要运行产物（S9d：download_url 与 synthesis.save_to）
+downloads/
+outputs/
 
 # webui 测试报告快照（./run-tests-report.sh 生成，运行态非源码；git 不跟踪）
 web/tests_report.json

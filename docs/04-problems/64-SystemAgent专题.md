@@ -36,6 +36,120 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 17 轮（2026-11-04 · S9d：长文下载 → 分片读取 → 摘要 → 保存）
+
+- **用户场景（最想验证的）**：「下载 歌德《少年维特之烦恼》，并做1000字的摘要，保存到文件」。
+- **原失败**：Planner 用 `fetch_url` 传 `max_chars=60000`，但该工具上限 20000 → 工具报错；
+  **upstream 失败后 synthesis 仍用模型训练知识写了 1021 字**（伪造“读过”），任务 Failed。
+- **改动**：
+  1. **`download_url` 工具**（`sa_tools.hpp`）：把 URL 完整内容下载到本地文件（默认上限 8MB），
+     只返回 `{path, bytes, chars}`，不把正文塞进上下文；HTML 自动转文本、UTF-8 净化；
+     路径只允许 `tmp/ / downloads/ / outputs/ / .sa_downloads/`，其余落到 `tmp/sa_downloads/`；
+     `Idempotent`（幂等缓存），默认可用（不要求副作用开关）。
+  2. **synthesis 自动分片读取**：上游 `download_url`/`file_read` 结果里有本地文件时，
+     按 20k 字符切片（最多 12 片）→ 每片一次 LLM 提取要点（map）→ 汇总成摘要（reduce）；
+     产出「分片读取 N 片 · M 字符」消息；facts 记 `chunks_read/chunk_llm_calls/source_files`。
+  3. **上游失败禁止编造**：资料文件与工具结果都为空/失败时，synthesis **不调用模型**，
+     直接报“拒绝用模型记忆冒充阅读结果”，任务 Failed。
+  4. **保存到文件**：synthesis 可带 `args.save_to`（通用，非特色 case）；生成后写盘
+     （需服务端副作用开关），facts 记 `summary_path`；路径同样限制在运行目录。
+  5. **Planner 提示词**只加通用规则（长文档优先 download_url、下载后不要再加 file_read 重复读、
+     分卷/分页要下全、要保存时填 save_to），**没有任何特定书名/URL 的说明**；
+     `file_read` 单次窗口上限从 8000 提到 60000（仍可由分片/offset 控制）。
+  6. **UI**：状态条/任务卡/详情 pill 显示「分片 N」「摘要 M 字」「已保存 <path>」；
+     消息列表出现「分片读取」行与「已保存到」行。
+- **实测（同一句话，走 WebUI CGI）**：5 节点
+  `user → core → download_url → synthesis → world`；下载 259k 字符 → **12 片**、
+  12 次分片笔记 + 1 次汇总（13 次 LLM）→ **1344 字**中文摘要 → 保存
+  `tmp/sa_downloads/少年维特之烦恼_摘要.md`，任务 Completed；摘要开头标注来源文本。
+- **测试**：全仓 **1101/1101**、E2E **18/18**（离线 fixture 与工具目录不受影响）。
+- **诚实边界**：模型选到了 Gutenberg 的英译本（2527）而非德文原版，摘要内容据该文本分片笔记；
+  分片上限 12 片（>240k 字符会截断并在消息中标注“仅前 12 片”）。
+
+### 第 16 轮（2026-11-04 · S9c：让“LLM 生成”可辨识——去同构示例 + 规划来源/原文）
+
+- **用户观察**：现在的 DAG 看起来不像 LLM 生成，倒像程序固定搞的。
+- **诊断（一半对）**：
+  - 「▶ 运行 demo」的 t1/t2 确实是 S1–S4 **手写常量 DAG**；
+  - 一句话规划的 DAG 确实是模型现场生成（`planner=llm`、`model=deepseek-flash`；同句两次运行标题/检索参数会变，
+    换问法会换工具），但**自由度被压得太小**：Planner `temperature=0`、Prompt 里 4 个 few-shot 示例
+    （其中“检索+摘要”与常见问题同构，模型直接抄了示例的节点 id/形状）、校验器只接受窄拓扑、
+    解释器只认识固定角色 → 看起来像模板。
+- **改动**：
+  1. **去掉具象 few-shot**：4 个场景示例替换为“字段示意（不要照抄结构）”的 schema 骨架；
+  2. **Planner temperature 0 → 0.2**：允许在合法空间内选择不同结构/工具；
+  3. **规划可追溯**：tasklog 记录 `plan_raw`（模型原始输出；fixture 模式存计划文件原文）与
+     facts `planner_model` / `planner_attempts`；脚本 t1/t2 标 `planner=scripted`；
+  4. **UI 区分来源**：任务卡徽标 `LLM / 脚本 / 计划文件`；详情 pill
+     「来源 LLM · deepseek-flash（N 次尝试）」；「源码」标签切换扩展为
+     `清单视图 → 原始 JSON → 规划原文`（规划原文即 plan_raw，脚本任务显示“无规划原文”）。
+- **实测（去示例 + 0.2 温度后）**：5 条不同问法全部一次通过校验（attempts=1），节点 id/结构开始变化：
+  - super-agent：`u1→c1→t1(arxiv)→s1(synthesis)→w1`；天气+建议：`u1→c1→t1(weather)→s1→w1`；
+  - 电话+改口：`u1→c1→p1→c2→m1→w1`（7 条边，phone/msg 都写世界）；
+  - 计算器：`user→core→calc→world`；纯消息：`u1→c1→m1→w1`。
+  - UI 实测：任务卡显示 `LLM/脚本` 徽标；源码标签第三态显示模型原始 JSON；pill 显示来源与模型。
+- **测试**：全仓 **1101/1101**、E2E **18/18**（不变；prompt 改动不进入离线 fixture）。
+- **诚实边界**：图结构仍受校验器（安全约束）与解释器（固定角色语义）限制；这是“受约束的生成”，
+  下一步若要更自由，需放宽拓扑并让 core/域节点也走运行时 LLM gate/agent loop。
+
+### 第 15 轮（2026-11-04 · S9b：修复「只检索不总结」——新增 synthesis 节点）
+
+- **用户反馈**：用 SA 运行「查找最新的 super-agent 内容，并生成摘要」——没有生成真正摘要的节点，也没有正确执行。
+- **根因（实测 DAG）**：`user → core → [get_datetime, arxiv_search] → world`：
+  1. IR 里**没有“生成摘要”的节点类型**；Planner 把“随后撰写中文摘要”写进 `core.task`，
+     但 core 在解释器里只发 dispatch 消息、**不调用模型** → 实际只检索，任务却 Completed；
+  2. core 有两条 dispatch 出边，同一条分诊消息被重复输出；
+  3. Planner 自修复循环里的 `validate(p)` 没传工具白名单 → 清单外工具可能通过内层校验，
+     外层才失败且不再重试。
+- **修复**：
+  - 新增 role=`synthesis`（最多 1 个）与 edge kind=`synthesize`（域/工具 → synthesis）：
+    解释器收集上游工具结果 + 域消息，**真实调用 LLM** 生成摘要；产出 `summary` 消息、
+    tasklog 的 `summary` 字段与 facts（summary_chars 按 UTF-8 字符计、llm_calls）；world 断言摘要非空。
+  - 校验新增 P32（synthesis 必须有 synthesize 入边）/P33（边方向）/P34（≤1）/P35（task 必填）；
+    Planner 提示词加 `synthesis` 角色、边类型、规则 8（摘要/总结/报告必须用 synthesis，
+    不能写进 core.task）与示例 4。
+  - **core 多出边只发一条分诊消息**；Planner 内层校验传入工具白名单，未知工具当场回喂重试。
+  - UI：消息类型「摘要」+ 专属样式/徽章；任务 pill「摘要 N 字」；`synthesize` 边着色。
+- **实测**：同一句话现在生成 5 节点/4 边：
+  `user → core → arxiv_search → synthesis → world`，产出 ~1551 字中文摘要，
+  `tools_used=[arxiv_search]`、`llm_calls=1`、`summary_chars=1551`，任务 Completed；
+  页面显示「摘要」节点、摘要行与「摘要 1551 字」pill。
+- **测试**：`sa_plan_tests` **21 条**（新增 synthesis 合法/缺输入/边方向/缺 task/多节点）；
+  E2E **18/18**；全仓串行 **1101/1101**。
+
+### 第 14 轮（2026-11-03 · S9：接入 cppchain 真实工具）
+
+- **用户需求**：当前接入的工具太少，把 cppchain 的工具都接入，并且可以真实运行。
+- **工具目录**（`examples/sa_demo/sa_tools.hpp`，Planner 清单与执行注册表**同源**）：
+  - 默认 **17 个只读工具**：calculator / get_datetime / verify_sketch · 文件五件套
+    （file_read / list_dir / file_grep / file_extract / file_sample，沙箱根=仓库根）· 旅行 DB 只读五件 ·
+    get_weather / arxiv_search / fetch_url / read_image（需要 HTTP；实测北京天气返回真实数据）。
+  - `--allow-side-effects`（CGI 侧：服务端 `SA_ENABLE_SIDEFX=1` + 请求 `sidefx=1` **同时满足**）
+    额外加入 **file_write / submit_result / bash**，共 20 个；bash 走 restricted spawn executor
+    （非真沙箱，仅兜底），文件工具全部限制在 root_dir 内。
+- **IR 扩展**：新增 role=`tool` 节点（`tool` + `args`）。校验扩展：dispatch/report 支持 core↔工具、
+  工具节点必须有 core dispatch、工具名必须在清单内（P30）、工具节点上限 4（P31）；
+  同层多节点自动分行（避免 DAG 重叠）。Planner 提示词注入工具清单（名称/只读性/描述/参数），
+  并给出 calculator 示例。解释器按拓扑序真实调用工具，结果写进消息、tasklog 的
+  `tool_results` 与 facts（tools_available / tool_calls / tools_used）；world 节点断言工具成功。
+- **安全边界**：默认只读；副作用必须**服务端显式开启**，避免局域网任意客户端直接跑命令；
+  run_tool 注入 `ctx.executor`（bash 不再 fail-closed），effect_class 保留（Irreversible/Idempotent）。
+- **UI**：新增示例 chip「算一算」「读 README」；「允许写入/命令」勾选框（服务端未开启时状态条明确提示）；
+  任务详情 pill 与实际状态条展示使用的工具。
+- **实测（真机 deepseek-flash）**：
+  - 「算一下 (23*7+5)/2」→ calculator = 83；
+  - 「读 README.md 开头」→ file_read 真读仓库文件；
+  - 「北京今天天气」→ get_weather 返回真实天气；
+  - `--allow-side-effects`：写文件真实落盘、bash `echo` 真实执行；
+  - 默认模式下引用 file_write 的计划被静态校验拒绝（P30），零产出。
+- **测试**：`sa_plan_tests` 16 条（新增工具节点合法/清单外拒绝/缺 dispatch/同层分行）；
+  E2E **18/18**（calculator 离线 fixture=83、副作用默认隐藏）；全仓串行 **1096/1096**。
+- **修复**：工具描述/结果按字节截断会切断 UTF-8 中文（nlohmann 抛 type_error 316）——
+  改为 UTF-8 安全截断（prompt、工具结果、CGI 错误回显三处）。
+- **未自动接入（诚实边界）**：MCP 动态工具（需要 server 配置与连接生命周期）、web_search
+  （需 `WEB_SEARCH_API_KEY`）、read_skill/wiki_search（需 `WFR_SKILL_DIR`/`WFR_WIKI_DIR`，配置了才出现）、
+  subagent 工具、examples 里的桩工具（缺 effect_class 声明，接入前需补齐治理标记）。
+
 ### 第 13 轮（2026-11-03 · S8：任务历史保留/删除 + 下载 + 更多示例）
 
 - **用户需求**：① SA 页面保留过去历史，用户可删除，删除即持久删除；② 增加下载等其他 demo。
@@ -410,6 +524,10 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S6c** | **运行可视化（真慢跑 + 实时进度）**：`sa_demo --progress/--pace-ms` 边跑边写 JSONL（run/task/dag/node/msg），`sa_cgi?pace=` 控制节奏；页面轮询后节点逐个点亮、消息逐条出现；E2E **12/12**（B 阶段进度事件断言）；tasklog 与 sample 逐字节等价 | ✅ **2026-11-03 全过** |
 | **S7** | **一句话 → DAG → 运行**：真机 LLM Planner（`--query` / CGI `?planner=llm&query=`）产出受限 IR → `sa_plan.hpp` P00–P29 静态校验（fail-closed，回喂重试≤3）→ 通用解释器按拓扑序调度电话/消息域 + 世界断言；页面输入框 + 实时 DAG；`--plan-json` 离线可测；`sa_plan_tests` 12 条 + E2E **14/14** + 全仓 **1092/1092** | ✅ **2026-11-03 全过** |
 | **S8** | **任务历史 + 删除 + 下载 + 更多示例**：`sa_tasklog.json` 即历史库（稳定 id 覆盖 / 规划任务追加 / 最近优先 / 上限 60 / 原子写）；`sa_cgi?action=delete&id=` 持久删除；`flock` 单运行锁防并发覆盖；页面任务卡 `×`、下载当前/历史 JSON、3 个示例 chip；E2E **16/16** | ✅ **2026-11-03 全过** |
+| **S9** | **接入 cppchain 真实工具**：`sa_tools.hpp` 工具目录（默认 17 只读；`--allow-side-effects` 加 file_write/submit_result/bash 共 20）；IR 新增 role=`tool`（tool+args），校验 P30/P31 与 core↔工具 dispatch；Planner 注入工具清单，解释器真实执行并把结果写入 tasklog；UI 加「算一算/读 README」与副作用开关；E2E **18/18**、全仓 **1096/1096**；实测 calculator/file_read/get_weather/file_write/bash 全部真跑 | ✅ **2026-11-03 全过** |
+| **S9b** | **修复“只检索不总结”**：新增 role=`synthesis` + edge kind=`synthesize`，解释器把上游结果交给真实 LLM 生成摘要（summary 消息/tasklog summary/facts summary_chars·llm_calls），world 断言摘要非空；校验 P32–P35；Planner 规则 8 + 示例 4；core 多出边去重；Planner 内层校验带工具白名单；UI 摘要样式/pill/边色；`sa_plan_tests` 21 条、E2E 18/18、全仓 **1101/1101** | ✅ **2026-11-04 全过** |
+| **S9c** | **让“LLM 生成”可辨识**：去掉 4 个具象 few-shot（改为 schema 骨架）、Planner temperature 0→0.2；tasklog 记录 `plan_raw` + facts planner_model/attempts，脚本 t1/t2 标 `planner=scripted`；UI 任务卡 LLM/脚本徽标、「来源 LLM · model」pill、源码标签第三态「规划原文」；5 条问法一次通过且结构/节点 id 开始变化；全仓 1101/1101、E2E 18/18 | ✅ **2026-11-04 全过** |
+| **S9d** | **长文下载→分片读取→摘要→保存**：新增 `download_url`（全文落盘、只回路径/大小、UTF-8/HTML 处理、运行目录约束）；synthesis 自动分片 map-reduce（20k×12 片，分片笔记+汇总）；上游失败**禁止生成**（不调用模型）；`args.save_to` 保存摘要并记 summary_path；Planner 只加通用规则（长文下载、下载后勿重复 file_read、分卷下全、保存填 save_to）；UI 显示分片/摘要/已保存；同一句话实测 5 节点、12 片、1344 字、保存成功；全仓 1101/1101、E2E 18/18 | ✅ **2026-11-04 全过** |
 | S7+ | 事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；

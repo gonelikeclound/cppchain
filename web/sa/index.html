@@ -101,6 +101,9 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 .tdel:hover{ color:#fff; background:var(--bad); border-color:var(--bad); }
 #dl-task, #dl-all, #del-cur{ padding:2px 9px; font-size:11px; }
 #del-cur:hover{ background:var(--bad); border-color:var(--bad); color:#fff; }
+.sidefx{ display:inline-flex; align-items:center; gap:5px; font-size:11px; color:var(--dim);
+         border:1px solid var(--border); border-radius:99px; padding:2px 9px; cursor:pointer; }
+.sidefx input{ accent-color:var(--bad); }
 .ghost{ background:transparent; color:var(--accent); border:1px solid var(--accent);
         border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
 .ghost:hover{ background:var(--accent); color:var(--accent-ink); }
@@ -113,6 +116,11 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
           font-weight:600; flex:none; }
 .tstatus.aborted{ background:var(--bad); }
 .tstatus.waiting{ background:var(--warn); }
+.tsrc{ font-size:10px; padding:1px 6px; border-radius:99px; border:1px solid var(--border);
+       color:var(--dim); flex:none; font-weight:600; letter-spacing:.02em; }
+.tsrc.llm{ color:var(--accent); border-color:var(--accent); }
+.tsrc.scripted{ color:var(--warn); border-color:var(--warn); }
+.tsrc.fixture{ color:var(--ok); border-color:var(--ok); }
 .ttitle{ font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
 .tsum{ margin:2px 0 6px; display:flex; flex-direction:column; gap:3px; }
 .tm{ display:flex; gap:7px; font-size:12px; color:var(--dim); line-height:1.45; }
@@ -170,6 +178,7 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 .e-dispatch{ color:var(--edge-dispatch); }
 .e-control{ color:var(--edge-control); stroke-width:2; }
 .e-world{ color:var(--edge-world); }
+.e-synthesize{ color:var(--accent); stroke-dasharray:2 2; }
 .e-label{ font-size:10px; fill:var(--dim); text-anchor:middle; paint-order:stroke;
           stroke:var(--bg); stroke-width:3px; }
 .node{ cursor:pointer; outline:none; }
@@ -212,6 +221,8 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
 .mrow.ai .from{ color:var(--accent); }
 .mrow.dispatch .from{ color:var(--accent); }
 .mrow.milestone .from{ color:var(--r-phone); }
+.mrow.summary .from{ color:var(--accent); font-weight:600; }
+.mrow.summary .body{ background:var(--panel2); border-radius:6px; padding:4px 8px; }
 .mrow.control .from{ color:var(--warn); }
 .mrow.assert .from{ color:var(--ok); }
 .mrow.tool .body{ color:var(--dim); font-family:ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -267,12 +278,19 @@ code, .mono{ font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
               data-q="给爸爸发微信说我这周末回家看他">发给爸爸</button>
       <button class="chip" type="button"
               data-q="给妈妈打电话约明天中午一起吃饭，如果她改口就发微信确认">约饭+改口</button>
+      <button class="chip" type="button"
+              data-q="算一下 (23*7+5)/2 等于多少">算一算</button>
+      <button class="chip" type="button"
+              data-q="读一下仓库根目录 README.md 的开头部分，告诉我这是什么项目">读 README</button>
     </div>
     <div class="side-actions" id="ops-row">
       <span class="cnt">操作</span>
       <button class="ghost" id="dl-task" type="button">⬇ 下载当前</button>
       <button class="ghost" id="dl-all" type="button">⬇ 下载历史</button>
       <button class="ghost" id="del-cur" type="button">删除当前</button>
+      <label class="sidefx" title="需服务端开启 SA_ENABLE_SIDEFX=1 才生效">
+        <input type="checkbox" id="sidefx-chk"> 允许写入/命令
+      </label>
     </div>
     <div class="side-status" id="run-status">CGI：—</div>
     <ul id="task-items"></ul>
@@ -354,9 +372,9 @@ const ROLE = {
   msg:   {label:'消息域', color:'var(--r-msg)'},
   world: {label:'世界',   color:'var(--r-world)'},
 };
-const EKIND = ['query','dispatch','report','control','world'];
+const EKIND = ['query','dispatch','report','control','synthesize','world'];
 const MKIND = {user:'查询', ai:'SA', dispatch:'分诊', tool:'工具',
-               milestone:'里程碑', control:'控制', assert:'断言'};
+               milestone:'里程碑', control:'控制', assert:'断言', summary:'摘要'};
 
 const el = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g,
@@ -396,10 +414,16 @@ function renderTasks(){
     if(f.model_calls_core!=null) met += `<span>核心 <b>${f.model_calls_core}</b> 咨询</span>`;
     if(f.milestones!=null)        met += `<span>里程碑 <b>${f.milestones}</b></span>`;
     if(f.clock_end_sec!=null)      met += `<span>钟 <b>${f.clock_end_sec}s</b></span>`;
+    if(Array.isArray(f.tools_used) && f.tools_used.length)
+      met += `<span>工具 <b>${esc(f.tools_used.join(' / '))}</b></span>`;
+    if(f.summary_chars) met += `<span>摘要 <b>${f.summary_chars} 字</b></span>`;
+    if(f.chunks_read) met += `<span>分片 <b>${f.chunks_read}</b></span>`;
+    if(f.summary_path) met += `<span>已保存 <b>${esc(f.summary_path)}</b></span>`;
 
     li.innerHTML = `
       <div class="t-top">
         <span class="tstatus ${esc((t.status||'').toLowerCase())}">${esc(t.status||'')}</span>
+        ${f.planner ? `<span class="tsrc ${esc(f.planner)}">${f.planner==='llm'?'LLM':f.planner==='scripted'?'脚本':'计划文件'}</span>` : ''}
         <span class="ttitle">${esc(t.title||'')}</span>
         <button class="tdel" type="button" data-del="${esc(t.id)}"
                 title="删除这条历史（持久删除）" aria-label="删除 ${esc(t.title||t.id)}">删除</button>
@@ -439,6 +463,37 @@ function showTask(id){
     const p = document.createElement('span');
     p.className = 'pill';
     p.innerHTML = `${esc(k)} <b>${esc(String(v)+ (k==='钟'?'s':''))}</b>`;
+    pills.appendChild(p);
+  }
+  if(Array.isArray(f.tools_used) && f.tools_used.length){
+    const p = document.createElement('span');
+    p.className = 'pill';
+    p.textContent = '工具 ' + f.tools_used.join(' / ');
+    pills.appendChild(p);
+  }
+  if(f.summary_chars){
+    const p = document.createElement('span');
+    p.className = 'pill';
+    p.textContent = '摘要 ' + f.summary_chars + ' 字' +
+                    (f.chunks_read ? ' · 分片 ' + f.chunks_read : '');
+    pills.appendChild(p);
+  }
+  if(f.summary_path){
+    const p = document.createElement('span');
+    p.className = 'pill';
+    p.textContent = '已保存 ' + f.summary_path;
+    p.title = f.summary_path;
+    p.style.maxWidth = '46ch';
+    p.style.overflow = 'hidden'; p.style.textOverflow = 'ellipsis'; p.style.whiteSpace = 'nowrap';
+    pills.appendChild(p);
+  }
+  if(f.planner){
+    const p = document.createElement('span');
+    p.className = 'pill';
+    p.textContent = f.planner === 'llm'
+        ? ('来源 LLM' + (f.planner_model ? ' · ' + f.planner_model : '') +
+           (f.planner_attempts > 1 ? ' · ' + f.planner_attempts + ' 次尝试' : ''))
+        : (f.planner === 'scripted' ? '来源 脚本固定' : '来源 计划文件');
     pills.appendChild(p);
   }
   if(f.verdict){
@@ -806,10 +861,22 @@ async function runCgiUrl(url, busy, btn){
     if(!j.ok) throw new Error(j.error || '运行失败');
     stopLive();
     st.className = 'side-status ok';
+    let extra = '';
+    if(j.mode === 'plan' && Array.isArray(j.tools_used) && j.tools_used.length)
+      extra += ' · 工具 ' + j.tools_used.join(' / ');
+    if(j.mode === 'plan' && j.chunks_read)
+      extra += ' · 分片 ' + j.chunks_read;
+    if(j.mode === 'plan' && j.summary_chars)
+      extra += ' · 摘要 ' + j.summary_chars + ' 字';
+    if(j.mode === 'plan' && j.summary_path)
+      extra += ' · 已保存 ' + j.summary_path;
+    if(j.mode === 'plan' && el('sidefx-chk').checked && !j.sidefx)
+      extra += ' · 副作用未开启（服务端 SA_ENABLE_SIDEFX=0）';
     st.textContent = '✓ 运行完成 · ' + j.elapsed_ms + ' ms · 第 ' + j.run_total + ' 次 · ' +
                      fmtAgo(j.last_run_at) +
                      (j.mode === 'plan' && j.title ? ' · DAG「' + j.title + '」' +
-                        (j.dag_nodes != null ? '（' + j.dag_nodes + ' 节点 / ' + j.dag_edges + ' 边）' : '') : '');
+                        (j.dag_nodes != null ? '（' + j.dag_nodes + ' 节点 / ' + j.dag_edges + ' 边）' : '') : '') +
+                     extra;
     document.body.dataset.e2eRun = 'pass';   // E2E 钩子：直接落结果，避免轮询竞态
     document.body.dataset.e2eRunDetail = st.textContent;
     await loadData(true);   // 重拉 tasklog（唯一真相，保留当前选中任务）
@@ -833,7 +900,9 @@ async function planCgi(){
   const q = el('plan-input').value.trim();
   if(!q){ el('plan-input').focus(); return; }
   const pace = runPace();
-  await runCgiUrl('/cgi-bin/sa_cgi?planner=llm&pace=' + pace + '&query=' + encodeURIComponent(q),
+  const sidefx = el('sidefx-chk').checked ? '&sidefx=1' : '';
+  await runCgiUrl('/cgi-bin/sa_cgi?planner=llm&pace=' + pace + '&query=' +
+                    encodeURIComponent(q) + sidefx,
     '▶ LLM 规划中…（一句话 → DAG → 校验 → 执行，' + pace + ' ms/步）', el('plan-btn'));
 }
 el('run-btn').addEventListener('click', runCgi);
@@ -913,11 +982,20 @@ function renderDagSource(){
   el('src-count').textContent =
       dag ? ('节点 ' + (dag.nodes || []).length + ' · 边 ' + (dag.edges || []).length) : '';
   if(!dag){ pre.textContent = '（无 DAG 定义）'; return; }
-  pre.textContent = srcViewMode === 'json' ? JSON.stringify(dag, null, 2) : dagSourceList(dag);
-  el('src-toggle').textContent = srcViewMode === 'json' ? '清单视图' : '原始 JSON';
+  if(srcViewMode === 'raw'){
+    pre.textContent = (CUR && CUR.plan_raw)
+        ? CUR.plan_raw
+        : '（该任务没有规划原文：脚本固定 DAG 或手工构造）';
+  } else if(srcViewMode === 'json'){
+    pre.textContent = JSON.stringify(dag, null, 2);
+  } else {
+    pre.textContent = dagSourceList(dag);
+  }
+  el('src-toggle').textContent =
+      srcViewMode === 'list' ? '原始 JSON' : srcViewMode === 'json' ? '规划原文' : '清单视图';
 }
 function toggleSrcView(){
-  srcViewMode = srcViewMode === 'json' ? 'list' : 'json';
+  srcViewMode = srcViewMode === 'list' ? 'json' : srcViewMode === 'json' ? 'raw' : 'list';
   renderDagSource();
 }
 function showTopTab(onSrc){

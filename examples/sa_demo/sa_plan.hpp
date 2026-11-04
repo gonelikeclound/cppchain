@@ -28,11 +28,15 @@ struct Issue {
 };
 
 inline bool is_role(std::string const& r) {
-  return r == "user" || r == "core" || r == "phone" || r == "msg" || r == "world";
+  return r == "user" || r == "core" || r == "phone" || r == "msg" || r == "world" ||
+         r == "tool" || r == "synthesis";
 }
 inline bool is_domain_role(std::string const& r) { return r == "phone" || r == "msg"; }
+// 执行节点 = 域节点（电话/消息）或工具节点（直接调 cppchain 工具）。
+inline bool is_exec_role(std::string const& r) { return is_domain_role(r) || r == "tool"; }
 inline bool is_edge_kind(std::string const& k) {
-  return k == "query" || k == "dispatch" || k == "report" || k == "control" || k == "world";
+  return k == "query" || k == "dispatch" || k == "report" || k == "control" ||
+         k == "synthesize" || k == "world";
 }
 
 // 从模型输出里抠出 JSON 对象：容忍 ```json 围栏与前后解释文字。
@@ -43,7 +47,10 @@ inline std::string extract_json_text(std::string text) {
   return text.substr(b, e - b + 1);
 }
 
-inline std::vector<Issue> validate(Json const& p) {
+// allowed_tools：Planner 可见的工具名集合（来自 ToolCatalog）。为空表示不校验工具名
+// （纯结构测试用）；生产路径必须传，做到「清单外工具一律拒」。
+inline std::vector<Issue> validate(Json const& p,
+                                   std::vector<std::string> const& allowed_tools = {}) {
   std::vector<Issue> out;
   auto add = [&](std::string code, std::string msg) {
     out.push_back(Issue{std::move(code), std::move(msg)});
@@ -65,7 +72,7 @@ inline std::vector<Issue> validate(Json const& p) {
                                                             std::to_string(edges.size()) + "）");
 
   std::map<std::string, std::string> role_of;  // id → role
-  std::size_t n_user = 0, n_world = 0, n_domain = 0, n_core = 0;
+  std::size_t n_user = 0, n_world = 0, n_domain = 0, n_core = 0, n_tool = 0, n_synth = 0;
   for (Json const& n : nodes) {
     if (!n.is_object()) {
       add("P03", "节点必须是对象");
@@ -94,11 +101,30 @@ inline std::vector<Issue> validate(Json const& p) {
     if (role == "world") ++n_world;
     if (role == "core") ++n_core;
     if (is_domain_role(role)) ++n_domain;
+    if (role == "synthesis") {
+      ++n_synth;
+      if (n.value("task", std::string()).empty())
+        add("P35", "综合节点 " + id + " 必须写清摘要/总结要求（task）");
+    }
+    if (role == "tool") {
+      ++n_tool;
+      std::string const tool_name = n.value("tool", std::string());
+      if (tool_name.empty()) {
+        add("P30", "工具节点 " + id + " 缺 tool 字段");
+      } else if (!allowed_tools.empty()) {
+        bool found = false;
+        for (std::string const& t : allowed_tools)
+          if (t == tool_name) found = true;
+        if (!found) add("P30", "工具节点 " + id + " 引用了清单外工具：" + tool_name);
+      }
+    }
   }
   if (n_user != 1) add("P07", "必须恰好 1 个 user 节点（实际 " + std::to_string(n_user) + "）");
   if (n_world != 1) add("P08", "必须恰好 1 个 world 节点（实际 " + std::to_string(n_world) + "）");
-  if (n_domain < 1) add("P09", "至少 1 个域节点（phone/msg）");
+  if (n_domain + n_tool < 1) add("P09", "至少 1 个执行节点（phone/msg/tool）");
   if (n_domain > 4) add("P10", "域节点最多 4 个");
+  if (n_tool > 4) add("P31", "工具节点最多 4 个");
+  if (n_synth > 1) add("P34", "综合节点最多 1 个");
   if (n_core > 4) add("P11", "核心节点最多 4 个");
 
   // —— 边：存在性 / 自环 / kind / 方向约束 ——
@@ -126,12 +152,14 @@ inline std::vector<Issue> validate(Json const& p) {
     std::string const fr = role_of[ce.from], to = role_of[ce.to];
     if (ce.kind == "query" && fr != "user")
       add("P16", "query 边必须从 user 出发（" + ce.from + "）");
-    if (ce.kind == "dispatch" && (fr != "core" || !is_domain_role(to)))
-      add("P17", "dispatch 边必须是 core → 域（" + ce.from + " → " + ce.to + "）");
-    if (ce.kind == "report" && (!is_domain_role(fr) || to != "core"))
-      add("P18", "report 边必须是 域 → core（" + ce.from + " → " + ce.to + "）");
+    if (ce.kind == "dispatch" && (fr != "core" || !is_exec_role(to)))
+      add("P17", "dispatch 边必须是 core → 域/工具（" + ce.from + " → " + ce.to + "）");
+    if (ce.kind == "report" && (!is_exec_role(fr) || to != "core"))
+      add("P18", "report 边必须是 域/工具 → core（" + ce.from + " → " + ce.to + "）");
     if (ce.kind == "control" && (fr != "user" || to != "phone"))
       add("P19", "control 边必须是 user → phone（" + ce.from + " → " + ce.to + "）");
+    if (ce.kind == "synthesize" && (!is_exec_role(fr) || to != "synthesis"))
+      add("P33", "synthesize 边必须是 域/工具 → synthesis（" + ce.from + " → " + ce.to + "）");
     if (ce.kind == "world" && to != "world")
       add("P20", "world 边必须指向 world（" + ce.from + " → " + ce.to + "）");
     out_edges[ce.from].push_back(ce.to);
@@ -150,14 +178,23 @@ inline std::vector<Issue> validate(Json const& p) {
     if (!has_msg) add("P29", "存在 control（改口）边，但计划里没有 msg 域节点");
   }
 
-  // 每个域节点必须有 core→域 的 dispatch 入边（SA 只分诊，域只执行）。
+  // 每个执行节点（域/工具）必须有 core→执行节点 的 dispatch 入边。
   for (auto const& [id, role] : role_of) {
-    if (!is_domain_role(role)) continue;
+    if (!is_exec_role(role)) continue;
     bool has_dispatch = false;
     for (Json const& e : edges)
       if (e.value("kind", "") == "dispatch" && e.value("to", "") == id) has_dispatch = true;
-    if (!has_dispatch) add("P21", "域节点 " + id + " 缺 core→域 的 dispatch 入边");
+    if (!has_dispatch) add("P21", "执行节点 " + id + " 缺 core→节点 的 dispatch 入边");
   }
+  // 综合节点必须有上游内容（域/工具 → synthesize），否则摘要是无源之水。
+  for (auto const& [id, role] : role_of) {
+    if (role != "synthesis") continue;
+    bool has_input = false;
+    for (Json const& e : edges)
+      if (e.value("kind", "") == "synthesize" && e.value("to", "") == id) has_input = true;
+    if (!has_input) add("P32", "综合节点 " + id + " 缺 域/工具 → synthesis 的 synthesize 入边");
+  }
+
   // 每个 core 至少有 1 条 dispatch 出边（核心的职责就是分派）。
   for (auto const& [id, role] : role_of) {
     if (role != "core") continue;
@@ -269,50 +306,81 @@ inline Json layout(Json p) {
     for (std::string const& nx : out[id])
       layer[nx] = std::max(layer[nx], layer[id] + 1);
   }
+  // 同一 layer 有多个节点时（如一对多 dispatch）分行，避免画布重叠；单节点层保持 row=1。
+  std::map<int, std::vector<std::string>> by_layer;
+  for (std::string const& id : order) by_layer[layer.count(id) ? layer[id] : 0].push_back(id);
+  std::map<std::string, int> row_of;
+  for (auto const& [ly, ids] : by_layer) {
+    (void)ly;
+    for (std::size_t i = 0; i < ids.size(); ++i) row_of[ids[i]] = static_cast<int>(i) + 1;
+  }
   for (Json& n : p["nodes"]) {
     std::string const id = n.value("id", std::string());
     n["layer"] = layer.count(id) ? layer[id] : 0;
-    n["row"] = (n.value("role", "") == "user") ? 0 : 1;
+    n["row"] = (n.value("role", "") == "user") ? 0 : (row_of.count(id) ? row_of[id] : 1);
     if (!n.contains("label")) n["label"] = n.value("role", "");
   }
   return p;
 }
 
-inline std::string planner_system_prompt() {
-  return R"PROMPT(你是 SystemAgent（SA）的任务规划器。把用户的一句话规划成执行图 DAG，只输出 JSON 对象，不要解释、不要 Markdown 围栏。
+inline std::string planner_system_prompt(std::string const& tool_catalog = {}) {
+  std::string const tools_part =
+      tool_catalog.empty()
+          ? std::string("（本次没有可用工具；不要生成 tool 节点）")
+          : tool_catalog;
+  return std::string(R"PROMPT(你是 SystemAgent（SA）的任务规划器。把用户的一句话规划成执行图 DAG，只输出 JSON 对象，不要解释、不要 Markdown 围栏。
 
 可用角色（role）：
 - user：用户（唯一，起点）
-- core：核心 agent，只分诊/改道，不执行领域动作
+- core：核心 agent，只分诊/改道/调度，不执行动作
 - phone：电话域（可拨打电话；平台剧本：第 1 次会被拒接，按策略重拨 1 次后接通）
 - msg：消息域（可发送消息）
+- tool：工具节点，直接调用一个 cppchain 工具（字段 tool + args）
+- synthesis：综合节点（最多 1 个），把上游工具/域的结果交给 LLM 生成摘要/报告/回答；
+  字段 task 写清楚要生成什么（例如“用中文写 5 条要点摘要，标注来源与日期”）；
+  可选 args: {"save_to":"相对路径"}（用户要求保存到文件时填）
 - world：世界断言（唯一，终点）
 
 节点字段：id、role、label、task；域节点可带 args 对象：
 - phone: {"call_id":"c1","number":"13800000000"}
 - msg: {"msg_id":"m1","to":"妈妈","text":"要发送的原文"}
+- tool: {"tool":"<工具名，必须来自下方清单>","args":{...},"task":"人话说明"}
+
+可用工具清单（tool 节点只能使用这里列出的工具）：
+)PROMPT") + tools_part + R"PROMPT(
+)PROMPT" + R"PROMPT(
 
 边 kind：
 - query：user → core/域（用户请求进入）
 - dispatch：core → 域（分派）
-- report：域 → core（域上报/改道）
+- report：域/工具 → core（上报/改道）
 - control：user → phone（用户改口 barge_in，仅电话域）
-- world：域/core → world（写世界/断言）
+- synthesize：域/工具 → synthesis（把结果交给综合节点）
+- world：域/工具/synthesis → world（写世界/断言）
 
 硬规则：
-1. 恰好 1 个 user、1 个 world；至少 1 个 phone/msg 域节点；节点 3..12、边 2..24。
+1. 恰好 1 个 user、1 个 world；至少 1 个执行节点（phone/msg/tool）；节点 3..12、边 2..24。
 2. 无环；所有节点都在 user→world 路径上；user 无入边、world 无出边。
-3. 每个域节点必须有 core→域 的 dispatch 入边；每个 core 必须有 dispatch 出边。
+3. 每个执行节点（域或工具）必须有 core→节点的 dispatch 入边；每个 core 必须有 dispatch 出边。
 4. 若用户表示“改口 / 算了 / 换渠道 / 发微信”，在电话域之后加 core 改道节点到 msg，并在 user→phone 加一条 control 边（label 写“改口(barge_in)”），phone 的 task 写“接通后改道消息域”。
-5. core 的 task 写要转达给领域 agent 的一句话（以“→电话域：”或“→消息域：”开头）。
+5. core 的 task 写要转达给执行节点的一句话（以“→电话域：”“→消息域：”或“→工具：”开头）。
 6. msg 的 args.text 必须是用户要发的内容原文（可合理补全）；args.to 是收件人。
-7. 只规划、不执行；不要发明域或工具。
+7. tool 节点的 tool 必须是下方清单里的名字，args 必须符合该工具参数；需要计算/查资料/读文件/查天气时优先用工具节点，不要让 core 编造结果。
+8. 用户要求“摘要 / 总结 / 报告 / 整理 / 分析 / 回答”时，必须在工具或域节点之后加 **synthesis** 节点：
+   用 synthesize 边把上游结果节点接到 synthesis，再 synthesis → world；把具体写作要求放进 synthesis.task。
+   **不能只把“写摘要”写进 core 的 task**——core 只分诊，不会生成文本。
+9. 长文档 / 整本书 / 长报告：优先用 **download_url** 落盘，再由 synthesis 分片摘要；
+   不要用 fetch_url 截断后强行总结（fetch_url 有 2 万字上限）。
+   若资料分卷 / 分页，应下载全部分卷/页后再摘要（可多个 tool 节点，路径写在各自 args）。
+10. download_url 之后直接接 synthesis 即可（synthesis 会自动分片读取上游文件）；
+    不要再加 file_read 节点重复读取整本书——那会把长文塞回上下文并可能因参数上限失败。
+11. 用户要求把结果保存到文件时，在 synthesis 节点加 args: {"save_to":"相对路径"}
+    （仅当工具清单里出现 file_write、即服务端已开启副作用工具时）。
+12. 只规划、不执行；不要发明域或工具。
 
-示例 1（打电话 + 改口发微信）：
-{"title":"给妈妈打电话，拒接重拨；改口后发微信","nodes":[{"id":"n_user","role":"user","label":"用户","task":"给妈妈打电话问她晚上来不来吃饭"},{"id":"n_core1","role":"core","label":"核心","task":"→电话域：给妈妈打电话问她晚上来不来吃饭。"},{"id":"n_call","role":"phone","label":"电话域","task":"给妈妈打电话，拒接按策略重拨一次；若用户改口则改道消息域","args":{"call_id":"c1","number":"13800000000"}},{"id":"n_core2","role":"core","label":"核心","task":"→消息域：妈妈改口，让发微信。"},{"id":"n_msg","role":"msg","label":"消息域","task":"给妈妈发微信","args":{"msg_id":"m5","to":"妈妈","text":"你晚上来不来吃饭？我提前准备。"}},{"id":"n_world","role":"world","label":"世界","task":"核对通话已结束、消息已送达"}],"edges":[{"from":"n_user","to":"n_core1","kind":"query","label":"query"},{"from":"n_core1","to":"n_call","kind":"dispatch","label":"→电话域"},{"from":"n_user","to":"n_call","kind":"control","label":"改口(barge_in)"},{"from":"n_call","to":"n_core2","kind":"report","label":"ended 上报"},{"from":"n_core2","to":"n_msg","kind":"dispatch","label":"→消息域"},{"from":"n_msg","to":"n_world","kind":"world","label":"写世界"}]}
-
-示例 2（只发消息）：
-{"title":"给妈妈发微信","nodes":[{"id":"n_user","role":"user","label":"用户","task":"给妈妈发微信问她晚上来不来吃饭"},{"id":"n_core","role":"core","label":"核心","task":"→消息域：给妈妈发微信问她晚上来不来吃饭。"},{"id":"n_msg","role":"msg","label":"消息域","task":"给妈妈发微信","args":{"msg_id":"m1","to":"妈妈","text":"你晚上来不来吃饭？"}},{"id":"n_world","role":"world","label":"世界","task":"核对消息已送达"}],"edges":[{"from":"n_user","to":"n_core","kind":"query","label":"query"},{"from":"n_core","to":"n_msg","kind":"dispatch","label":"→消息域"},{"from":"n_msg","to":"n_world","kind":"world","label":"写世界"}]}
+输出结构（字段示意；请按用户输入自行决定节点数量、角色与边，**不要照抄下面的结构**）：
+{"title":"...","nodes":[{"id":"...","role":"...","label":"...","task":"...","tool":"...","args":{}}],"edges":[{"from":"...","to":"...","kind":"...","label":"..."}]}
+只输出这个 JSON 对象，不要输出解释。
 )PROMPT";
 }
 

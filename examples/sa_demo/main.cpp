@@ -30,6 +30,7 @@
 
 #include "sa_guard.hpp"  // S3（M0）：SA 语义层校验纯函数
 #include "sa_plan.hpp"   // S7：一句话 → DAG（规划契约 + 静态校验）
+#include "sa_tools.hpp"  // S9：cppchain 真实工具目录（只读默认 / 副作用显式开启）
 
 #ifdef SA_PLAN_LIVE
 #include <cppchain/http/curl_multi_transport.hpp>
@@ -40,6 +41,7 @@
 #include "support/dotenv.hpp"
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -48,7 +50,9 @@
 #include <filesystem>
 #include <fstream>
 #include <generator>
+#include <iterator>
 #include <map>
+#include <optional>
 #include <print>
 #include <set>
 #include <span>
@@ -135,6 +139,7 @@ Json run_tool(ToolRegistry const& reg, std::string const& name, Json args,
   }
   ToolContext ctx;
   ctx.tool_call_id = name;
+  ctx.executor = spec->executor;  // 命令类工具（bash）需要执行后端；无则 handler fail-closed
   auto out = spec->handler(args, ctx);
   if (!out) {
     fail.push_back(name + ": " + out.error().message);
@@ -194,6 +199,22 @@ class Progress {
   std::string task_ = "t1";
   std::int64_t clock_ = 0;
 };
+
+// 按字节上限截断，但不切断 UTF-8 多字节字符（nlohmann 对非法 UTF-8 会抛异常）。
+std::string utf8_prefix(std::string const& s, std::size_t max_bytes) {
+  if (s.size() <= max_bytes) return s;
+  std::size_t n = max_bytes;
+  while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+  return s.substr(0, n);
+}
+
+// UTF-8 码点数（“摘要 N 字”按字符计，不按字节）。
+std::size_t utf8_codepoints(std::string const& s) {
+  std::size_t n = 0;
+  for (unsigned char c : s)
+    if ((c & 0xC0) != 0x80) ++n;
+  return n;
+}
 
 // 工具调用的"人话"行：与 tasklog 的 t1 工具行同一口径（页面实时与最终一致）。
 std::string tool_msg_text(std::string const& name, Json const& args, Json const& out) {
@@ -540,6 +561,13 @@ struct LiveRec {
 struct ExecOutcome {
   bool ok = true;
   std::vector<std::string> fails;
+  Json tool_results = Json::array();
+  std::string summary;   // synthesis 节点产物
+  std::string summary_path;  // 摘要落盘路径（可选）
+  int llm_calls = 0;     // 运行期 LLM 调用数（planner 之外）
+  int chunks_read = 0;   // 分片读取总数
+  int chunk_llm_calls = 0;  // 分片阅读（map）LLM 调用数
+  std::vector<std::string> sources;  // synthesis 读取的本地文件
 };
 
 // 电话域执行器：拨号 → 拒接重拨一次 → 接通；有 control 边则注入 barge_in 改道。
@@ -604,6 +632,278 @@ void exec_msg(Json const& n, ToolRegistry& samock, LiveRec& L, ExecOutcome& o) {
   L.node(id, "done");
 }
 
+// 工具节点执行器：直接调 cppchain 工具（calculator / file_* / get_weather / arxiv_search …）。
+void exec_tool(Json const& n, ToolRegistry& tools, LiveRec& L, ExecOutcome& o) {
+  std::string const id = n.value("id", "");
+  std::string const name = n.value("tool", std::string());
+  Json const args = n.value("args", Json::object());
+
+  L.node(id, "active");
+  std::size_t const fails_before = o.fails.size();
+  Json const out = run_tool(tools, name, args, o.fails);
+  bool const ok = o.fails.size() == fails_before;
+
+  std::string result = out.is_discarded() ? std::string("（无输出）") : out.dump();
+  if (result.size() > 900) result = utf8_prefix(result, 900) + "…";
+  if (!ok && o.fails.size() > fails_before) result = "ERROR: " + o.fails.back();
+  std::string const args_txt = args.empty() ? std::string("{}") : args.dump();
+  L.msg(id, "tool", "工具", name + " " + args_txt + " → " + result, name);
+  if (!ok) o.ok = false;
+
+  o.tool_results.push_back(Json{{"node", id},
+                                {"tool", name},
+                                {"args", args},
+                                {"ok", ok},
+                                {"result", out}});
+  L.node(id, "done");
+}
+
+// Planner 与 synthesis 节点共用的模型配置（读 .env / 企业 CA）。
+struct LlmEnv {
+  std::string api_key;
+  std::string base_url;
+  std::string model;
+  std::string ca_bundle;
+};
+
+LlmEnv load_llm_env() {
+  auto const dotenv = demo::load_dotenv({".env", "../.env", "../../.env"});
+  LlmEnv e;
+  e.api_key = demo::env_or(dotenv, "LLM_API_KEY");
+  e.base_url = demo::env_or(dotenv, "LLM_BASE_URL", "https://api.deepseek.com/v1");
+  e.model = demo::env_or(dotenv, "LLM_MODEL", "deepseek-chat");
+  e.ca_bundle = demo::env_or(dotenv, "LLM_CA_BUNDLE");
+  if (e.ca_bundle.empty()) {
+    if (char const* home = std::getenv("HOME")) {
+      std::string const candidate = std::string(home) + "/.geo/corp-ca.pem";
+      if (std::filesystem::exists(candidate)) e.ca_bundle = candidate;
+    }
+  }
+  return e;
+}
+
+std::shared_ptr<model::openai::OpenAIChatModel> make_llm(
+    LlmEnv const& e, std::shared_ptr<http::CurlMultiTransport>& transport) {
+  model::ModelConfig cfg;
+  cfg.api_key = e.api_key;
+  cfg.base_url = e.base_url;
+  cfg.model = e.model;
+  cfg.timeout_ms = 90000;
+  cfg.ca_info = e.ca_bundle;
+  transport = std::make_shared<http::CurlMultiTransport>();
+  return std::make_shared<model::openai::OpenAIChatModel>(cfg, transport);
+}
+
+// 读文件并切成 UTF-8 安全的分片（字节上限，不切断多字节字符）。
+struct ChunkRead {
+  std::vector<std::string> chunks;
+  std::size_t total_chars = 0;
+  bool truncated = false;
+};
+
+ChunkRead read_file_chunks(std::filesystem::path const& p, std::size_t chunk_bytes,
+                           std::size_t max_chunks) {
+  ChunkRead out;
+  std::ifstream in(p, std::ios::binary);
+  if (!in) return out;
+  std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  out.total_chars = utf8_codepoints(s);
+  std::size_t start = 0;
+  while (start < s.size() && out.chunks.size() < max_chunks) {
+    std::size_t end = std::min(start + chunk_bytes, s.size());
+    while (end < s.size() && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) --end;
+    if (end <= start) end = std::min(start + chunk_bytes, s.size());
+    out.chunks.push_back(s.substr(start, end - start));
+    start = end;
+  }
+  out.truncated = start < s.size();
+  return out;
+}
+
+// 综合/摘要节点：上游若有下载/读取产生的文件，则**分片读取**（map-reduce）后生成摘要；
+// 上游全失败时拒绝生成（不许用模型训练知识冒充读到的内容）。
+void exec_synthesis(Json const& n, Json const& plan, std::string const& query, LiveRec& L,
+                    ExecOutcome& o, bool allow_side_effects) {
+  std::string const id = n.value("id", "");
+  L.node(id, "active");
+
+  Json ctx = Json::array();
+  bool has_ok_result = false;
+  for (Json const& e : plan.value("edges", Json::array())) {
+    if (e.value("kind", "") != "synthesize" || e.value("to", "") != id) continue;
+    std::string const from = e.value("from", "");
+    for (Json const& r : o.tool_results) {
+      if (r.value("node", "") != from) continue;
+      if (r.value("ok", false)) has_ok_result = true;
+      ctx.push_back(Json{{"tool", r.value("tool", "")},
+                         {"args", r.value("args", Json::object())},
+                         {"result", r.value("result", Json::object())}});
+    }
+    for (Json const& m : L.msgs) {
+      std::string const kind = m.value("kind", "");
+      if (m.value("node", "") == from && kind != "user" && kind != "tool")
+        ctx.push_back(Json{{"agent", m.value("from", "")},
+                           {"text", utf8_prefix(m.value("text", ""), 2000)}});
+    }
+  }
+
+  // 从上游结果里找出可读的本地文件（download_url / file_read 的 path）。
+  std::vector<std::string> sources;
+  for (Json const& r : o.tool_results) {
+    if (!r.value("ok", false)) continue;
+    Json const res = r.value("result", Json::object());
+    if (!res.is_object()) continue;
+    std::string const p = res.value("path", std::string());
+    if (p.empty()) continue;
+    auto const resolved = tool::resolve_path_in_root(std::filesystem::current_path(), p);
+    if (!resolved || !std::filesystem::is_regular_file(*resolved)) continue;
+    std::error_code sz_ec;
+    if (std::filesystem::file_size(*resolved, sz_ec) == 0 || sz_ec) continue;
+    if (std::find(sources.begin(), sources.end(), p) == sources.end()) sources.push_back(p);
+  }
+
+  if (sources.empty() && !has_ok_result) {
+    o.ok = false;
+    o.fails.push_back("synthesis: 上游资料缺失或全部失败，拒绝生成摘要");
+    L.msg(id, "ai", "摘要", "摘要生成失败：上游资料缺失或全部失败（拒绝用模型记忆冒充阅读结果）");
+    L.node(id, "done");
+    return;
+  }
+
+#ifdef SA_PLAN_LIVE
+  LlmEnv const env = load_llm_env();
+  if (env.api_key.empty()) {
+    o.ok = false;
+    o.fails.push_back("synthesis: 缺少 LLM_API_KEY");
+    L.msg(id, "ai", "摘要", "摘要生成失败：缺少 LLM_API_KEY（.env）");
+    L.node(id, "done");
+    return;
+  }
+  std::shared_ptr<http::CurlMultiTransport> transport;
+  auto const llm = make_llm(env, transport);
+
+  auto ask = [&](std::string const& sys, std::string const& user) -> std::optional<std::string> {
+    std::vector<Message> msgs{message::system_message(sys), message::human_message(user)};
+    model::CallOptions opt;
+    opt.temperature = 0.2;
+    auto const resp = llm->invoke(msgs, opt);
+    ++o.llm_calls;
+    if (!resp || resp->text().empty()) return std::nullopt;
+    return resp->text();
+  };
+
+  std::string const task = n.value("task", std::string());
+  std::string material;
+  std::string source_note;
+
+  if (!sources.empty()) {
+    // —— 分片读取（map）→ 汇总（reduce）——
+    for (std::string const& rel : sources) {
+      auto const resolved = tool::resolve_path_in_root(std::filesystem::current_path(), rel);
+      ChunkRead const cr = read_file_chunks(*resolved, 20000, 12);
+      o.chunks_read += static_cast<int>(cr.chunks.size());
+      std::string const coverage = cr.truncated ? "（仅前 12 片）" : "（全文）";
+      L.msg(id, "tool", "读取",
+            "分片读取 " + rel + "：" + std::to_string(cr.chunks.size()) + " 片 · " +
+                std::to_string(cr.total_chars) + " 字符" + coverage,
+            "chunked_read");
+      source_note += rel + "（" + std::to_string(cr.total_chars) + " 字符，覆盖 " +
+                     std::to_string(cr.chunks.size()) + " 片" + coverage + "）；";
+
+      if (cr.chunks.size() <= 1) {
+        material += "资料《" + rel + "》全文：\n" + utf8_prefix(cr.chunks.empty() ? "" : cr.chunks[0], 30000) + "\n";
+        continue;
+      }
+      material += "资料《" + rel + "》分片笔记：\n";
+      for (std::size_t i = 0; i < cr.chunks.size(); ++i) {
+        std::string const userp =
+            "用户请求：" + query + "\n综合要求：" + task + "\n资料《" + rel + "》第 " +
+            std::to_string(i + 1) + "/" + std::to_string(cr.chunks.size()) +
+            " 片：\n" + cr.chunks[i] + "\n请只提取本片中与请求相关的关键事实/情节/论点，输出不超过 250 字的中文要点；不得补充片段外知识。";
+        auto const note = ask(
+            "你是 SystemAgent 的分片阅读器。只基于给定片段提取信息，不得使用片段外知识；"
+            "输出简洁中文要点，不要输出思考过程。",
+            userp);
+        if (note) {
+          ++o.chunk_llm_calls;
+          material += "- 第 " + std::to_string(i + 1) + " 片：" + *note + "\n";
+        } else {
+          material += "- 第 " + std::to_string(i + 1) + " 片：（读取失败）\n";
+        }
+      }
+      material += "\n";
+    }
+    o.sources = sources;
+  } else {
+    material = "上游工具结果（JSON）：\n" + utf8_prefix(ctx.dump(), 12000) + "\n";
+    source_note = "工具结果";
+  }
+
+  std::string const sys =
+      "你是 SystemAgent 的综合/摘要节点。只基于给定的资料/笔记回答，不得编造或使用模型记忆补充；"
+      "用中文输出摘要正文（可用要点列表），满足用户的字数/格式要求；资料不足时明确说明。";
+  std::string const userp =
+      "用户请求：" + query + "\n综合要求：" + task + "\n资料来源：" + source_note +
+      "\n" + material + "\n请直接输出摘要正文。";
+  auto const final_text = ask(sys, userp);
+  if (!final_text) {
+    o.ok = false;
+    o.fails.push_back("synthesis: 模型返回空摘要或调用失败");
+    L.msg(id, "ai", "摘要", "摘要生成失败：模型返回空摘要或调用失败");
+    L.node(id, "done");
+    return;
+  }
+  o.summary = *final_text;
+  L.msg(id, "summary", "摘要", o.summary);
+
+  // 可选保存到文件（用户要求“保存到文件”时由 Planner 写入 args.save_to）。
+  Json const args = n.value("args", Json::object());
+  std::string const save_to = args.value("save_to", std::string());
+  if (!save_to.empty()) {
+    if (!allow_side_effects) {
+      o.ok = false;
+      o.fails.push_back("synthesis: 保存文件需要开启副作用工具（SA_ALLOW_SIDEFX=1）");
+      L.msg(id, "ai", "摘要", "未保存文件：服务端未开启副作用工具");
+    } else {
+      // 只允许 tmp/ downloads/ outputs/ .sa_downloads/；其他路径重定向到 tmp/sa_downloads/<文件名>。
+      std::string rel =
+          std::filesystem::path(save_to).lexically_normal().generic_string();
+      bool const allowed = rel.starts_with("tmp/") || rel.starts_with("downloads/") ||
+                           rel.starts_with("outputs/") || rel.starts_with(".sa_downloads/");
+      if (!allowed) {
+        std::string base = std::filesystem::path(save_to).filename().string();
+        if (base.empty() || base == "." || base == "..") base = "summary.md";
+        rel = "tmp/sa_downloads/" + base;
+      }
+      auto const resolved = tool::resolve_path_in_root(std::filesystem::current_path(), rel);
+      if (!resolved) {
+        o.ok = false;
+        o.fails.push_back("synthesis: 保存路径越界 " + rel);
+        L.msg(id, "ai", "摘要", "未保存文件：路径越界 " + rel);
+      } else {
+        std::error_code ec;
+        std::filesystem::create_directories(resolved->parent_path(), ec);
+        std::ofstream out(*resolved, std::ios::binary | std::ios::trunc);
+        if (!out) {
+          o.ok = false;
+          o.fails.push_back("synthesis: 写文件失败 " + rel);
+          L.msg(id, "ai", "摘要", "未保存文件：写入失败 " + rel);
+        } else {
+          out << o.summary;
+          o.summary_path = rel;
+          L.msg(id, "ai", "摘要", "已保存到 " + rel);
+        }
+      }
+    }
+  }
+#else
+  o.ok = false;
+  o.fails.push_back("synthesis: 本构建未启用 HTTP/模型");
+  L.msg(id, "ai", "摘要", "摘要生成失败：本构建未启用 HTTP/模型");
+#endif
+  L.node(id, "done");
+}
+
 // 世界断言：按计划里的域效果逐项核对（查世界，不查工具返回值）。
 void exec_world(Json const& n, Json const& plan, ToolRegistry& samock, LiveRec& L,
                 ExecOutcome& o) {
@@ -648,6 +948,18 @@ void exec_world(Json const& n, Json const& plan, ToolRegistry& samock, LiveRec& 
         }
       ok = ok && found && delivered;
       parts.push_back("消息=[" + to + ", delivered=" + (delivered ? "true" : "false") + "]");
+    } else if (role == "tool") {
+      std::string const name = pn.value("tool", "");
+      bool tool_ok = false;
+      for (Json const& r : o.tool_results)
+        if (r.value("node", "") == pn.value("id", "")) tool_ok = r.value("ok", false);
+      ok = ok && tool_ok;
+      parts.push_back("工具 " + name + (tool_ok ? " 成功" : " 失败"));
+    } else if (role == "synthesis") {
+      bool const sum_ok = !o.summary.empty();
+      ok = ok && sum_ok;
+      parts.push_back("摘要(" + std::to_string(utf8_codepoints(o.summary)) + " 字" +
+                      (sum_ok ? "" : "，失败") + ")");
     }
   }
   clock_txt = "钟=" + std::to_string(w.value("now_sec", 0)) + "s";
@@ -664,7 +976,7 @@ void exec_world(Json const& n, Json const& plan, ToolRegistry& samock, LiveRec& 
 }
 
 ExecOutcome execute_plan(Json const& plan, std::string const& query, ToolRegistry& samock,
-                         LiveRec& L) {
+                         ToolRegistry& tools, LiveRec& L, bool allow_side_effects) {
   ExecOutcome o;
   run_tool(samock, "samock_world_reset", Json::object(), o.fails);  // 跨任务隔离
   auto const order = sa::plan::topo_order(plan);
@@ -679,26 +991,37 @@ ExecOutcome execute_plan(Json const& plan, std::string const& query, ToolRegistr
       L.node(id, "done");
     } else if (role == "core") {
       L.node(id, "active");
-      bool dispatched = false;
+      bool has_dispatch = false;
+      std::string targets;
       for (Json const& e : plan.value("edges", Json::array())) {
         if (e.value("from", "") != id || e.value("kind", "") != "dispatch") continue;
+        has_dispatch = true;
         Json const target = find_plan_node(plan, e.value("to", ""));
-        std::string text = plan_task_text(n);
-        if (text.empty())
-          text = e.value("label", "→" + target.value("label", "")) + "：" + plan_task_text(target);
-        L.msg(id, "dispatch", "核心", text);
-        dispatched = true;
+        if (!targets.empty()) targets += "、";
+        targets += e.value("label", "→" + target.value("label", ""));
       }
-      if (!dispatched) L.msg(id, "ai", "核心", plan_task_text(n));
+      if (has_dispatch) {
+        // 一条 core 可能一次分派多个工具：只发一条分诊消息，避免重复刷屏。
+        std::string text = plan_task_text(n);
+        if (text.empty()) text = "→" + targets;
+        L.msg(id, "dispatch", "核心", text);
+      } else {
+        L.msg(id, "ai", "核心", plan_task_text(n));
+      }
       L.node(id, "done");
     } else if (role == "phone") {
       exec_phone(n, plan, samock, L, o);
     } else if (role == "msg") {
       exec_msg(n, samock, L, o);
+    } else if (role == "tool") {
+      exec_tool(n, tools, L, o);
+    } else if (role == "synthesis") {
+      exec_synthesis(n, plan, query, L, o, allow_side_effects);
     } else if (role == "world") {
       exec_world(n, plan, samock, L, o);
     }
   }
+  o.ok = o.ok && o.fails.empty();
   return o;
 }
 
@@ -722,7 +1045,10 @@ Json gather_plan_milestones(Json const& plan, ToolRegistry& samock) {
 }
 
 Json build_plan_task(Json const& plan, std::string const& query, LiveRec const& L,
-                     ToolRegistry& samock, bool ok, std::string const& source,
+                     ToolRegistry& samock, Json const& tool_results, std::size_t tools_available,
+                     bool ok, std::string const& summary, int llm_calls, int chunks_read,
+                     int chunk_llm_calls, std::vector<std::string> const& sources,
+                     std::string const& summary_path, std::string const& source,
                      std::string const& model_name) {
   Json t;
   t["id"] = "p1";
@@ -744,17 +1070,30 @@ Json build_plan_task(Json const& plan, std::string const& query, LiveRec const& 
   Json const miles = gather_plan_milestones(plan, samock);
   std::vector<std::string> fail;
   Json const w = world(samock, fail);
+  Json used = Json::array();
+  for (Json const& r : tool_results) used.push_back(r.value("tool", ""));
   t["facts"] = Json{{"planner", source},
                     {"model", model_name},
                     {"model_calls_core", 0},
                     {"milestones", static_cast<std::int64_t>(miles.size())},
                     {"clock_end_sec", w.value("now_sec", 0)},
+                    {"tools_available", static_cast<std::int64_t>(tools_available)},
+                    {"tool_calls", static_cast<std::int64_t>(tool_results.size())},
+                    {"tools_used", used},
+                    {"llm_calls", llm_calls},
+                    {"chunks_read", chunks_read},
+                    {"chunk_llm_calls", chunk_llm_calls},
+                    {"source_files", sources},
+                    {"summary_path", summary_path},
+                    {"summary_chars", static_cast<std::int64_t>(utf8_codepoints(summary))},
                     {"verdict", ok ? (source == "llm" ? "Completed · LLM 规划 → 校验 → 执行"
                                                       : "Completed · 计划文件 → 校验 → 执行")
                                    : "Failed · 世界断言/工具失败"}};
   t["dag"] = plan;
   t["messages"] = L.msgs;
   t["milestones_summary"] = miles;
+  if (!tool_results.empty()) t["tool_results"] = tool_results;
+  if (!summary.empty()) t["summary"] = summary;
   return t;
 }
 
@@ -764,49 +1103,39 @@ struct PlannerResult {
   Json plan;
   std::string error;
   std::string model;
+  std::string raw;     // 模型最后一次原始输出（展示“确实是 LLM 生成的”）
+  int attempts = 0;    // 规划尝试次数（含回喂重试）
 };
 
-PlannerResult plan_with_llm(std::string const& query) {
-  auto const dotenv = demo::load_dotenv({".env", "../.env", "../../.env"});
-  std::string const api_key = demo::env_or(dotenv, "LLM_API_KEY");
-  std::string const base_url = demo::env_or(dotenv, "LLM_BASE_URL", "https://api.deepseek.com/v1");
-  std::string const model_name = demo::env_or(dotenv, "LLM_MODEL", "deepseek-chat");
-  if (api_key.empty()) return {false, {}, "缺少 LLM_API_KEY（请在 .env 提供）", model_name};
+PlannerResult plan_with_llm(std::string const& query, std::string const& system_prompt,
+                            std::vector<std::string> const& allowed_tools) {
+  LlmEnv const env = load_llm_env();
+  if (env.api_key.empty())
+    return {false, {}, "缺少 LLM_API_KEY（请在 .env 提供）", env.model, {}, 0};
 
-  std::string ca_bundle = demo::env_or(dotenv, "LLM_CA_BUNDLE");
-  if (ca_bundle.empty()) {
-    if (char const* home = std::getenv("HOME")) {
-      std::string const candidate = std::string(home) + "/.geo/corp-ca.pem";
-      if (std::filesystem::exists(candidate)) ca_bundle = candidate;
-    }
-  }
-  model::ModelConfig cfg;
-  cfg.api_key = api_key;
-  cfg.base_url = base_url;
-  cfg.model = model_name;
-  cfg.timeout_ms = 90000;
-  cfg.ca_info = ca_bundle;
+  std::shared_ptr<http::CurlMultiTransport> transport;
+  auto const llm = make_llm(env, transport);
 
-  auto transport = std::make_shared<http::CurlMultiTransport>();
-  model::openai::OpenAIChatModel llm(cfg, transport);
-
-  std::vector<Message> msgs{message::system_message(sa::plan::planner_system_prompt()),
+  std::vector<Message> msgs{message::system_message(system_prompt),
                             message::human_message("用户一句话：" + query)};
   std::string last_raw;
   std::vector<std::string> issues;
   for (int attempt = 0; attempt < 3; ++attempt) {
     model::CallOptions opt;
-    opt.temperature = 0.0;
+    opt.temperature = 0.2;  // 不再是 0：允许模型在合法空间内选择不同结构/工具
     opt.response_format = Json{{"type", "json_object"}};
-    auto resp = llm.invoke(msgs, opt);
-    if (!resp) return {false, {}, "模型调用失败：" + resp.error().message, model_name};
+    auto resp = llm->invoke(msgs, opt);
+    if (!resp)
+      return {false, {}, "模型调用失败：" + resp.error().message, env.model, last_raw,
+              attempt + 1};
     last_raw = resp->text();
     Json p = Json::parse(sa::plan::extract_json_text(last_raw), nullptr, /*allow_exceptions=*/false);
     if (p.is_discarded()) {
       issues = {"P00: 输出不是合法 JSON"};
     } else {
-      auto const v = sa::plan::validate(p);
-      if (v.empty()) return {true, sa::plan::layout(std::move(p)), {}, model_name};
+      auto const v = sa::plan::validate(p, allowed_tools);
+      if (v.empty())
+        return {true, sa::plan::layout(std::move(p)), {}, env.model, last_raw, attempt + 1};
       issues.clear();
       for (auto const& i : v) issues.push_back(i.code + ": " + i.message);
     }
@@ -818,15 +1147,23 @@ PlannerResult plan_with_llm(std::string const& query) {
   }
   std::string err = "规划重试 3 次仍不合法：";
   for (std::string const& s : issues) err += "\n  - " + s;
-  return {false, {}, std::move(err), model_name};
+  return {false, {}, std::move(err), env.model, last_raw, 3};
 }
 #endif
 
 int run_plan_mode(std::string const& query, std::string const& plan_json_path,
-                  std::string const& tl_path, Progress& prog, bool dry_run) {
+                  std::string const& tl_path, Progress& prog, bool dry_run,
+                  bool allow_side_effects) {
   std::string source = "fixture";
   std::string model_name = "(fixture)";
+  std::string plan_raw;      // Planner 原始输出（或计划文件原文）——用于证明/核对
+  int planner_attempts = 1;
   Json plan;
+
+  // S9：工具目录（只读默认；写入/命令需 allow_side_effects）。Planner 清单与执行注册表同源。
+  sa::ToolCatalog catalog = sa::build_tool_catalog(allow_side_effects);
+  std::println("工具目录：{} 个（{}）", catalog.reg.size(),
+               allow_side_effects ? "含副作用工具" : "只读模式");
 
   if (!plan_json_path.empty()) {
     std::ifstream in(plan_json_path);
@@ -834,7 +1171,14 @@ int run_plan_mode(std::string const& query, std::string const& plan_json_path,
       std::println("[✗] 读不到计划文件：{}", plan_json_path);
       return 2;
     }
-    Json p = Json::parse(in, nullptr, /*allow_exceptions=*/false);
+    {
+      std::string line;
+      while (std::getline(in, line)) {
+        plan_raw += line;
+        plan_raw += '\n';
+      }
+    }
+    Json p = Json::parse(plan_raw, nullptr, /*allow_exceptions=*/false);
     if (p.is_discarded()) {
       std::println("[✗] 计划文件不是合法 JSON：{}", plan_json_path);
       return 2;
@@ -843,8 +1187,12 @@ int run_plan_mode(std::string const& query, std::string const& plan_json_path,
   } else {
 #ifdef SA_PLAN_LIVE
     std::println("—— S7 · LLM 规划（一句话 → DAG）——\n用户：{}", query);
-    PlannerResult const pr = plan_with_llm(query);
+    PlannerResult const pr = plan_with_llm(
+        query, sa::plan::planner_system_prompt(sa::tool_catalog_prompt(catalog)),
+        catalog.names);
     model_name = pr.model;
+    plan_raw = pr.raw;
+    planner_attempts = pr.attempts;
     if (!pr.ok) {
       std::println("[✗] 规划失败：{}", pr.error);
       return 2;
@@ -857,7 +1205,7 @@ int run_plan_mode(std::string const& query, std::string const& plan_json_path,
 #endif
   }
 
-  auto const issues = sa::plan::validate(plan);
+  auto const issues = sa::plan::validate(plan, catalog.names);
   if (!issues.empty()) {
     std::println("[✗] 计划未通过静态校验（fail-closed，不执行）：");
     for (auto const& i : issues) std::println("  - {}: {}", i.code, i.message);
@@ -888,11 +1236,18 @@ int run_plan_mode(std::string const& query, std::string const& plan_json_path,
 
   LiveRec L;
   L.prog = &prog;
-  ExecOutcome const out = execute_plan(plan, query, samock, L);
+  ExecOutcome const out =
+      execute_plan(plan, query, samock, catalog.reg, L, allow_side_effects);
   prog.emit(Json{{"t", "task"}, {"state", "done"}, {"id", plan_id}});
 
-  Json task = build_plan_task(plan, query, L, samock, out.ok, source, model_name);
+  Json task = build_plan_task(plan, query, L, samock, out.tool_results, catalog.reg.size(),
+                              out.ok, out.summary, out.llm_calls, out.chunks_read,
+                              out.chunk_llm_calls, out.sources, out.summary_path, source,
+                              model_name);
   task["id"] = plan_id;
+  task["plan_raw"] = plan_raw;
+  task["facts"]["planner_model"] = model_name;
+  task["facts"]["planner_attempts"] = planner_attempts;
   Json tl = history;
   tl["schema"] = "sa-tasklog/v1";
   tl["deterministic"] = (source == "fixture");
@@ -928,6 +1283,7 @@ int main(int argc, char** argv) {
   std::string query;
   std::string plan_json_path;
   bool dry_run = false;
+  bool allow_side_effects = false;
   long pace_ms = 0;
   for (int i = 1; i < argc; ++i) {
     std::string const a = argv[i];
@@ -941,6 +1297,8 @@ int main(int argc, char** argv) {
       plan_json_path = a.substr(std::string("--plan-json=").size());
     } else if (a == "--dry-run") {
       dry_run = true;
+    } else if (a == "--allow-side-effects") {
+      allow_side_effects = true;
     } else if (a.starts_with("--pace-ms=")) {
       std::string const v = a.substr(std::string("--pace-ms=").size());
       try {
@@ -954,18 +1312,21 @@ int main(int argc, char** argv) {
     } else if (a == "--help" || a == "-h") {
       std::println(
           "用法：sa_demo [--tasklog=<路径>] [--progress=<JSONL 路径>] [--pace-ms=<0..5000>]\n"
-          "              [--query=<一句话> | --plan-json=<路径>] [--dry-run]");
+          "              [--query=<一句话> | --plan-json=<路径>] [--dry-run]\n"
+          "              [--allow-side-effects]（允许 file_write/bash；默认只读工具）");
       return 0;
     }
   }
   if (query.empty()) {
     if (char const* q = std::getenv("SA_QUERY"); q != nullptr && *q != '\0') query = q;
   }
+  if (char const* sx = std::getenv("SA_ALLOW_SIDEFX"); sx != nullptr && std::string(sx) == "1")
+    allow_side_effects = true;
   Progress prog(prog_path, pace_ms);
 
   // S7：一句话 / 计划文件模式（不跑 S1–S4 手写导演段）。
   if (!query.empty() || !plan_json_path.empty())
-    return run_plan_mode(query, plan_json_path, tl_path, prog, dry_run);
+    return run_plan_mode(query, plan_json_path, tl_path, prog, dry_run, allow_side_effects);
 
   std::println("SystemAgent 骨架 demo（problems/64 · S1–S4 · 全离线）\n");
   std::println("SA ≠ 单个 agent：核心 agent（编排·只读观测） + 电话域 agent + 消息域 agent；");
@@ -1425,7 +1786,8 @@ int main(int argc, char** argv) {
        Json{{"at_sec", 27}, {"from", "核心"}, {"text", "→消息域：发微信。"}},
        Json{{"at_sec", 27}, {"from", "消息域"}, {"text", "已发送到妈妈并确认送达。"}}});
   t1["facts"] =
-      Json{{"model_calls_core", 2},   // S2 断言已锁（≤3，拒接/重试全程不打扰核心）
+      Json{{"planner", "scripted"},   // 脚本固定 DAG（非 LLM 生成）
+           {"model_calls_core", 2},   // S2 断言已锁（≤3，拒接/重试全程不打扰核心）
            {"milestones", t1_ms.value("seq", -1)},
            {"clock_end_sec", t1_world.value("now_sec", -1)},
            {"verdict", "Completed · ended(user_redirected) · 消息=妈妈 delivered"}};
@@ -1544,7 +1906,8 @@ int main(int argc, char** argv) {
       {Json{{"at_sec", 0}, {"from", "核心"}, {"text", "→消息域：发微信。"}},
        Json{{"at_sec", 0}, {"from", "消息域"}, {"text", "已发送到妈妈并确认送达。"}}});
   t2["facts"] =
-      Json{{"model_calls_core", 1},   // t2：核心仅 1 次咨询（单域快路）
+      Json{{"planner", "scripted"},   // 脚本固定 DAG（非 LLM 生成）
+           {"model_calls_core", 1},   // t2：核心仅 1 次咨询（单域快路）
            {"milestones", 0},         // 无通话 → 无里程碑
            {"clock_end_sec", t2_world.value("now_sec", -1)},
            {"verdict", "Completed · 消息=妈妈 delivered · 单域快路（核心 1 咨询）"}};

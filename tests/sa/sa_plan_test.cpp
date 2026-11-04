@@ -130,6 +130,119 @@ TEST(SaPlan, AcceptsPhoneOnlyWithoutControl) {
   EXPECT_TRUE(validate(p).empty());
 }
 
+Json tool_plan(std::string const& tool_name) {
+  Json p = Json::parse(R"JSON({
+    "title":"计算",
+    "nodes":[
+      {"id":"u","role":"user","task":"算一下"},
+      {"id":"c","role":"core","task":"→工具：计算。"},
+      {"id":"t","role":"tool","tool":"calculator","args":{"expression":"1+1"},"task":"计算"},
+      {"id":"w","role":"world","task":"核对"}
+    ],
+    "edges":[
+      {"from":"u","to":"c","kind":"query"},
+      {"from":"c","to":"t","kind":"dispatch"},
+      {"from":"t","to":"w","kind":"world"}
+    ]
+  })JSON");
+  for (Json& n : p["nodes"])
+    if (n.value("role", "") == "tool") n["tool"] = tool_name;
+  return p;
+}
+
+TEST(SaPlan, AcceptsToolNodeWithAllowedTool) {
+  Json p = tool_plan("calculator");
+  EXPECT_TRUE(validate(p, {"calculator", "file_read"}).empty());
+}
+
+TEST(SaPlan, RejectsUnknownTool) {
+  Json p = tool_plan("rm_rf");
+  auto const issues = validate(p, {"calculator"});
+  EXPECT_TRUE(has_issue(issues, "P30"));
+}
+
+TEST(SaPlan, RejectsToolNodeWithoutDispatch) {
+  Json p = tool_plan("calculator");
+  Json edges = Json::array();
+  for (Json const& e : p["edges"])
+    if (!(e.value("kind", "") == "dispatch")) edges.push_back(e);
+  p["edges"] = std::move(edges);
+  auto const issues = validate(p, {"calculator"});
+  EXPECT_TRUE(has_issue(issues, "P21"));
+}
+
+Json synthesis_plan() {
+  return Json::parse(R"JSON({
+    "title":"检索并摘要",
+    "nodes":[
+      {"id":"u","role":"user","task":"查最新论文并摘要"},
+      {"id":"c","role":"core","task":"→工具：检索。"},
+      {"id":"t","role":"tool","tool":"arxiv_search","args":{"search_query":"x"},"task":"检索"},
+      {"id":"s","role":"synthesis","task":"用中文写摘要"},
+      {"id":"w","role":"world","task":"核对"}
+    ],
+    "edges":[
+      {"from":"u","to":"c","kind":"query"},
+      {"from":"c","to":"t","kind":"dispatch"},
+      {"from":"t","to":"s","kind":"synthesize"},
+      {"from":"s","to":"w","kind":"world"}
+    ]
+  })JSON");
+}
+
+TEST(SaPlan, AcceptsSynthesisNode) {
+  EXPECT_TRUE(validate(synthesis_plan(), {"arxiv_search"}).empty());
+}
+
+TEST(SaPlan, RejectsSynthesisWithoutInput) {
+  Json p = synthesis_plan();
+  Json edges = Json::array();
+  for (Json const& e : p["edges"])
+    if (e.value("kind", "") != "synthesize") edges.push_back(e);
+  p["edges"] = std::move(edges);
+  auto const issues = validate(p, {"arxiv_search"});
+  EXPECT_TRUE(has_issue(issues, "P32"));
+}
+
+TEST(SaPlan, RejectsSynthesizeEdgeFromUser) {
+  Json p = synthesis_plan();
+  p["edges"].push_back(Json{{"from", "u"}, {"to", "s"}, {"kind", "synthesize"}});
+  auto const issues = validate(p, {"arxiv_search"});
+  EXPECT_TRUE(has_issue(issues, "P33"));
+}
+
+TEST(SaPlan, RejectsSynthesisWithoutTask) {
+  Json p = synthesis_plan();
+  p["nodes"][3].erase("task");
+  auto const issues = validate(p, {"arxiv_search"});
+  EXPECT_TRUE(has_issue(issues, "P35"));
+}
+
+TEST(SaPlan, RejectsMultipleSynthesisNodes) {
+  Json p = synthesis_plan();
+  p["nodes"].push_back(Json{{"id", "s2"}, {"role", "synthesis"}, {"task", "再摘要"}});
+  p["edges"].push_back(Json{{"from", "t"}, {"to", "s2"}, {"kind", "synthesize"}});
+  p["edges"].push_back(Json{{"from", "s2"}, {"to", "w"}, {"kind", "world"}});
+  auto const issues = validate(p, {"arxiv_search"});
+  EXPECT_TRUE(has_issue(issues, "P34"));
+}
+
+TEST(SaPlan, LayoutStacksMultipleNodesInSameLayer) {
+  Json p = tool_plan("calculator");
+  p["nodes"].push_back(Json{{"id", "t2"}, {"role", "tool"}, {"tool", "get_datetime"}});
+  p["edges"].push_back(Json{{"from", "c"}, {"to", "t2"}, {"kind", "dispatch"}});
+  p["edges"].push_back(Json{{"from", "t2"}, {"to", "w"}, {"kind", "world"}});
+  auto const issues = validate(p, {"calculator", "get_datetime"});
+  EXPECT_TRUE(issues.empty()) << (issues.empty() ? "" : issues.front().message);
+  Json const laid = layout(p);
+  // 同层两个工具节点应分行，而不是重叠
+  std::vector<int> rows;
+  for (Json const& n : laid["nodes"])
+    if (n.value("role", "") == "tool") rows.push_back(n["row"].get<int>());
+  ASSERT_EQ(rows.size(), 2u);
+  EXPECT_NE(rows[0], rows[1]);
+}
+
 TEST(SaPlan, LayoutUsesLongestPath) {
   Json const p = layout(t1_plan());
   EXPECT_EQ(p["nodes"][0]["layer"].get<int>(), 0);  // user
