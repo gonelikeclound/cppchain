@@ -36,6 +36,48 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 20 轮（2026-11-04 · S10a 落地：SAD 离线 mock 全过）
+
+- **用户选择**：先做 mock，不接真实系统。
+- **新增 `examples/sad_mock/`**（纯离线、确定性、无模型调用）：
+  - **984 条 mock 事件**：900 噪声 + 50 健康正常（限流）+ 20 重复（去重）+ 5 非法（schema）
+    + 真事件/专项钩子（服务 down、磁盘水位、发布失败、等待事件、容量告警、安全告警、
+    人工消息、注入漏报）；
+  - **L0-a**：schema / 未知来源 / 噪声类型 / 去重 / 限流；每次丢弃记录
+    `{rule_id, version, reason}`；**L0-b**：确定性 mock classifier（生产换小模型）；
+  - **白名单**（security./human./payment./health.）100% 进摘要层，crit 安全唤醒越过预算；
+  - **精确 waits bypass**：`deploy.finished` 跳过 L0-b 直接进 L1a，且属于任务续跑、优先于打扰预算；
+  - **L1a 规则 → 预编排 DAG**（注册表 5 个：svc_restart / disk_cleanup / deploy_rollback /
+    deploy_verify / security_incident），运行时只路由不生成图；
+  - **L1b**：按 DAG 合并唤醒 + 打扰预算（超预算进静默摘要）；
+  - **影子审计**：25% 演示放大抽样 + 注入漏报 → `miss_rate`；`sad_mock_tests` 6 条。
+- **实测**：候选 13、唤醒 5（安全 1）、预算静默 1、合并唤醒 1、去重 21、限流 45、噪声 900；
+  5 个预编排 DAG 全部执行；11 条验收全过；`miss_rate 0.412%`；全仓 **1107/1107**。
+- **产物**：`build/dev/examples/sad_mock --report=tmp/sad_mock_report.json`；
+  报告含 metrics/checks/drops/wakes/runs/digest。
+
+### 第 19 轮（2026-11-04 · S10 前置：事件分类、过滤、分层与需求）
+
+- **用户要求**：先解决两个前置问题——①系统内会收到什么事件、如何过滤、是否需要多级 agent
+  层层上报；②需求是什么、业界/开源是否有类似物。
+- **结论**：
+  - **事件过滤不用多级 agent**：L0-a 纯函数（结构/速率/时间窗/去重/源侧聚合）→ L0-b 廉价语义
+    （小模型/分类器，禁用主模型，有界速率，判定可解释）→ L1a 规则命中（写 inbox，不唤醒）→
+    L1b 编排唤醒（批量 + 预算）。**规则决定“要不要建任务”，模型只负责“填槽”**。
+  - **多级只适用于决策/执行升级**，且推荐“单编排器 + 域专家 + 人”；升级 **≤1 次**、交接包结构化、
+    **不重置预算**、不可逆动作不重复执行。
+  - 必须是一等机制：**不可丢白名单**（平台/用户定义，SA 无权改）、精确匹配 bypass（活跃任务 waits）、
+    **打扰预算**（每日上限/静默时段/超预算转静默摘要）、**漏报审计**（影子通道 + 事后回收 +
+    no-rule 桶 → `miss_rate`）、每次丢弃可解释（`{rule_id, version, reason}`）。
+  - **需求**：降噪/缩短 MTTR/统一 runbook/跨源关联/7×24/知识沉淀；验收指标 = 自动化率、MTTR、
+    事件→动作延迟、误报/漏报率、唤醒/打扰次数、每事件成本、人工接管率。
+  - **业界对照**：Alertmanager（去重/分组/抑制/路由）、PagerDuty/Opsgenie（升级策略）、
+    StackStorm（sensors→rules→actions/workflows）、K8s controllers（reconcile）、AIOps/CEP、
+    AI SRE agents（Azure SRE Agent / AWS DevOps Agent / Datadog Bits AI SRE / HolmesGPT / K8sGPT）、
+    LangGraph/AutoGen/CrewAI（多 agent 编排）；多数只做一半——确定性工具没有智能，AI agent 工具
+    缺少严格漏斗/预算/审计。SAD 的差异 = 确定性漏斗 + 静态 DAG + LLM gate + 唤醒账/审计。
+- 详见 §5.7（事件清单、过滤规则、分层边界、需求/验收指标、升级契约、S10a 验收样例）。
+
 ### 第 18 轮（2026-11-04 · S10 设计讨论：常驻 SAD + 预编排 DAG + 多重拦截门）
 
 - **用户提案**：SA 的另一个大作用是作为系统内的**常驻 agent（SAD, system_agent_daemon）**：
@@ -547,7 +589,8 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S9b** | **修复“只检索不总结”**：新增 role=`synthesis` + edge kind=`synthesize`，解释器把上游结果交给真实 LLM 生成摘要（summary 消息/tasklog summary/facts summary_chars·llm_calls），world 断言摘要非空；校验 P32–P35；Planner 规则 8 + 示例 4；core 多出边去重；Planner 内层校验带工具白名单；UI 摘要样式/pill/边色；`sa_plan_tests` 21 条、E2E 18/18、全仓 **1101/1101** | ✅ **2026-11-04 全过** |
 | **S9c** | **让“LLM 生成”可辨识**：去掉 4 个具象 few-shot（改为 schema 骨架）、Planner temperature 0→0.2；tasklog 记录 `plan_raw` + facts planner_model/attempts，脚本 t1/t2 标 `planner=scripted`；UI 任务卡 LLM/脚本徽标、「来源 LLM · model」pill、源码标签第三态「规划原文」；5 条问法一次通过且结构/节点 id 开始变化；全仓 1101/1101、E2E 18/18 | ✅ **2026-11-04 全过** |
 | **S9d** | **长文下载→分片读取→摘要→保存**：新增 `download_url`（全文落盘、只回路径/大小、UTF-8/HTML 处理、运行目录约束）；synthesis 自动分片 map-reduce（20k×12 片，分片笔记+汇总）；上游失败**禁止生成**（不调用模型）；`args.save_to` 保存摘要并记 summary_path；Planner 只加通用规则（长文下载、下载后勿重复 file_read、分卷下全、保存填 save_to）；UI 显示分片/摘要/已保存；同一句话实测 5 节点、12 片、1344 字、保存成功；全仓 1101/1101、E2E 18/18 | ✅ **2026-11-04 全过** |
-| **S10** | **常驻 SAD 设计骨架**：稳态预编排 DAG + L0–L4 门流水线（去重/合并/限流/分级/准入/咨询 gate）+ DAG 注册表与路由 + 状态/journal/Reaper + 唤醒账 + 未匹配/高危受控升级；MVP S10a–S10e（详见 §5.6） | 📝 **设计（2026-11-04）** |
+| **S10** | **常驻 SAD 设计骨架**：稳态预编排 DAG + L0–L4 门流水线（去重/合并/限流/分级/准入/咨询 gate）+ DAG 注册表与路由 + 状态/journal/Reaper + 唤醒账 + 未匹配/高危受控升级；MVP S10a–S10e（详见 §5.6）；事件分类/过滤规则/需求/验收指标/升级契约见 §5.7 | 📝 **设计（2026-11-04）** |
+| **S10a** | **SAD 离线 mock**：984 事件 → L0-a/L0-b/L1a/L1b → 5 个预编排 DAG；白名单/精确 bypass/打扰预算/影子审计；11 条验收 + `sad_mock_tests` 6 条；全仓 **1107/1107**（详见 §5.7.7、第 20 轮） | ✅ **2026-11-04 全过** |
 | S10+ | 常驻 SAD 落地（S10a–S10e，见 §5.6）；事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；
@@ -557,6 +600,7 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 
 > 2026-11-04 第 18 轮结论。目标：**系统内的常驻智能编排层**——稳态事件走预编排 DAG，
 > LLM 只在声明的 gate 出现；多重门负责挡住事件洪峰；新场景通过受控升级处理。
+> **事件分类/过滤规则/需求与验收指标的前置定义见 §5.7（第 19 轮）。**
 
 #### 5.6.1 目标与非目标
 
@@ -644,6 +688,194 @@ LLM 调用/token · 重复处理率 · Reaper 干预数 · **漏报率（采样�
 - DAG 版本与长时任务的兼容（运行中升级怎么办）？
 - 多实例的 leader election 与事件分片；跨实例的幂等。
 - 如何避免“为每个新故障写一个 DAG”导致注册表膨胀（模板化/参数化/组合子）。
+
+### 5.7 S10 前置：事件分类、过滤与需求（2026-11-04 第 19 轮）
+
+> 本节回答两个前置问题：系统里会收到什么事件、怎么挡；需求是什么、业界做到哪一步。
+> 结论：**漏斗是多级的，智能不是多级的；升级是有界的，交接是结构化的。**
+
+#### 5.7.1 事件分类与 envelope
+
+按“来源 × 价值 × 是否可丢”分类（C6 的 4000 事件/夜是移动端样本，服务端同理）：
+
+| 层 | 典型事件 | 频率 | 是否可丢 | 延迟敏感 |
+|---|---|---|---|---|
+| 基础设施 | CPU/内存/磁盘阈值、节点/pod 状态、网络抖动、证书到期、时钟偏移、备份结果、cron 失败 | 高 | 多数可聚合/可丢 | 中 |
+| 服务/应用 | 错误率、延迟 SLO 破线、异常堆栈、发布/回滚、配置变更、依赖超时、队列积压 | 中高 | 不可静默丢 | 高 |
+| 数据 | 主从延迟、数据质量、schema 变更、存储水位 | 中 | 不可丢 | 中 |
+| 安全 | 登录失败风暴、权限变更、漏洞告警、入侵检测、审计异常 | 低中 | **不可丢** | 高 |
+| 业务 | 订单/支付失败、用户投诉、工单 | 低 | 不可丢 | 高 |
+| 人际/协作 | 聊天/邮件/工单/审批请求 | 低 | **不可丢** | 高 |
+| 时间/治理 | 定时任务、维护窗口、成本异常、策略违规 | 低 | 部分可丢 | 中 |
+
+事件 envelope（草案，对齐 `sa-event/v1`）：
+
+```json
+{"schema":"sa-event/v1","id":"evt-…","source":"svc|disk|queue|…","type":"svc.down",
+ "severity":"info|warn|crit","ts":"2026-11-04T12:00:00Z",
+ "dedup_key":"svc:api:down","correlation_keys":["svc:api","deploy:20261104-1"],
+ "scope":"host|cluster|tenant","actionability":"auto|suggest|notify",
+ "payload":{…}}
+```
+
+- `dedup_key`：L1 去重/合并；`correlation_keys`：窗口关联（如“电量低 ∧ 归途”）；
+- `actionability`：决定“要不要建任务”；`severity`：决定限流/旁路/升级优先级；
+- **源侧聚合**（C6 G-l）：SA 看到的应是“状态变化”，不是原始传感器/指标流。
+
+#### 5.7.2 过滤流水线（4 级 + 旁路 + 白名单 + 预算 + 审计）
+
+```
+4000 事件/夜
+  ├─ L0-a 结构过滤（纯函数）：schema/类型/来源/速率/时间窗/去重/源侧聚合
+  │      → 60
+  ├─ L0-b 廉价语义（小模型/分类器，禁用主模型，有界速率，判定可解释）
+  │      → 10
+  ├─ L1a 任务增强（规则命中 → 写 inbox，不唤醒）
+  ├─ L1b 编排唤醒（需改图 → 批量合并，预算内）
+  └─ 3~5 次编排调用/夜
+```
+
+（数字来自 C6 推演：4000 → 60 → 10 → 3~5；主模型直吃约 600 万 token/夜，漏斗后约 2.4 万，差 250 倍。）
+
+| 层 | 判断什么 | 实现约束 | 失败方向/兜底 |
+|---|---|---|---|
+| **L0-a** | 结构合法、类型/来源、速率、时间窗、去重、源侧聚合 | 纯函数；微秒~毫秒级 | 丢弃可解释；白名单旁路 |
+| **L0-b** | 廉价语义（“这条消息要不要回应”） | **禁用主模型**；令牌桶限速；输出 `{reason, confidence, model_version}` | 限速降级为“只走白名单” |
+| **L1a** | 命中任务订阅/规则？写 inbox | 规则命中是纯函数；模型只“填槽” | 不唤醒；写摘要 |
+| **L1b** | 是否需要改图/唤醒编排 | 批量合并 + 预算 | 超预算转静默摘要 |
+
+一等机制：
+
+- **规则 vs 模型**：规则决定“是否建任务”（可版本化/灰发/回滚），模型只在规则命中后填槽；
+  规则库由人写/人审，SA 只提议（G-k）。
+- **精确匹配 bypass**：命中活跃任务 `waits` 的事件直接进 L1a，跳过 L0-b。
+- **不可丢白名单**：来电/短信/联系人消息/安全/财务/健康类，无论是否匹配订阅都进摘要层；
+  白名单由平台/用户定义，SA 无权修改。
+- **打扰预算**（一等资源）：
+
+```yaml
+interruption_budget:
+  daily_max: 5
+  quiet_hours: [23:00-07:00]
+  on_exhausted: silent_digest
+  priority_override: safety
+```
+
+- **漏报审计**：L0-a 丢弃事件 0.5% 抽样 + 白名单 100% 送 L0-b 复核；每周回看“用户事后手动
+  处理了哪些事”；监控 no-rule 桶；产出 `miss_rate`（>0.5% 告警，>2% 自动放宽）。
+- **纪律**：D-a 每级放大倍数有上限、单位成本递减一个数量级；D-b 每次丢弃可解释
+  （`{rule_id, version, reason}`）；D-c 有兜底（白名单 + 影子通道 + 回收审计）。
+
+#### 5.7.3 分层边界：漏斗 vs 升级（多级 agent 结论）
+
+| | 过滤层（事件 → 候选） | 决策/执行层（候选 → 处理） |
+|---|---|---|
+| 该用什么 | 纯函数 + 小模型/分类器 + 规则 | 编排器 + 域 agent + 人 |
+| 不该用什么 | 多级 LLM agent | 深链式多级 agent |
+| 理由 | 成本/延迟/可解释性 | 上下文丢失/责任模糊/审计困难 |
+
+推荐形态（不是“层层上报”，而是“边界分层”）：
+
+```
+L1 常规 DAG（确定性 runbook）
+L2 SAD 编排器（单点，跨域协调/分诊）
+L3 诊断/专家 agent 或人（仅在升级时出现）
+```
+
+- **过滤层不用 agent**：否则 4000 条事件在每层都调模型，成本和延迟不可控；
+- **升级是有界的**：最多 1 次拓扑升级（`05` R6）；交接包带“已完成动作 + 剩余预算”；
+  不重置预算；不可逆动作不重复执行；
+- **多级 agent 只适合“知识/权限边界”不同**（域专家），不适合做事件过滤。
+
+#### 5.7.4 需求清单
+
+**要解决的问题**（按价值排序）：
+
+1. 告警疲劳/信噪比低（C6 约 1:1300）；
+2. MTTR 长（事件→诊断→动作→验证靠人串）；
+3. Runbook 执行靠人肉且不一致、缺审计；
+4. 跨源关联缺失（指标×日志×发布×依赖）；
+5. 7×24 与事件洪峰；
+6. 处理过的故障没有沉淀成规则/DAG。
+
+**功能需求**：接入/规范化 → 去重/合并/关联 → 分级/限流 → 规则命中 → DAG 路由/参数绑定 →
+执行（审批/幂等/审计）→ 验证/收尾 → 升级（诊断/人）→ 规则与 DAG 的版本化/灰发/回滚。
+
+**非功能需求**：
+
+- 延迟：L0-a p99 微秒~毫秒；L0-b 有界；唤醒按预算；
+- 可用性：常驻、崩溃恢复、journal/checkpoint、至少一次 + 幂等；
+- 安全：每 DAG 最小权限、副作用审批、门决策审计；
+- 成本：每级单位成本递减、每事件 token 上限、影子通道 ≤ 编排预算 5%；
+- 可解释：每次丢弃/唤醒都能回答“为什么”。
+
+#### 5.7.5 验收指标
+
+| 指标 | 定义 | 建议目标（首版） |
+|---|---|---|
+| 自动化处理率 | 无需人工介入完成的事件 / 总事件 | 先测基线，再设目标 |
+| MTTR | 事件发生到恢复 | 相对基线下降 |
+| 事件→动作延迟 | 事件 ts 到首个动作 | L0-a p99 < 5ms；端到端按 DAG 设 |
+| 误报率 | 主动处理但用户不认可 / 处理总数 | 低（防烦） |
+| `miss_rate` | 抽样发现该关注却被丢 / 抽样总数 | < 0.5% |
+| 唤醒/打扰次数 | 每日主动触达 | 按打扰预算 |
+| 每事件成本 | token + 时长 | 每级递减一个数量级 |
+| 人工接管率 | 升级到人的比例 | 逐步下降 |
+| 规则覆盖率 | `1 - no-rule 桶/候选` | 监控趋势 |
+
+#### 5.7.6 升级契约（handoff packet）
+
+```json
+{"incident_id":"inc-…","from":"L1|L2","to":"L2|L3|human","signal":"S1–S8",
+ "facts":[{"tool":"...","args":{…},"result_digest":"..."}],
+ "actions_done":[…],"irreversible_done":[…],
+ "remaining_budget":{"tokens":1234,"minutes":5},
+ "escalations_used":1,"next_hint":"…"}
+```
+
+规则：**≤1 次升级**；不重置预算；不重复执行 `irreversible_done`；保留证据/观测摘要；
+超时必须落到 `stuck`/`abandon` 路径（`02` §8.2 / `05`）。
+
+#### 5.7.7 第一版 S10a 验收样例（mock 事件源）
+
+> 首个垂直切片的具体系统边界待确认；先用 mock 事件源验证机制。
+
+- **事件源**：`svc.health`（服务 down）、`disk.usage`（>90%）、`deploy.failed`、
+  `noise.metric`（高频噪声，用于压力）。
+- **场景**：1 分钟内注入 1000 条事件，其中 3 个真事件（服务 down / 磁盘水位 / 发布失败）。
+- **验收**：
+  1. 编排唤醒 ≤ 5；
+  2. 白名单事件 100% 进入摘要层（即使未匹配订阅）；
+  3. 每条丢弃含 `{rule_id, version, reason}`；
+  4. `miss_rate` 可计算（注入 1 条“应关注但被规则漏掉”的事件，影子通道能发现）；
+  5. 精确匹配 bypass 生效（活跃任务 `waits` 命中不经过 L0-b）；
+  6. L0-a 在 10× 洪峰下 p99 不劣化，且能降级到白名单模式；
+  7. 打扰预算耗尽 → 静默摘要；
+  8. 运行中重启：checkpoint 恢复、不重复执行不可逆动作。
+- **交付物**：envelope schema、门配置、DAG 路由表、一个日常 DAG + 一个告警 DAG、审计/dead-letter
+  存储、指标报告。
+- **实现状态（2026-11-04，S10a 全过）**：`examples/sad_mock/` 已落地（纯离线、无模型）：
+  984 条事件 → 候选 13 → 唤醒 5（安全 1，预算静默 1，合并 1）；噪声 900、去重 21、限流 45、
+  schema 2、未知来源 1；`miss_rate 0.412%`（影子抽样 243）；5 个预编排 DAG 全部执行；
+  11 条验收 + `sad_mock_tests` 6 条全过；报告 `tmp/sad_mock_report.json`。
+  **未覆盖**：10× 洪峰 p99 压测、运行中重启/checkpoint（留 S10d）。
+
+#### 5.7.8 业界/开源对照
+
+| 类别 | 代表 | 可借鉴 | 缺什么 |
+|---|---|---|---|
+| 告警去重/分组/抑制/路由 | **Prometheus Alertmanager** | dedup/group/inhibit/silence/routing（L1/L2 门） | 不会诊断/执行 |
+| 值班升级/on-call | PagerDuty、Opsgenie、Grafana OnCall | 升级策略、分组、值班表 | 升级对象是人，不是 agent |
+| 事件驱动自动化/runbook | **StackStorm**（sensors→rules→actions/workflows）、Rundeck、Ansible AWX、Argo Workflows | 事件-规则-动作、DAG、审批、审计 | 规则/动作靠人写，无 LLM 填槽/诊断 |
+| 控制器/operator | **Kubernetes controllers/operators** | reconcile loop、level-triggered、声明式终态 | 无跨系统语义/诊断 |
+| AIOps/事件关联 | Moogsoft、BigPanda、Datadog Event Management；Flink CEP/Esper/Drools | 关联、降噪、CEP | 多为相关性/规则，不是可执行 agent |
+| AI SRE / 运维 agent | Microsoft Azure SRE Agent、AWS DevOps Agent、Datadog Bits AI SRE、PagerDuty AI、Rootly/incident.io AI；开源 **HolmesGPT**（Robusta）、**K8sGPT** | 诊断、根因、建议/执行 | 多缺严格漏斗/打扰预算/静态 DAG 审计 |
+| 多 agent 编排框架 | LangGraph（supervisor/handoff）、AutoGen、CrewAI（hierarchical）、OpenAI Agents SDK（handoffs） | 编排/交接/子 agent 模式 | 没有事件接入、过滤、预算、审计 |
+| 控制论/自愈 | MAPE-K（Monitor-Analyze-Plan-Execute-Knowledge） | 分层控制循环 | 工程化/LLM gate 需自补 |
+
+**SAD 的差异化位置**：Alertmanager/StackStorm 式**确定性漏斗与 runbook** + **LLM 只在 gate**
++ **静态 DAG 加载期校验** + **唤醒账/打扰预算/漏报审计** + **有界升级**。业界通常是：确定性工具
+没有智能，AI agent 工具没有严格漏斗——这是可做的空位。
 
 ## 六、关联
 

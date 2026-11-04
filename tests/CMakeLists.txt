@@ -291,6 +291,17 @@ target_link_libraries(sa_plan_tests PRIVATE
 target_compile_options(sa_plan_tests PRIVATE -Wall -Wextra -Wpedantic)
 gtest_discover_tests(sa_plan_tests)
 
+# ---- SAD S10a mock（problems/64 §5.7.7）：门/路由/预算/影子审计，纯离线 ----
+add_executable(sad_mock_tests
+  sad/sad_mock_test.cpp)
+
+target_include_directories(sad_mock_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples)
+target_link_libraries(sad_mock_tests PRIVATE
+  cppchain_message
+  GTest::gtest_main)
+target_compile_options(sad_mock_tests PRIVATE -Wall -Wextra -Wpedantic)
+gtest_discover_tests(sad_mock_tests)
+
 # ---- CGI WebUI 纯逻辑测试（wfr-🈟 增强）：header-only cgi_lib，无需链 CGI 可执行 ----
 add_executable(webui_tests
   webui/cgi_lib_test.cpp)
