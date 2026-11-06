@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAD 编排台</title>
+<style>
+:root{
+  --bg:#0f1117; --panel:#141823; --panel2:#1b2030; --panel3:#232a3d;
+  --border:#2a3140; --text:#e8eaf0; --dim:#8b90a0; --accent:#6c8cff; --accent-ink:#0d1120;
+  --ok:#3ecf8e; --warn:#e8b14e; --bad:#ff7a85;
+  --r-user:#b18af4; --r-core:#7aa2ff; --r-phone:#4dd0e1; --r-msg:#ffb86b; --r-world:#95a0b4;
+  --edge:#6c8cff;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#eef0f4; --panel:#ffffff; --panel2:#f5f6f9; --panel3:#eceef4;
+    --border:#d8dce5; --text:#1b1f2a; --dim:#667085; --accent:#4d6def; --accent-ink:#ffffff;
+    --ok:#18934f; --warn:#b07d10; --bad:#cf2b38;
+    --edge:#4d6def;
+  }
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font:13.5px/1.55 system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+     background:var(--bg);color:var(--text);overflow:hidden;display:flex;flex-direction:column}
+button{font:inherit;color:var(--text);cursor:pointer}
+.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent);
+       border-radius:6px;padding:4px 10px;font-size:12px}
+.ghost:hover{background:var(--accent);color:var(--accent-ink)}
+.primary{background:var(--accent);color:var(--accent-ink);border:1px solid var(--accent);
+         border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600}
+#head{flex:none;display:flex;align-items:center;gap:10px;padding:10px 16px;
+      border-bottom:1px solid var(--border);background:var(--panel);flex-wrap:wrap}
+#head h1{font-size:15px;letter-spacing:.02em}
+#head .cnt{font-size:12px;color:var(--dim)}
+#head .sp{flex:1}
+#status{font-size:11.5px;color:var(--dim)}
+#status.ok{color:var(--ok)} #status.busy{color:var(--accent)} #status.err{color:var(--bad)}
+#top{height:42%;min-height:230px;display:flex;flex-direction:column;background:var(--panel);
+     border-bottom:1px solid var(--border)}
+#dag-head{flex:none;display:flex;align-items:center;gap:10px;padding:9px 16px;
+          border-bottom:1px solid var(--border)}
+#dag-title{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#dag-sub{font-size:11px;color:var(--dim);margin-left:auto;text-align:right}
+#dag-mode{padding:3px 10px;font-size:11px}
+#dag-scroll{flex:1;overflow:auto;padding:12px 16px}
+#dag-svg{display:block;min-height:120px}
+#tabs{flex:none;display:flex;gap:4px;padding:7px 12px 0;border-bottom:1px solid var(--border);
+      background:var(--panel)}
+.tab{background:transparent;border:1px solid transparent;color:var(--dim);border-radius:6px;
+     padding:5px 12px;font-size:12px}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--text);background:var(--panel2);border-color:var(--border);font-weight:600}
+#body{flex:1;min-height:0;display:flex;background:var(--panel)}
+.pane{flex:1;min-height:0;display:none;flex-direction:column}
+.pane.active{display:flex}
+.toolbar{flex:none;display:flex;align-items:center;gap:8px;padding:8px 14px;
+         border-bottom:1px dashed var(--border);flex-wrap:wrap;font-size:12px;color:var(--dim)}
+select,input[type=text]{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+                        border-radius:6px;padding:3px 7px;font:inherit;font-size:12px}
+textarea{width:100%;min-height:90px;background:var(--panel2);color:var(--text);
+         border:1px solid var(--border);border-radius:6px;padding:7px;font:12px/1.5
+         ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical}
+.scroll{flex:1;overflow:auto;min-height:0}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:5px 9px;border-bottom:1px solid var(--border);vertical-align:top}
+th{position:sticky;top:0;background:var(--panel2);color:var(--dim);font-weight:600;z-index:1}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--panel2)}
+tbody tr.sel{background:var(--panel2);box-shadow:inset 3px 0 0 var(--accent)}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.decision{font-size:10.5px;padding:1px 7px;border-radius:99px;border:1px solid var(--border);
+           white-space:nowrap}
+.d-sad_task{color:var(--ok);border-color:var(--ok)}
+.d-direct_task{color:var(--accent);border-color:var(--accent)}
+.d-digest{color:var(--warn);border-color:var(--warn)}
+.d-inbox{color:var(--accent);border-color:var(--accent)}
+.d-dropped{color:var(--dim)}
+.d-escalated{color:var(--bad);border-color:var(--bad)}
+.layer{font-size:10.5px;padding:1px 7px;border-radius:99px;border:1px solid var(--border);white-space:nowrap}
+.l-global{color:var(--warn);border-color:var(--warn)}
+.l-local{color:var(--accent);border-color:var(--accent)}
+.l-dropped{color:var(--dim)}
+.empty{padding:28px;text-align:center;color:var(--dim);font-size:12.5px}
+#sim-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 14px}
+#sim-grid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--dim)}
+#sim-grid .wide{grid-column:1 / -1}
+.presets{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 8px}
+.chip{background:var(--panel2);color:var(--dim);border:1px solid var(--border);
+      border-radius:99px;padding:2px 9px;font-size:11px}
+.chip:hover{color:var(--text);border-color:var(--accent)}
+#sim-result{padding:0 14px 14px;font-size:12px}
+#sim-result pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+                padding:8px;overflow:auto;max-height:180px;font-size:11.5px}
+#out-list{padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+.out-card{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:8px 10px}
+.out-card .tool{font-weight:600;color:var(--accent);font-size:12.5px}
+.out-card .io{font-size:11.5px;color:var(--dim);margin-top:2px;white-space:pre-wrap;word-break:break-word}
+.out-card .io b{color:var(--text);font-weight:600}
+#node-box{ fill:var(--panel2); stroke:var(--edge); stroke-width:1.5; }
+#node-box.done{ stroke:var(--ok); }
+#node-box.failed{ stroke:var(--bad); }
+#node-box.idle{ stroke:var(--border); stroke-dasharray:3 3; }
+#node-label{ fill:var(--text); font-size:12px; font-weight:600; }
+#node-out{ fill:var(--dim); font-size:10px; }
+#arrow{ stroke:var(--edge); fill:none; stroke-width:1.6; }
+#loop-arrow{ stroke:var(--warn); fill:none; stroke-width:1.3; stroke-dasharray:4 3; }
+</style>
+</head>
+<body>
+<header id="head">
+  <h1>SAD 编排台</h1>
+  <span class="cnt" id="head-metrics">—</span>
+  <span class="sp"></span>
+  <button class="ghost" id="btn-scenario" type="button">运行全量场景</button>
+  <button class="ghost" id="btn-history" type="button">刷新历史</button>
+  <button class="ghost" id="btn-clear" type="button">清空历史</button>
+  <span id="status">就绪</span>
+</header>
+
+<section id="top">
+  <div id="dag-head">
+    <span id="dag-title">未选择事件</span>
+    <span id="dag-sub"></span>
+    <button class="ghost" id="dag-mode" type="button">任务 DAG</button>
+  </div>
+  <div id="dag-scroll">
+    <svg id="dag-svg" role="img" aria-label="SAD / 任务 DAG"></svg>
+  </div>
+</section>
+
+<div id="tabs">
+  <button class="tab active" data-tab="events" type="button">事件触发列表</button>
+  <button class="tab" data-tab="history" type="button">SAD 处理历史</button>
+  <button class="tab" data-tab="simulate" type="button">事件模拟台</button>
+  <button class="tab" data-tab="outputs" type="button">输出模拟台</button>
+</div>
+
+<div id="body">
+  <section class="pane active" id="pane-events">
+    <div class="toolbar">
+      <span>筛选</span>
+      <select id="f-layer">
+        <option value="">全部层</option><option value="global">global</option>
+        <option value="local">local</option><option value="dropped">dropped</option>
+      </select>
+      <select id="f-decision">
+        <option value="">全部决策</option><option value="sad_task">sad_task</option>
+        <option value="direct_task">direct_task</option><option value="digest">digest</option>
+        <option value="dropped">dropped</option><option value="escalated">escalated</option>
+      </select>
+      <select id="f-source"><option value="">全部来源</option></select>
+      <input type="text" id="f-type" placeholder="type 包含…">
+      <span id="f-count">—</span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>id</th><th>source</th><th>type</th><th>sev</th><th>layer</th>
+          <th>decision</th><th>task</th><th>reason</th></tr></thead>
+        <tbody id="event-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="pane" id="pane-history">
+    <div class="toolbar"><span>历史记录（最近 200 条）</span><span id="h-count">—</span></div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>时间</th><th>类型</th><th>摘要</th><th>任务</th></tr></thead>
+        <tbody id="history-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="pane" id="pane-simulate">
+    <div class="presets" id="presets">
+      <button class="chip" type="button">妈妈微信提问（全局）</button>
+      <button class="chip" type="button">电量低+归途（全局）</button>
+      <button class="chip" type="button">会议+通勤（全局）</button>
+      <button class="chip" type="button">安全告警（全局）</button>
+      <button class="chip" type="button">健康告警（全局）</button>
+      <button class="chip" type="button">下载完成（本地）</button>
+      <button class="chip" type="button">电量低（本地）</button>
+      <button class="chip" type="button">设备休眠（本地）</button>
+      <button class="chip" type="button">传感器噪声</button>
+      <button class="chip" type="button">未知来源</button>
+    </div>
+    <div id="sim-grid">
+      <label>source
+        <select id="sim-source">
+          <option>notification</option><option>battery</option><option>calendar</option>
+          <option>security</option><option>health</option><option>download</option>
+          <option>screen</option><option>app</option><option>network</option>
+          <option>media</option><option>sensor</option><option>system</option>
+          <option>device</option><option>legacy</option>
+        </select>
+      </label>
+      <label>type <input id="sim-type" type="text" value="notification.message"></label>
+      <label>severity
+        <select id="sim-sev"><option>info</option><option>warn</option><option>crit</option></select>
+      </label>
+      <label>id <input id="sim-id" type="text" value="sim-1"></label>
+      <label class="wide">payload（JSON）
+        <textarea id="sim-payload">{"app":"wechat","from":"妈妈","from_is_contact":true,"intent":"question","text":"明天来吃饭吗？"}</textarea>
+      </label>
+    </div>
+    <div class="presets">
+      <button class="primary" id="btn-simulate" type="button">触发模拟事件</button>
+      <span id="sim-status" class="cnt"></span>
+    </div>
+    <div id="sim-result"></div>
+  </section>
+
+  <section class="pane" id="pane-outputs">
+    <div class="toolbar"><span id="out-head">选择一条事件 / 模拟结果查看 Task Agent 工具输出</span></div>
+    <div class="scroll" id="out-list"></div>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let REPORT = null, HISTORY = [], DAGDEFS = {}, SELECTED = null, DAGMODE = 'sad';
+
+function setStatus(msg, cls=''){ const el=$('status'); el.textContent=msg; el.className=cls; }
+function decClass(d){ return 'decision d-'+(d||'dropped'); }
+function layerClass(l){ return 'layer l-'+(l||'dropped'); }
+
+async function api(qs){
+  const r = await fetch('../cgi-bin/sad_cgi?'+qs, {cache:'no-store'});
+  const j = await r.json();
+  if(!j.ok) throw new Error(j.error || 'CGI 失败');
+  return j;
+}
+
+/* ---------------- 加载 ---------------- */
+async function loadScenario(record=true){
+  setStatus(record?'SAD 理解中（LLM）…':'加载场景…','busy');
+  try{
+    const qs = 'action=scenario' + (record ? '' : '&record=0&cache=1');
+    const j = await api(qs);
+    REPORT = j.report;
+    indexReport(REPORT);
+    const m = REPORT.metrics||{};
+    $('head-metrics').textContent =
+      '事件 '+(m.total||0)+' · 全局 '+(m.global_events||0)+' · 本地 '+(m.local_events||0)+
+      ' · 任务 '+(m.tasks_created||0)+' · SAD 理解 '+(m.sad_analyses||0)+
+      ' · LLM '+(m.llm_calls||0)+' · miss '+((m.miss_rate||0)*100).toFixed(2)+'%';
+    renderSourceFilter();
+    renderEvents();
+    await loadHistory();
+    const first = (REPORT.events||[]).find(e=>e.decision==='sad_task') ||
+                  (REPORT.events||[]).find(e=>e.decision==='direct_task') ||
+                  (REPORT.events||[])[0];
+    if(first) selectEvent(first);
+    setStatus((j.cache_hit?'缓存 · ':'') + (REPORT.ok ? '场景通过' : '场景失败'),
+              REPORT.ok?'ok':'err');
+  }catch(e){ setStatus('加载失败：'+e.message,'err'); }
+}
+
+function indexReport(rep){
+  DAGDEFS = {};
+  (rep.dags||[]).forEach(d=>DAGDEFS[d.name]=d);
+}
+async function loadHistory(){
+  try{
+    const j = await api('action=history');
+    HISTORY = j.entries||[];
+    renderHistory();
+  }catch(e){ setStatus('历史加载失败：'+e.message,'err'); }
+}
+
+/* ---------------- 事件列表 ---------------- */
+function renderSourceFilter(){
+  const sel=$('f-source');
+  const sources=[...new Set((REPORT.events||[]).map(e=>e.source))].sort();
+  sel.innerHTML='<option value="">全部来源</option>'+sources.map(s=>`<option>${esc(s)}</option>`).join('');
+}
+function filteredEvents(){
+  const l=$('f-layer').value, d=$('f-decision').value, s=$('f-source').value,
+        t=$('f-type').value.trim().toLowerCase();
+  return (REPORT.events||[]).filter(e =>
+    (!l || e.layer===l) && (!d || e.decision===d) && (!s || e.source===s) &&
+    (!t || (e.type||'').toLowerCase().includes(t)));
+}
+function renderEvents(){
+  if(!REPORT) return;
+  const list=filteredEvents();
+  $('f-count').textContent='显示 '+Math.min(list.length,300)+' / '+list.length+' 条';
+  $('event-rows').innerHTML=list.slice(0,300).map((e,i)=>
+    `<tr data-idx="${i}">
+      <td class="mono">${esc(e.id||'(空)')}</td><td>${esc(e.source)}</td>
+      <td class="mono">${esc(e.type)}</td><td>${esc(e.severity)}</td>
+      <td><span class="${layerClass(e.layer)}">${esc(e.layer)}</span></td>
+      <td><span class="${decClass(e.decision)}">${esc(e.decision)}</span></td>
+      <td class="mono">${esc(e.task_id||'')}</td>
+      <td>${esc((e.reason||'').slice(0,70))}</td></tr>`).join('');
+  $('event-rows').querySelectorAll('tr').forEach(tr=>tr.addEventListener('click',()=>{
+    selectEvent(list[Number(tr.dataset.idx)]);
+    $('event-rows').querySelectorAll('tr').forEach(x=>x.classList.remove('sel'));
+    tr.classList.add('sel');
+  }));
+}
+
+/* ---------------- 历史 ---------------- */
+function renderHistory(){
+  $('h-count').textContent=HISTORY.length+' 条';
+  $('history-rows').innerHTML=HISTORY.slice().reverse().map((h,i)=>{
+    const idx=HISTORY.length-1-i;
+    const t=new Date((h.at||0)*1000).toLocaleString();
+    let summary='';
+    if(h.kind==='scenario'){
+      const m=h.metrics||{};
+      summary=`全量 · 全局 ${m.global_events||0} · 本地 ${m.local_events||0} · 任务 ${m.tasks_created||0} · LLM ${m.llm_calls||0}`;
+    } else {
+      summary=`${h.event?.type||'?'} · ${h.layer||''} → ${h.decision||'?'}${h.reason?'（'+h.reason+'）':''}`;
+    }
+    return `<tr data-idx="${idx}"><td class="mono">${esc(t)}</td><td>${esc(h.kind)}</td>
+      <td>${esc(summary)}</td><td class="mono">${esc(h.task_id||'')}</td></tr>`;
+  }).join('');
+  $('history-rows').querySelectorAll('tr').forEach(tr=>tr.addEventListener('click',()=>{
+    selectHistory(HISTORY[Number(tr.dataset.idx)]);
+    $('history-rows').querySelectorAll('tr').forEach(x=>x.classList.remove('sel'));
+    tr.classList.add('sel');
+  }));
+}
+
+/* ---------------- 选择 ---------------- */
+function findTask(id, rep){
+  const src=(rep||REPORT||{});
+  return (src.tasks||[]).find(t=>t.id===id) || (HISTORY.flatMap(h=>h.tasks||[])).find(t=>t.id===id);
+}
+function findTrace(eventId, rep){
+  const src=(rep||REPORT||{});
+  return (src.sad_traces||[]).find(t=>t.event===eventId) ||
+         (HISTORY.flatMap(h=>h.sad_traces||[])).find(t=>t.event===eventId);
+}
+function selectEvent(e){
+  const trace=findTrace(e.id), task=findTask(e.task_id);
+  SELECTED={kind:'event', title:e.type+' · '+e.id, layer:e.layer, decision:e.decision,
+            reason:e.reason, taskId:e.task_id, event:e, trace, task,
+            spec:(task&&task.spec)||(trace&&trace.spec)||{},
+            steps:(trace&&trace.steps)||[], outputs:(task&&task.outputs)||[],
+            sadDag:REPORT.sad_dag, dags:REPORT.dags};
+  DAGMODE = (e.layer==='global' && (trace&&trace.steps.length)) ? 'sad' : 'task';
+  renderTop();
+}
+function selectHistory(h){
+  if(h.kind==='scenario'){
+    SELECTED={kind:'scenario', title:'全量场景', layer:'', decision:h.ok?'ok':'fail',
+              reason:'SAD 粗循环 + Task Manager', taskId:'', spec:{}, steps:[],
+              outputs:[], sadDag:h.sad_dag,
+              dags:h.dags, tasks:h.tasks, traces:h.sad_traces, metrics:h.metrics};
+    DAGMODE='sad';
+  } else {
+    SELECTED={kind:'simulate', title:'历史 · '+(h.event?.type||'simulate'),
+              layer:h.layer, decision:h.decision, reason:h.reason, taskId:h.task_id,
+              event:h.event, spec:h.spec||{}, steps:h.trace_steps||[],
+              outputs:h.outputs||[], sadDag:h.sad_dag, dags:h.dags};
+    if(h.dags) indexReport({dags:h.dags});
+    DAGMODE = h.layer==='global' ? 'sad' : 'task';
+  }
+  renderTop();
+}
+function selectSimulation(r){
+  SELECTED={kind:'simulate', title:'模拟 · '+(r.event?.type||''), layer:r.layer,
+            decision:r.decision, reason:r.reason, taskId:r.task_id, event:r.event,
+            spec:r.spec||{}, steps:r.trace_steps||[], outputs:r.outputs||[],
+            sadDag:r.sad_dag, dags:r.dags};
+  if(r.dags) indexReport({dags:r.dags});
+  DAGMODE = r.layer==='global' ? 'sad' : 'task';
+  renderTop();
+}
+
+/* ---------------- 顶部 DAG ---------------- */
+function stepStateMap(steps){
+  const m={};
+  (steps||[]).forEach(s=>{ m[s.node==='event'?'evt':s.node]=s; });
+  return m;
+}
+function renderTop(){
+  const svg=$('dag-svg'), title=$('dag-title'), sub=$('dag-sub'), btn=$('dag-mode');
+  if(!SELECTED){ title.textContent='未选择事件'; sub.textContent=''; svg.innerHTML=''; return; }
+  title.textContent=SELECTED.title;
+  sub.textContent=[SELECTED.layer,SELECTED.decision,SELECTED.reason,
+                   SELECTED.taskId].filter(Boolean).join(' · ');
+  const canSad = SELECTED.layer==='global' || SELECTED.kind==='scenario';
+  btn.textContent = DAGMODE==='sad' ? '任务 DAG' : 'SAD 循环';
+  btn.disabled = !canSad && DAGMODE==='task' && SELECTED.layer!=='local';
+  if(DAGMODE==='sad'){
+    if(SELECTED.layer==='local'){
+      showText('本地事件：直达 Task Manager（不经 SAD 理解层）');
+      btn.textContent='任务 DAG';
+      return;
+    }
+    renderSad(svg, SELECTED);
+  } else {
+    renderTaskDag(svg, SELECTED);
+  }
+}
+function showText(msg){
+  const svg=$('dag-svg'); svg.removeAttribute('viewBox'); svg.removeAttribute('width');
+  svg.removeAttribute('height');
+  svg.innerHTML=`<text x="16" y="40" fill="var(--dim)" font-size="12">${esc(msg)}</text>`;
+}
+function renderSad(svg, sel){
+  const sad=sel.sadDag;
+  if(!sad || !sad.nodes || !sad.nodes.length){ showText('（无 SAD 定义）'); return; }
+  const nodes=sad.nodes, W0=136,H0=58,GAP=38,PAD=14;
+  const W=PAD*2+nodes.length*W0+(nodes.length-1)*GAP, H=H0+70;
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  svg.setAttribute('width',W); svg.setAttribute('height',H);
+  const st=stepStateMap(sel.steps);
+  let html=`<defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5"
+      markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--edge)"></path></marker></defs>`;
+  const pos={};
+  nodes.forEach((n,i)=>{
+    const x=PAD+i*(W0+GAP), y=10; pos[n.id]=x+W0/2;
+    if(i>0) html+=`<path id="arrow" d="M ${x-GAP+3} ${y+H0/2} L ${x-6} ${y+H0/2}" marker-end="url(#arr)"></path>`;
+    const s=st[n.id]; const state=s?s.state:'idle';
+    const detail=s&&s.detail?s.detail:'';
+    html+=`<g>
+      <rect id="node-box" class="${state}" x="${x}" y="${y}" width="${W0}" height="${H0}" rx="9"></rect>
+      <text id="node-label" x="${x+10}" y="${y+23}">${esc(n.label||n.id)}</text>
+      <text id="node-out" x="${x+10}" y="${y+42}" class="mono">${esc((state==='idle'?'未执行':state)+(detail?' · '+detail.slice(0,22):''))}</text>
+    </g>`;
+  });
+  // 监控 → 理解 的有界回环
+  const mon=pos['monitor'], und=pos['understand'];
+  if(mon && und){
+    const y1=10+H0, y2=y1+26;
+    html+=`<path id="loop-arrow" d="M ${mon} ${y1} C ${mon} ${y2}, ${und} ${y2}, ${und} ${y1+4}"
+        marker-end="url(#arr)"></path>`;
+    html+=`<text id="node-out" x="${(mon+und)/2}" y="${y2+4}" text-anchor="middle">有界重规划</text>`;
+  }
+  svg.innerHTML=html;
+}
+function renderTaskDag(svg, sel){
+  let steps=sel.outputs||[];
+  if(!steps.length && sel.task){
+    const def=DAGDEFS[sel.task.template];
+    steps=(def&&def.steps)||[];
+  }
+  if(!steps.length){
+    showText(sel.taskId ? '任务 '+sel.taskId+' 无执行步骤' :
+             (sel.layer==='dropped'?'事件被丢弃，未创建任务':'未创建任务'));
+    return;
+  }
+  const W0=148,H0=56,GAP=42,PAD=14;
+  const W=PAD*2+steps.length*W0+(steps.length-1)*GAP, H=H0+36;
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  svg.setAttribute('width',W); svg.setAttribute('height',H);
+  let html=`<defs><marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5"
+      markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--edge)"></path></marker></defs>`;
+  steps.forEach((s,i)=>{
+    const x=PAD+i*(W0+GAP), y=10;
+    if(i>0) html+=`<path id="arrow" d="M ${x-GAP+3} ${y+H0/2} L ${x-6} ${y+H0/2}" marker-end="url(#arr2)"></path>`;
+    const out=JSON.stringify(s.output||{});
+    html+=`<g><rect id="node-box" class="done" x="${x}" y="${y}" width="${W0}" height="${H0}" rx="9"></rect>
+      <text id="node-label" x="${x+10}" y="${y+23}">${esc(s.tool||'')}</text>
+      <text id="node-out" x="${x+10}" y="${y+42}" class="mono">${esc(out.slice(0,32))}${out.length>32?'…':''}</text></g>`;
+  });
+  svg.innerHTML=html;
+}
+
+/* ---------------- 输出模拟台 ---------------- */
+function renderOutputs(){
+  const list=$('out-list'), head=$('out-head');
+  if(!SELECTED){ head.textContent='选择一条事件 / 模拟结果查看 Task Agent 工具输出'; list.innerHTML=''; return; }
+  let outs=SELECTED.outputs||[];
+  if(!outs.length && SELECTED.taskId){
+    const t=findTask(SELECTED.taskId); outs=(t&&t.outputs)||[];
+  }
+  head.textContent=(SELECTED.taskId?'任务 '+SELECTED.taskId+' · ':'')+
+      (SELECTED.decision||'')+(SELECTED.reason?' · '+SELECTED.reason:'');
+  if(!outs.length){ list.innerHTML=`<div class="empty">没有工具输出（${esc(SELECTED.reason||'未执行')}）</div>`; return; }
+  list.innerHTML=outs.map((s,i)=>`
+    <div class="out-card">
+      <div class="tool">${i+1}. ${esc(s.tool||'')}</div>
+      <div class="io"><b>args</b> ${esc(JSON.stringify(s.args||{}))}</div>
+      <div class="io"><b>output</b> ${esc(JSON.stringify(s.output||{}))}</div>
+    </div>`).join('');
+}
+
+/* ---------------- 页签/切换 ---------------- */
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active'); $('pane-'+t.dataset.tab).classList.add('active');
+  if(t.dataset.tab==='outputs') renderOutputs();
+}));
+$('dag-mode').addEventListener('click',()=>{
+  DAGMODE = DAGMODE==='sad' ? 'task' : 'sad'; renderTop();
+});
+
+/* ---------------- 模拟台 ---------------- */
+const PRESETS = {
+  '妈妈微信提问（全局）':{source:'notification',type:'notification.message',severity:'warn',
+    payload:{app:'wechat',from:'妈妈',from_is_contact:true,intent:'question',text:'明天来吃饭吗？'}},
+  '电量低+归途（全局）':{source:'battery',type:'battery.low',severity:'warn',
+    payload:{battery:15,charging:false,commuting:true}},
+  '会议+通勤（全局）':{source:'calendar',type:'calendar.upcoming',severity:'warn',
+    payload:{title:'周会',minutes_until:10,travel_minutes:25,free_minutes:5}},
+  '安全告警（全局）':{source:'security',type:'security.alert',severity:'crit',
+    payload:{kind:'unusual_login'}},
+  '健康告警（全局）':{source:'health',type:'health.alert',severity:'crit',
+    payload:{kind:'heart_rate',value:150}},
+  '下载完成（本地）':{source:'download',type:'download.done',severity:'info',
+    payload:{file:'report.pdf'}},
+  '电量低（本地）':{source:'battery',type:'battery.low',severity:'info',
+    payload:{battery:18,charging:false,commuting:false}},
+  '设备休眠（本地）':{source:'device',type:'device.context',severity:'info',
+    payload:{mode:'sleep'}},
+  '传感器噪声':{source:'sensor',type:'sensor.motion',severity:'info',payload:{axis:1}},
+  '未知来源':{source:'legacy',type:'battery.low',severity:'warn',
+    payload:{battery:15,commuting:true}},
+};
+document.querySelectorAll('#presets .chip').forEach(b=>b.addEventListener('click',()=>{
+  const p=PRESETS[b.textContent]; if(!p) return;
+  $('sim-source').value=p.source; $('sim-type').value=p.type; $('sim-sev').value=p.severity;
+  $('sim-payload').value=JSON.stringify(p.payload,null,2); $('sim-id').value='sim-'+Date.now();
+}));
+async function simulate(){
+  let payload;
+  try{ payload=JSON.parse($('sim-payload').value||'{}'); }
+  catch(e){ $('sim-status').textContent='payload 不是合法 JSON'; return; }
+  const ev={id:$('sim-id').value||'sim-'+Date.now(), source:$('sim-source').value,
+            type:$('sim-type').value, severity:$('sim-sev').value,
+            dedup_key:'sim:'+Date.now(), payload};
+  $('sim-status').textContent='触发中…（全局事件会调用 SAD 理解 LLM）';
+  try{
+    const j=await api('action=simulate&event='+encodeURIComponent(JSON.stringify(ev)));
+    const r=j.result;
+    $('sim-status').textContent='✓ '+r.layer+' · '+r.decision+
+        (r.reason?' · '+r.reason:'')+(r.task_id?' · '+r.task_id:'');
+    $('sim-result').innerHTML=`<pre class="mono">${esc(JSON.stringify(r,null,2))}</pre>`;
+    selectSimulation(r); await loadHistory();
+    document.querySelector('.tab[data-tab="outputs"]').click();
+  }catch(e){ $('sim-status').textContent='失败：'+e.message; }
+}
+
+/* ---------------- 按钮 ---------------- */
+$('btn-scenario').addEventListener('click',()=>loadScenario(true));
+$('btn-history').addEventListener('click',loadHistory);
+$('btn-clear').addEventListener('click',async ()=>{
+  if(!confirm('清空 SAD 处理历史？')) return;
+  try{ await fetch('../cgi-bin/sad_cgi?action=clear-history',{cache:'no-store'}); await loadHistory(); }
+  catch(e){ setStatus('清空失败：'+e.message,'err'); }
+});
+$('btn-simulate').addEventListener('click',simulate);
+['f-layer','f-decision','f-source','f-type'].forEach(id=>{
+  $(id).addEventListener('input',renderEvents); $(id).addEventListener('change',renderEvents);
+});
+
+loadScenario(false);
+</script>
+</body>
+</html>

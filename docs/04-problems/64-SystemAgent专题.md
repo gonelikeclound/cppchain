@@ -36,6 +36,81 @@
 
 ## 二、逐轮讨论记录（倒序，最新在前）
 
+### 第 23 轮（2026-11-04 · S10c：mock 个人设备事件）
+
+- **用户选定边界**：个人设备 AIOS。把 mock 事件从云运维切到个人设备：
+  通知 / 电量 / 日历 / 安全 / 健康 / 下载 / 媒体 / 屏幕 / 传感器 / 未知来源。
+- **全局事件（进 SAD，5 条）**：
+  - 妈妈微信提问 → `reply_and_remind`（读消息 → 草稿 → 发送 → 查日历 → 建提醒）；
+  - 电量 15% ∧ 归途 → `power_saving`（省电/亮度/通知）；
+  - 会议 10 分钟后 ∧ 通勤 25 分钟 → `leave_now`（查路线/提醒出发/闹钟）；
+  - 安全 crit（异常登录）→ `security_lockdown`（锁屏/撤销会话/通知）；
+  - 健康 crit（心率 150）→ `health_alert`（核查/联系紧急联系人/告警）。
+- **本地事件（直达 Task Manager，4 条）**：下载完成 → `download_notify`；低电（非归途）→
+  `power_saving`；好友消息 → inbox；媒体播放 → digest。**本地事件零 LLM**。
+- **噪声/过滤**：900 传感器噪声丢弃、50 亮屏限流 45、20 群消息去重 19、5 非法 schema、
+  1 未知来源（强制影子审计 → `miss_rate 0.41%`）。
+- **结果**：985 事件 → 全局 5 / 本地 4 → **7 个任务**（5 次 SAD 理解 LLM，attempts=1）；
+  Task Agent 执行个人设备工具：发消息/日历/提醒/省电/亮度/锁屏/健康告警/下载通知。
+- **WebUI**：预设改为个人设备（妈妈微信提问、电量低+归途、会议+通勤、安全/健康告警、
+  下载完成、设备休眠、传感器噪声、未知来源）；全局走 SAD/LLM，本地直达任务；
+  输出台展示设备动作（音量/亮度/DND/熄屏/发消息/日历/提醒/省电/锁屏）。
+- **实测**：首跑 17.4s（5 次 LLM），缓存 0.07s；微信提问模拟 → 5 个工具输出；无 JS 异常。
+- **测试**：`sad_mock_tests` **12 条**（全局消息/本地下载/设备休眠/噪声/规格校验）；
+  全仓 **1113/1113**；SA E2E 18/18 不变。
+
+### 第 22 轮（2026-11-04 · S10b：分层修正——SAD 粗循环 / Task Manager / Task Agent）
+
+- **用户纠正分层**：SAD 在最上层，是一个**粗略的固定 DAG**，遵循
+  `事件 → 理解 → 任务 → 执行` 的循环；只有**需要全局协调**的事件才给 SAD；SAD 负责理解事件并
+  **产生一个任务**；任务由专门 Task Manager 创建/监控/执行；**每个任务是独立 agent**。
+- **据此重构 `sad_mock`（v2）**：
+  - **SAD 粗 DAG（固定）**：`event → understand(LLM) → task_spec → submit → monitor → close`，
+    monitor 可回到 understand（有界重规划，不重置预算）。
+  - **理解层用真机 LLM**（`sad_understand.hpp`）：输出**任务规格 JSON**（goal/template/scope/
+    domains/priority/budget/acceptance/constraints/dedup_key），模板必须来自预编排清单；
+    校验不过回喂重试 ≤3，仍不过 fail-closed。**没有为任何具体事件/服务写特例**。
+  - **全局/本地分流**：`deploy.failed` / `capacity.alert` / `security.alert(crit)` /
+    `svc.api|gateway down` → SAD；其余（磁盘、deploy.finished、device.context、human.message）
+    → 直达 Task Manager，不经过理解层（本地事件零 LLM）。
+  - **Task Manager**：`submit(spec)` 按 dedup_key 创建/合并任务；任务状态 `completed|failed`；
+    每个任务独立执行一个预编排 runbook（Task Agent 模板），产出工具输出。
+  - **Task Agent**：本版用预编排模板（svc_restart / disk_cleanup / deploy_rollback /
+    deploy_verify / security_incident / capacity_scale / focus_mode）；任务内动态规划留待后续
+    （可复用 S9 的“一句话 → DAG”作为任务层 planner）。
+  - 报告 v2：`events(layer/decision/task_id)` / `tasks` / `sad_traces` / `sad_dag` / `dags`；
+    指标：global/local/sad_analyses/tasks_created/llm_calls/miss_rate。
+- **WebUI 同步**：顶部默认渲染 **SAD 粗循环**（状态来自 trace，含“有界重规划”回环）；
+  右上可切「任务 DAG」；事件列表显示 layer/decision/task；历史包含 SAD 轨迹与任务；
+  模拟台区分全局（走 LLM 理解）与本地（直达任务）；输出台展示 Task Agent 工具输出。
+  `sad_cgi` 增加 10 分钟报告缓存（页面首屏 `cache=1`），避免每次刷新都触发 4 次 LLM。
+- **实测（真机 deepseek-flash）**：全量场景 985 事件 → 全局 4 / 本地 4 → SAD 理解 4 次（LLM 4）
+  → **8 个任务**全部执行；首跑 14.3s，缓存命中 0.07s；全局模拟 2.1s（1 次 LLM），
+  本地设备休眠即时直达 `focus_mode`（5 个工具输出）；无 JS 异常。
+- **测试**：`sad_mock_tests` **11 条**（全局/本地分流、SAD 轨迹、任务输出、任务规格校验、
+  设备直达、噪声丢弃）；全仓 **1112/1112**；SA E2E 18/18 不变。
+
+### 第 21 轮（2026-11-04 · S10 WebUI：顶部 DAG + 四个页签）
+
+- **用户要求**：SAD 页面，上面 DAG 图，下面分四个页签：事件触发列表 / SAD 处理历史 /
+  事件模拟台 / 输出模拟台（展示 SAD 调用工具的输出，如调节音量、屏幕等）。
+- **实现**：
+  - `web/sad/index.html`（自包含）：顶部渲染**预编排 DAG 链**（step 工具 + args/output）；
+    底部四页签——① 事件触发列表（984 条，decision/source/type 筛选，点击选中）② 处理历史
+    （scenario/simulate 记录，点击回看 DAG/outputs）③ 事件模拟台（预设 + 表单，手动触发单事件）
+    ④ 输出模拟台（tool / args / output 卡片）。
+  - `examples/sad_cgi`：`action=scenario|simulate|history|clear-history`；事件 JSON 经临时文件
+    传给子进程（不拼 shell）；历史原子写、上限 200 条；页面首屏 `record=0` 不重复追加历史。
+  - `sad_mock` 扩展：DAG step 变为 `{tool,args,output}`；报告新增 `dags` 与 `events`
+    （每条事件的最终处置）；新增 `simulate_one` + `--simulate-event`；新增设备 DAG
+    `focus_mode`（set_volume / set_brightness / enable_dnd / screen_off / send_notification），
+    由 `device.context{mode:sleep}` 触发。
+  - `run-webui.sh` 增加 `sad_cgi` 构建与软链；SA 页面加「SAD 编排台」入口。
+- **实测**：`/sad/` 首屏 984 事件、事件表展示 300 行、筛选 wake=5；「设备休眠」模拟 →
+  `focus_mode` 5 个工具输出（音量 2 / 亮度 30 / DND / 熄屏 / 通知）；历史正常追加；
+  无 JS 异常；生产 8000 端口 page/CGI 200。
+- **测试**：`sad_mock_tests` **9 条**（新增 simulate 设备/噪声/报告处置）；全仓 **1110/1110**。
+
 ### 第 20 轮（2026-11-04 · S10a 落地：SAD 离线 mock 全过）
 
 - **用户选择**：先做 mock，不接真实系统。
@@ -591,6 +666,9 @@ web/sa/sample-tasklog.json           # 内置样例（提交版）；sa_tasklog.
 | **S9d** | **长文下载→分片读取→摘要→保存**：新增 `download_url`（全文落盘、只回路径/大小、UTF-8/HTML 处理、运行目录约束）；synthesis 自动分片 map-reduce（20k×12 片，分片笔记+汇总）；上游失败**禁止生成**（不调用模型）；`args.save_to` 保存摘要并记 summary_path；Planner 只加通用规则（长文下载、下载后勿重复 file_read、分卷下全、保存填 save_to）；UI 显示分片/摘要/已保存；同一句话实测 5 节点、12 片、1344 字、保存成功；全仓 1101/1101、E2E 18/18 | ✅ **2026-11-04 全过** |
 | **S10** | **常驻 SAD 设计骨架**：稳态预编排 DAG + L0–L4 门流水线（去重/合并/限流/分级/准入/咨询 gate）+ DAG 注册表与路由 + 状态/journal/Reaper + 唤醒账 + 未匹配/高危受控升级；MVP S10a–S10e（详见 §5.6）；事件分类/过滤规则/需求/验收指标/升级契约见 §5.7 | 📝 **设计（2026-11-04）** |
 | **S10a** | **SAD 离线 mock**：984 事件 → L0-a/L0-b/L1a/L1b → 5 个预编排 DAG；白名单/精确 bypass/打扰预算/影子审计；11 条验收 + `sad_mock_tests` 6 条；全仓 **1107/1107**（详见 §5.7.7、第 20 轮） | ✅ **2026-11-04 全过** |
+| **S10a-UI** | **SAD 编排台 WebUI**：`web/sad/index.html` 顶部预编排 DAG 链 + 四页签（事件触发列表 / 处理历史 / 事件模拟台 / 输出模拟台）；`sad_cgi` scenario/simulate/history；`focus_mode` 设备 DAG（音量/亮度/DND/熄屏/通知）；`sad_mock_tests` **9 条**、全仓 **1110/1110**（详见第 21 轮） | ✅ **2026-11-04 全过** |
+| **S10b** | **分层修正：SAD 粗循环 / Task Manager / Task Agent**：SAD 固定粗 DAG（事件→理解[LLM]→任务规格→提交→监控）；只有全局事件进 SAD，本地直达 Task Manager；理解层真机 LLM 输出受校验的任务规格；Task Manager 按 dedup_key 创建/合并并执行独立任务；页面顶部 SAD 循环（可切任务 DAG）；实测 985 事件→全局 4/本地 4→8 任务/4 LLM，`sad_mock_tests` 11 条、全仓 **1112/1112**（详见第 22 轮） | ✅ **2026-11-04 全过** |
+| **S10c** | **mock 个人设备事件**：通知/电量/日历/安全/健康/下载/媒体/传感器；全局 5（微信提问→reply_and_remind、低电+归途→power_saving、会议+通勤→leave_now、安全/健康→lockdown/health_alert）进 SAD，本地 4 直达任务（零 LLM）；7 个 Task Agent 模板；页面预设改个人设备；实测 985 事件→全局 5/本地 4→7 任务/5 LLM，`sad_mock_tests` 12 条、全仓 **1113/1113**（详见第 23 轮） | ✅ **2026-11-04 全过** |
 | S10+ | 常驻 SAD 落地（S10a–S10e，见 §5.6）；事件漏斗 / L1 任务表 / Reaper 善后 / 落地验收（C1–C12 抽角 C2/C3/C4/C6/C7/C8）；SA-CGI v2 单场景触发 | ⏳ 下一步 |
 
 **落地前已拍板**：领域初集 = **电话域 + 消息域**（A 组）；demo 需要 **mock 电话**；

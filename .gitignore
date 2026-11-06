@@ -22,6 +22,11 @@ web/sa/run.log
 web/sa/sa_progress.jsonl
 # S8 单运行锁（sa_cgi flock；运行态非源码）
 web/sa/.run.lock
+# S10 SAD 编排台运行产物（sad_cgi；运行态非源码）
+web/sad/sad_history.json
+web/sad/sad_report.json
+web/sad/run.log
+web/sad/.sim_event.json
 # run-webui.sh 启动时创建的 symlink（指向 build 产物，运行态不入库）
 web/cgi-bin/
 web/wfr_bin

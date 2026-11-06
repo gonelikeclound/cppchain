@@ -51,6 +51,8 @@ set(SA_EXAMPLE_TARGETS sa_demo)
 set(SA_CGI_EXAMPLE_TARGETS sa_cgi)
 # sad_mock（problems/64 S10a）：常驻 SAD 的离线 mock（事件漏斗/规则/预编排 DAG，纯离线）
 set(SAD_MOCK_EXAMPLE_TARGETS sad_mock)
+# sad_cgi（problems/64 S10）：SAD 编排台 CGI（触发 scenario/单事件模拟/历史，纯 spawn）
+set(SAD_CGI_EXAMPLE_TARGETS sad_cgi)
 # problems/02 S6 真机评测：file_context 路由臂 vs 模型自选工具臂（需 .env LLM 端点）
 set(FILE_ROUTE_LIVE_EXAMPLE_TARGETS file_route_live)
 # arch 26 project 自管理（第一刀）demo：目录化多文件 + 多任务独立对话 + 项目级注入（纯离线）
@@ -87,6 +89,7 @@ list(APPEND EXAMPLE_TARGETS ${CONFIG_DECL_EXAMPLE_TARGETS})  # config_decl：P1.
 list(APPEND EXAMPLE_TARGETS ${SA_EXAMPLE_TARGETS})  # sa_demo：SystemAgent 骨架 S1（离线）
 list(APPEND EXAMPLE_TARGETS ${SA_CGI_EXAMPLE_TARGETS})  # sa_cgi：SA 运行 CGI（浏览器触发）
 list(APPEND EXAMPLE_TARGETS ${SAD_MOCK_EXAMPLE_TARGETS})  # sad_mock：S10a 离线 mock（事件漏斗/路由）
+list(APPEND EXAMPLE_TARGETS ${SAD_CGI_EXAMPLE_TARGETS})   # sad_cgi：SAD 编排台 CGI
 list(APPEND EXAMPLE_TARGETS ${PROJECT_EXAMPLE_TARGETS})  # project_run：arch 26 project 结构（离线）
 list(APPEND EXAMPLE_TARGETS ${PROJECT_DRIVE_EXAMPLE_TARGETS})  # project_drive：arch 27 调度循环（离线）
 list(APPEND EXAMPLE_TARGETS ${LONGDOC_EXAMPLE_TARGETS})  # longdoc：arch 28 超长内容通用方法（离线）
@@ -170,7 +173,14 @@ foreach(t IN LISTS EXAMPLE_TARGETS)
       target_compile_definitions(${t} PRIVATE SA_PLAN_LIVE=1)
     endif()
   elseif(t IN_LIST SAD_MOCK_EXAMPLE_TARGETS)
-    # sad_mock：纯离线门/路由 mock，只碰 std + nlohmann
+    # sad_mock：门/路由/任务管理 + SAD 理解层（真机 LLM；HTTP 关闭时只保留离线验收）
+    target_include_directories(${t} SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+    if(CPPCHAIN_BUILD_HTTP)
+      target_link_libraries(${t} PRIVATE cppchain_http_curl cppchain_model)
+      target_compile_definitions(${t} PRIVATE SAD_LLM_LIVE=1)
+    endif()
+  elseif(t IN_LIST SAD_CGI_EXAMPLE_TARGETS)
+    # sad_cgi：纯 spawn CGI，只碰 std + nlohmann
     target_include_directories(${t} SYSTEM BEFORE PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
   elseif(t IN_LIST SA_CGI_EXAMPLE_TARGETS)
     # sa_cgi：纯 spawn CGI，不链 cppchain（只碰 std + nlohmann）
