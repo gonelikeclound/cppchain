@@ -7,4 +7,6 @@
 
 | 编号 | 文档 | 源材料 | 状态 |
 |------|------|--------|------|
-| 01 | [01-SystemAgent-让984条事件只唤醒系统5次.md](01-SystemAgent-让984条事件只唤醒系统5次.md) | SystemAgent 专题（problems/64，S1–S10c） | 🟡 初稿待发布（内容全部来自验收过的实测） |
+| 01 | [01-SystemAgent-从一问一答到画图执行.md](01-SystemAgent-从一问一答到画图执行.md) | SystemAgent 专题（problems/64）：概念（事件驱动状态机）、电话 demo、真工具实测 | 🟡 初稿待发布（已按对外语气改写，示例截图待补） |
+
+> 已归档的旧稿（S1–S10c 全流程长文）见 [_archive/](_archive/)。
